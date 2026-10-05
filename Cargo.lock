@@ -454,7 +454,7 @@ dependencies = [
 name = "game"
 version = "0.1.0"
 dependencies = [
- "pollster",
+ "glam",
  "render",
  "sim",
  "winit",
@@ -1414,6 +1414,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "pollster",
  "sim",
  "wgpu",
 ]

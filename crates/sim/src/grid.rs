@@ -10,7 +10,11 @@ pub struct Dims {
 
 impl Dims {
     pub const fn cube(n: usize) -> Self {
-        Self { nx: n, ny: n, nz: n }
+        Self {
+            nx: n,
+            ny: n,
+            nz: n,
+        }
     }
 
     /// Nombre total de cellules.
@@ -38,7 +42,10 @@ pub struct Field3 {
 
 impl Field3 {
     pub fn filled(dims: Dims, value: f32) -> Self {
-        Self { dims, data: vec![value; dims.len()] }
+        Self {
+            dims,
+            data: vec![value; dims.len()],
+        }
     }
 
     #[inline]
@@ -59,7 +66,11 @@ mod tests {
 
     #[test]
     fn index_is_contiguous_in_x() {
-        let d = Dims { nx: 4, ny: 3, nz: 2 };
+        let d = Dims {
+            nx: 4,
+            ny: 3,
+            nz: 2,
+        };
         assert_eq!(d.index(0, 0, 0), 0);
         assert_eq!(d.index(1, 0, 0), 1);
         assert_eq!(d.index(0, 1, 0), 4);

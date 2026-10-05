@@ -25,6 +25,29 @@ Euler explicite, laplacien 7 points en 3D, dx = 1 : il faut D·dt ≤ 1/6 pour c
 
 L'état trivial (u, v) = (1, 0) existe toujours. Des états non triviaux existent quand (F + k)² < F / 4, c'est-à-dire k < √F / 2 − F. Cette courbe est une ligne de bifurcation selle-nœud : les motifs intéressants vivent près d'elle.
 
+Remarque : les paramètres de référence (F = 0,0367, k = 0,0649) sont **au-delà** de cette ligne ((F + k)² ≈ 0,0103 > F/4 ≈ 0,0092). Aucun état homogène de coexistence n'existe, et pourtant les cellules survivent : les motifs ne sont pas des perturbations d'un état uniforme, ce sont des structures localisées qui se maintiennent seules.
+
+## Taille critique des germes
+
+Un germe cubique (u, v) = (0,5, 0,25) doit être assez gros pour prendre (F = 0,0367, k = 0,0649, 6000 pas, `reset_with_seeds`) :
+
+| Germes | Taille | Résultat |
+|---|---|---|
+| 4 dans 24³ | 3³, 4³ | extinction avant 1000 pas |
+| 4 dans 24³ | 5³ | croissance, ~22 % de cellules avec v > 0,18 |
+| 8 dans 48³ | 3³, 4³ | extinction |
+| 8 dans 48³ | 5³ | croissance, ~22 % |
+
+C'est une nucléation : un petit germe perd plus de V par diffusion à sa surface qu'il n'en produit en volume. Pour le jeu, une semence trop petite meurt ; c'est un seuil qu'on peut rendre lisible.
+
+Dans un bassin à parois étanches (`Boundary::NoFlux`, 40 × h × 40), tout prend, même avec des germes réduits à la hauteur du bassin : la paroi renvoie le V au lieu de le laisser fuir.
+
+| Bassin | Germes | Cellules actives après 1000 → 6000 pas |
+|---|---|---|
+| 40×4×40 | 8 de 5³ (réduits à 4 en hauteur) | 21 % → 23 % |
+| 40×6×40 | 8 de 5³ | 22 % → 23 % |
+| 40×8×40 | 8 de 5³ | 20 % → 24 % |
+
 ## Régimes observés (grille 48³, conditions périodiques, 8 germes initiaux, 6000 pas)
 
 Mesure : pourcentage de cellules avec v > 0,18, relevé tous les 1000 pas.

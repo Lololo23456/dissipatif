@@ -5,7 +5,9 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("sweep") => {
-            eprintln!("La sous-commande `sweep` n'est pas encore écrite. Lance la skill /balayage-parametres pour la construire.");
+            eprintln!(
+                "La sous-commande `sweep` n'est pas encore écrite. Lance la skill /balayage-parametres pour la construire."
+            );
             std::process::exit(1);
         }
         _ => {
