@@ -1,4 +1,4 @@
-//! Grille 3D régulière stockée dans un tableau contigu (x varie le plus vite).
+//! Grilles régulières 2D et 3D stockées dans un tableau contigu (x varie le plus vite).
 
 /// Dimensions d'une grille 3D.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +57,47 @@ impl Field3 {
     pub fn set(&mut self, x: usize, y: usize, z: usize, value: f32) {
         let i = self.dims.index(x, y, z);
         self.data[i] = value;
+    }
+}
+
+/// Champ scalaire sur une grille horizontale 2D (x, z) : une hauteur de sol, une hauteur d'eau…
+/// Même convention que `Field3` : x varie le plus vite.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field2 {
+    pub nx: usize,
+    pub nz: usize,
+    pub data: Vec<f32>,
+}
+
+impl Field2 {
+    pub fn filled(nx: usize, nz: usize, value: f32) -> Self {
+        Self {
+            nx,
+            nz,
+            data: vec![value; nx * nz],
+        }
+    }
+
+    /// Indice linéaire de la cellule (x, z).
+    #[inline]
+    pub const fn index(&self, x: usize, z: usize) -> usize {
+        x + self.nx * z
+    }
+
+    #[inline]
+    pub fn get(&self, x: usize, z: usize) -> f32 {
+        self.data[self.index(x, z)]
+    }
+
+    #[inline]
+    pub fn set(&mut self, x: usize, z: usize, value: f32) {
+        let i = self.index(x, z);
+        self.data[i] = value;
+    }
+
+    /// Somme de toutes les valeurs, accumulée en f64 pour limiter l'erreur d'arrondi.
+    pub fn sum(&self) -> f64 {
+        self.data.iter().map(|&v| v as f64).sum()
     }
 }
 

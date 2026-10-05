@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sim", "crates/render", "crates/game", "crates/lab"]
+members = ["crates/sim", "crates/world", "crates/render", "crates/game", "crates/lab"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
 
 sim = { path = "crates/sim" }
+world = { path = "crates/world" }
 render = { path = "crates/render" }
 
 [profile.dev.package."*"]

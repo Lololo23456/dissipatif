@@ -122,6 +122,23 @@ impl MeshData {
         self.indices.extend(quad.map(|i| base + i));
     }
 
+    /// Appends a quad with arbitrary corners, given counter-clockwise seen from the side the
+    /// normal points to. For surfaces that are not whole voxel faces, such as water at its
+    /// exact height. `cell` is packed with `pack_cell` and selects the colour texel.
+    pub fn push_quad(&mut self, corners: [[f32; 3]; 4], normal: [f32; 3], cell: [u32; 3]) {
+        let base = self.vertices.len() as u32;
+        let packed = pack_cell(cell);
+        for position in corners {
+            self.vertices.push(Vertex {
+                position,
+                normal,
+                cell: packed,
+                ao: 1.0,
+            });
+        }
+        self.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+    }
+
     /// A single isolated cube (no occlusion).
     pub fn cube(cell: [u32; 3]) -> Self {
         let mut mesh = Self::default();

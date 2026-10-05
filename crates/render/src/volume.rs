@@ -22,7 +22,7 @@ use crate::palette::{Palette, STOP_COUNT};
 ///     origin: vec4<f32>,                // offset 0: world position of cell (0,0,0), w unused
 ///     base_stops: array<vec4<f32>, 5>,  // offset 16, size 80 (rgb + unused w)
 ///     life_stops: array<vec4<f32>, 5>,  // offset 96, size 80
-///     base_range: vec4<f32>,            // offset 176: min, max, unused, unused
+///     base_range: vec4<f32>,            // offset 176: min, max, materials (1 = yes), unused
 ///     life_range: vec4<f32>,            // offset 192: fade start, fade end, colour min, colour max
 /// }                                     // size 208
 /// ```
@@ -55,7 +55,14 @@ pub struct VolumeStyle {
     pub palette: Palette,
     /// Base values mapped to the first and last colours. Values outside get the end colours.
     pub value_range: (f32, f32),
+    /// The base field holds materials instead of a continuous value: `id + variation`, the
+    /// integer part picks the colour in the material table (`palette::materials`), the
+    /// fractional part in [0, 1) slightly brightens or darkens it. `palette` and
+    /// `value_range` are then unused.
+    pub materials: bool,
     pub life: LifeStyle,
+    /// Drawn after opaque volumes, blended over them (water). Fixed when the volume is added.
+    pub transparent: bool,
 }
 
 impl VolumeUniform {
@@ -72,7 +79,12 @@ impl VolumeUniform {
             origin: [x, y, z, 0.0],
             base_stops: stops(&style.palette),
             life_stops: stops(&style.life.palette),
-            base_range: [base_min, base_max, 0.0, 0.0],
+            base_range: [
+                base_min,
+                base_max,
+                if style.materials { 1.0 } else { 0.0 },
+                0.0,
+            ],
             life_range: [fade_start, fade_end, life_min, life_max],
         }
     }
@@ -87,6 +99,7 @@ pub(crate) struct VolumeFields {
 
 /// GPU side of a volume.
 pub(crate) struct Volume {
+    pub(crate) transparent: bool,
     uniform_buffer: wgpu::Buffer,
     /// `None` until the base field is uploaded.
     pub(crate) fields: Option<VolumeFields>,
@@ -102,6 +115,7 @@ impl Volume {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         Self {
+            transparent: style.transparent,
             uniform_buffer,
             fields: None,
             mesh: None,

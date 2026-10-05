@@ -13,6 +13,7 @@ Les décisions passées et les choix encore provisoires sont dans `docs/decision
 
 ## Organisation du workspace
 - `crates/sim` : simulation pure, sans GPU ni fenêtre. Grilles, règles de réaction, intégrateurs, métriques. Référence de vérité.
+- `crates/world` : génération procédurale du monde, pure et déterministe : relief, climat, biomes, lacs et rivières, végétation. Sortie : voxels de matériaux et niveaux d'eau.
 - `crates/render` : tout ce qui touche wgpu : pipelines, buffers, shaders (`crates/render/shaders/*.wgsl`), maillage, particules.
 - `crates/game` : binaire jouable. winit, entrées, caméra, logique de jeu, liaison sim ↔ rendu.
 - `crates/lab` : binaire sans affichage pour les expériences : balayages de paramètres, mesures, export CSV.
@@ -21,7 +22,8 @@ Les décisions passées et les choix encore provisoires sont dans `docs/decision
 ## Commandes
 - Vérifier : `cargo check --workspace`
 - Tests : `cargo test --workspace` ; un seul crate : `cargo test -p sim`
-- Lancer le jeu : `cargo run --release -p game`
+- Lancer le jeu : `cargo run --release -p game` (`-- --seed N` pour un autre monde)
+- Capture sans fenêtre : `cargo run --release -p game -- --capture vue.png [--seed N] [--at X,Z] [--zoom F] [--yaw DEG] [--pitch DEG] [--size LxH]`. À utiliser pour vérifier un rendu : l'image se lit avec l'outil Read.
 - Expériences : `cargo run --release -p lab -- <sous-commande>`
 - Lint : `cargo clippy --workspace --all-targets -- -D warnings`
 - Format : `cargo fmt --all` (fait automatiquement par un hook après chaque modification)

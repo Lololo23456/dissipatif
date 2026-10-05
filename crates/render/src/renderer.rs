@@ -7,7 +7,8 @@ use wgpu::util::DeviceExt;
 use crate::camera::{CameraUniform, OrbitCamera};
 use crate::gpu::Gpu;
 use crate::mesh::{MeshData, Vertex};
-use crate::palette::{self, AtmosphereUniform};
+use crate::palette::{self, AtmosphereUniform, MaterialsUniform};
+use crate::particles::{CubeVertex, ParticleInstance, unit_cube};
 use crate::volume::{Volume, VolumeStyle};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -19,6 +20,14 @@ pub struct VolumeId(usize);
 pub struct Renderer {
     gpu: Gpu,
     pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
+    particle_pipeline: wgpu::RenderPipeline,
+    /// The cube every particle is a copy of.
+    cube_buffer: wgpu::Buffer,
+    cube_vertex_count: u32,
+    /// One `ParticleInstance` per particle, regrown when there are more particles than room.
+    particle_buffer: wgpu::Buffer,
+    particle_count: u32,
     camera_buffer: wgpu::Buffer,
     /// Group 0: camera and atmosphere.
     frame_bind_group: wgpu::BindGroup,
@@ -50,12 +59,17 @@ impl Renderer {
             contents: bytemuck::bytes_of(&AtmosphereUniform::new(&atmosphere)),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let materials_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("materials"),
+            contents: bytemuck::bytes_of(&MaterialsUniform::new(&palette::materials())),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let [r, g, b] = atmosphere.fog_color.map(f64::from);
         let clear_color = wgpu::Color { r, g, b, a: 1.0 };
 
         // Bind group layout: the "signature" of a group of resources, i.e. what the shader
-        // expects at each `@binding` of a `@group`. Group 0: two uniform buffers, the camera
-        // (binding 0) and the atmosphere (binding 1).
+        // expects at each `@binding` of a `@group`. Group 0: three uniform buffers, the camera
+        // (binding 0), the atmosphere (binding 1) and the material colours (binding 2).
         let uniform_entry = |binding, visibility| wgpu::BindGroupLayoutEntry {
             binding,
             visibility,
@@ -72,6 +86,7 @@ impl Renderer {
                 // The fragment shader also reads the eye position, for the haze.
                 uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 uniform_entry(1, wgpu::ShaderStages::FRAGMENT),
+                uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         // Bind group: the actual resources plugged into that signature.
@@ -86,6 +101,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: atmosphere_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: materials_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -122,45 +141,35 @@ impl Renderer {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/voxel.wgsl"));
 
         // Render pipeline: the whole fixed configuration of a draw, compiled once.
-        // Shaders, vertex format, triangle assembly, depth test, output format.
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("voxel pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(Vertex::layout())],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                // Faces seen from behind are never visible on closed voxels: skip them.
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            // Depth test: each pixel keeps the closest surface, whatever the drawing order.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
+        // Opaque volumes write their depth; transparent ones (water) are drawn afterwards,
+        // blended over what is behind them, and do not write depth so that what lies beneath
+        // the surface stays visible through it.
+        let format = gpu.surface_format();
+        let pipeline =
+            create_voxel_pipeline(device, &pipeline_layout, &shader, format, VoxelPass::Opaque);
+        let transparent_pipeline = create_voxel_pipeline(
+            device,
+            &pipeline_layout,
+            &shader,
+            format,
+            VoxelPass::Transparent,
+        );
+
+        // Particles: only group 0 (camera, atmosphere), two vertex buffers (the cube, per
+        // vertex; the instances, per cube).
+        let particle_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("particle layout"),
+            bind_group_layouts: &[Some(&frame_layout)],
+            immediate_size: 0,
         });
+        let particle_pipeline = create_particle_pipeline(device, &particle_layout, &shader, format);
+        let cube = unit_cube();
+        let cube_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("particle cube"),
+            contents: bytemuck::cast_slice(&cube),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let particle_buffer = create_particle_buffer(device, 1024);
 
         let (width, height) = gpu.size();
         let depth_view = create_depth_view(device, width, height);
@@ -168,6 +177,12 @@ impl Renderer {
         Self {
             gpu,
             pipeline,
+            transparent_pipeline,
+            particle_pipeline,
+            cube_buffer,
+            cube_vertex_count: cube.len() as u32,
+            particle_buffer,
+            particle_count: 0,
             camera_buffer,
             frame_bind_group,
             clear_color,
@@ -215,17 +230,39 @@ impl Renderer {
         self.volumes[id.0].upload_life(self.gpu.queue(), field);
     }
 
+    /// Replaces the particles drawn every frame.
+    pub fn upload_particles(&mut self, particles: &[ParticleInstance]) {
+        let needed = std::mem::size_of_val(particles) as u64;
+        if needed > self.particle_buffer.size() {
+            // Room for 50 % more, so a growing cloud does not reallocate every frame.
+            self.particle_buffer =
+                create_particle_buffer(self.gpu.device(), particles.len() * 3 / 2);
+        }
+        self.gpu
+            .queue()
+            .write_buffer(&self.particle_buffer, 0, bytemuck::cast_slice(particles));
+        self.particle_count = particles.len() as u32;
+    }
+
+    /// The last frame drawn offscreen, as RGBA bytes (see `Gpu::read_pixels`), with its size.
+    /// `None` when drawing in a window.
+    pub fn capture(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let (width, height) = self.gpu.size();
+        self.gpu.read_pixels().map(|pixels| (width, height, pixels))
+    }
+
     /// Width / height of the window images.
     pub fn aspect(&self) -> f32 {
         let (width, height) = self.gpu.size();
         width as f32 / height as f32
     }
 
-    pub fn render(&mut self, camera: &OrbitCamera) {
+    /// Draws a frame. `time` (seconds) drives animations such as water ripples.
+    pub fn render(&mut self, camera: &OrbitCamera, time: f32) {
         let Some(frame) = self.gpu.acquire_frame() else {
             return;
         };
-        let uniform = CameraUniform::new(camera, self.aspect());
+        let uniform = CameraUniform::new(camera, self.aspect(), time);
         self.gpu
             .queue()
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -266,22 +303,151 @@ impl Renderer {
                 multiview_mask: None,
             });
             // Group 0 is set once; only group 1 and the buffers change between volumes.
-            pass.set_pipeline(&self.pipeline);
+            // Opaque first, transparent last: blending needs what is behind to be drawn.
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            for volume in &self.volumes {
-                if let (Some(mesh), Some(fields)) = (&volume.mesh, &volume.fields)
-                    && mesh.index_count > 0
-                {
-                    pass.set_bind_group(1, &fields.bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            for (pipeline, transparent) in
+                [(&self.pipeline, false), (&self.transparent_pipeline, true)]
+            {
+                // Particles are opaque: drawn after the opaque volumes, before the water, so
+                // those under the surface show through it.
+                if transparent && self.particle_count > 0 {
+                    pass.set_pipeline(&self.particle_pipeline);
+                    pass.set_vertex_buffer(0, self.cube_buffer.slice(..));
+                    pass.set_vertex_buffer(1, self.particle_buffer.slice(..));
+                    pass.draw(0..self.cube_vertex_count, 0..self.particle_count);
+                }
+                pass.set_pipeline(pipeline);
+                for volume in self.volumes.iter().filter(|v| v.transparent == transparent) {
+                    if let (Some(mesh), Some(fields)) = (&volume.mesh, &volume.fields)
+                        && mesh.index_count > 0
+                    {
+                        pass.set_bind_group(1, &fields.bind_group, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        pass.set_index_buffer(
+                            mesh.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    }
                 }
             }
         }
         self.gpu.queue().submit([encoder.finish()]);
         self.gpu.present(frame);
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoxelPass {
+    Opaque,
+    Transparent,
+}
+
+fn create_voxel_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    pass: VoxelPass,
+) -> wgpu::RenderPipeline {
+    let transparent = pass == VoxelPass::Transparent;
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(if transparent {
+            "transparent voxel pipeline"
+        } else {
+            "voxel pipeline"
+        }),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(Vertex::layout())],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            // Faces seen from behind are never visible on closed volumes: skip them.
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        // Depth test: each pixel keeps the closest surface, whatever the drawing order.
+        // Transparent surfaces are still hidden behind opaque ones, but write no depth.
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(!transparent),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(if transparent { "fs_water" } else { "fs_main" }),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // Alpha blending: result = colour · alpha + what was there · (1 − alpha).
+                blend: transparent.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_particle_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("particle pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_particle"),
+            compilation_options: Default::default(),
+            buffers: &[Some(CubeVertex::layout()), Some(ParticleInstance::layout())],
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_particle"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_particle_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("particles"),
+        size: (capacity.max(1) * std::mem::size_of::<ParticleInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// Depth buffer: one depth value per pixel, same size as the window images.

@@ -77,6 +77,7 @@ impl OrbitCamera {
 /// struct Camera {
 ///     view_proj: mat4x4<f32>,  // offset 0, size 64
 ///     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
+///     time: vec4<f32>,         // offset 80: x = seconds since start, yzw unused
 /// }
 /// ```
 #[repr(C)]
@@ -86,13 +87,16 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     /// Eye position in xyz, distance to the target in w (used by the haze).
     pub eye: [f32; 4],
+    /// x: seconds since start, for animations (water ripples). yzw unused.
+    pub time: [f32; 4],
 }
 
 impl CameraUniform {
-    pub fn new(camera: &OrbitCamera, aspect: f32) -> Self {
+    pub fn new(camera: &OrbitCamera, aspect: f32, time: f32) -> Self {
         Self {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
             eye: camera.eye().extend(camera.distance).to_array(),
+            time: [time, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -105,8 +109,9 @@ mod tests {
     #[test]
     fn uniform_layout_matches_wgsl() {
         // Uniform structs must be a multiple of 16 bytes.
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 80);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 96);
         assert_eq!(std::mem::offset_of!(CameraUniform, eye), 64);
+        assert_eq!(std::mem::offset_of!(CameraUniform, time), 80);
     }
 
     #[test]

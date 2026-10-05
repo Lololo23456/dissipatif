@@ -1,6 +1,10 @@
-// Voxel faces: transforms vertices with the camera, colours each face from its cell (inert base
-// colour blended with the living colour), then lights it: warm sun, cool sky light in the
-// shadows, ambient occlusion in the creases, haze with distance.
+// Voxel volumes. Two fragment entry points share the same vertex stage and lighting:
+// - `fs_main`, opaque (ground): inert base colour blended with the "life" overlay (e.g. a wet
+//   film), ambient occlusion;
+// - `fs_water`, transparent: colour by depth, foam where the current is fast, animated ripples,
+//   sun glint, opacity growing with depth.
+// Particles (`vs_particle`, `fs_particle`) are small instanced cubes using only group 0.
+// Lighting: warm sun, cool sky light in the shadows, haze with distance.
 
 // ---------- Group 0: data shared by the whole frame ----------
 
@@ -8,6 +12,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,  // offset 0, size 64
     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
+    time: vec4<f32>,         // offset 80: x = seconds since start, yzw unused
 }
 
 // Rust side: `AtmosphereUniform` in src/palette.rs. `w` unused unless stated.
@@ -20,17 +25,23 @@ struct Atmosphere {
     fog: vec4<f32>,            // offset 80: start, end, max, unused
 }
 
+// Rust side: `MaterialsUniform` in src/palette.rs. Indexed by material id.
+struct Materials {
+    colors: array<vec4<f32>, 16>,  // offset 0, size 256 (rgb + unused w)
+}
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> atmosphere: Atmosphere;
+@group(0) @binding(2) var<uniform> materials: Materials;
 
-// ---------- Group 1: the volume being drawn (terrain, parcel…) ----------
+// ---------- Group 1: the volume being drawn (terrain, water…) ----------
 
 // Rust side: `VolumeUniform` in src/volume.rs.
 struct Volume {
     origin: vec4<f32>,                // offset 0: world position of cell (0,0,0), w unused
     base_stops: array<vec4<f32>, 5>,  // offset 16, size 80 (rgb + unused w)
     life_stops: array<vec4<f32>, 5>,  // offset 96, size 80
-    base_range: vec4<f32>,            // offset 176: min, max, unused, unused
+    base_range: vec4<f32>,            // offset 176: min, max, materials (1 = yes), unused
     life_range: vec4<f32>,            // offset 192: fade start, fade end, colour min, colour max
 }
 
@@ -73,7 +84,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// ---------- Fragment stage ----------
+// ---------- Shared helpers ----------
 
 fn unpack_cell(packed: u32) -> vec3<u32> {
     return vec3<u32>(packed & 1023u, (packed >> 10u) & 1023u, packed >> 20u);
@@ -101,33 +112,123 @@ fn life_palette(t: f32) -> vec3<f32> {
 // Light left in the most occluded corner: never pitch black, shadows stay coloured.
 const AO_FLOOR: f32 = 0.35;
 
+// Sun (Lambert: light ∝ cos of the angle to the sun) plus hemispheric ambient (faces looking
+// up see the cool sky, faces looking down the warm ground), the ambient dimmed by occlusion.
+fn shade(albedo: vec3<f32>, n: vec3<f32>, ao: f32) -> vec3<f32> {
+    let sun = atmosphere.sun_color.rgb * max(dot(n, atmosphere.sun_direction.xyz), 0.0);
+    let ambient = mix(atmosphere.ground_color.rgb, atmosphere.sky_color.rgb, n.y * 0.5 + 0.5);
+    return albedo * (sun + ambient) * mix(AO_FLOOR, 1.0, ao);
+}
+
+// Haze: grows with the distance beyond the camera target, so the far side of the scene fades
+// into the background whatever the zoom.
+fn haze(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
+    let depth = distance(world_position, camera.eye.xyz) - camera.eye.w;
+    let fog = atmosphere.fog;
+    let amount = clamp((depth - fog.x) / (fog.y - fog.x), 0.0, 1.0) * fog.z;
+    return mix(color, atmosphere.fog_color.rgb, amount);
+}
+
+// ---------- Opaque volumes ----------
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Albedo: what the surface is made of. The inert colour, covered by the living colour
-    // as life grows: tinted at the edge of a living patch, fully living at its core.
+    // Albedo: the inert colour, covered by the overlay colour as the overlay value grows.
     let cell = unpack_cell(in.cell);
     let base_value = textureLoad(base_field, cell, 0).r;
-    let base = base_palette(unit(base_value, volume.base_range.x, volume.base_range.y));
+    var base: vec3<f32>;
+    if (volume.base_range.z > 0.5) {
+        // Material id in the integer part, a small brightness variation in the fraction.
+        let id = min(u32(base_value), 15u);
+        base = materials.colors[id].rgb * (0.88 + 0.24 * fract(base_value));
+    } else {
+        base = base_palette(unit(base_value, volume.base_range.x, volume.base_range.y));
+    }
     let life_value = textureLoad(life_field, cell, 0).r;
     let living = life_palette(unit(life_value, volume.life_range.z, volume.life_range.w));
     let coverage = smoothstep(volume.life_range.x, volume.life_range.y, life_value);
     let albedo = mix(base, living, coverage);
 
-    let n = normalize(in.normal);
-    // Direct sun: Lambert's law, light received ∝ cos(angle to the sun).
-    let sun = atmosphere.sun_color.rgb * max(dot(n, atmosphere.sun_direction.xyz), 0.0);
-    // Hemispheric ambient: faces looking up see the (cool) sky, faces looking down see the
-    // (warm) ground. This is what colours the shadows instead of greying them.
-    let ambient = mix(atmosphere.ground_color.rgb, atmosphere.sky_color.rgb, n.y * 0.5 + 0.5);
-    let occlusion = mix(AO_FLOOR, 1.0, in.ao);
-    var color = albedo * (sun + ambient) * occlusion;
+    let color = shade(albedo, normalize(in.normal), in.ao);
+    return vec4<f32>(haze(color, in.world_position), 1.0);
+}
 
-    // Haze: grows with the distance beyond the camera target, so the far side of the parcel
-    // fades into the background whatever the zoom.
-    let depth = distance(in.world_position, camera.eye.xyz) - camera.eye.w;
-    let fog = atmosphere.fog;
-    let haze = clamp((depth - fog.x) / (fog.y - fog.x), 0.0, 1.0) * fog.z;
-    color = mix(color, atmosphere.fog_color.rgb, haze);
+// ---------- Transparent water ----------
 
-    return vec4<f32>(color, 1.0);
+// Opacity of the shallowest and of the deepest water.
+const WATER_ALPHA_MIN: f32 = 0.6;
+const WATER_ALPHA_MAX: f32 = 0.85;
+// Strength of the ripples (tilt of the surface normal) and of the sun glint.
+const RIPPLE_STRENGTH: f32 = 0.08;
+const GLINT_STRENGTH: f32 = 0.6;
+const GLINT_SHARPNESS: f32 = 48.0;
+
+// Small moving tilt of the water surface: a few crossing sine waves, a cheap stand-in for
+// waves. Only the lighting moves, the geometry stays flat.
+fn ripple(p: vec2<f32>, t: f32) -> vec2<f32> {
+    let a = sin(p.x * 1.7 + t * 1.3) + sin((p.x + p.y) * 2.3 - t * 1.9);
+    let b = cos(p.y * 1.9 - t * 1.1) + cos((p.x - p.y) * 2.7 + t * 1.7);
+    return vec2<f32>(a, b) * RIPPLE_STRENGTH;
+}
+
+@fragment
+fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Base field: water depth. Life field: speed of the current, shown as foam.
+    let cell = unpack_cell(in.cell);
+    let depth_t = unit(textureLoad(base_field, cell, 0).r, volume.base_range.x, volume.base_range.y);
+    let speed = textureLoad(life_field, cell, 0).r;
+    let foam = smoothstep(volume.life_range.x, volume.life_range.y, speed);
+    let foam_color = life_palette(unit(speed, volume.life_range.z, volume.life_range.w));
+    let albedo = mix(base_palette(depth_t), foam_color, foam);
+
+    var n = normalize(in.normal);
+    if (n.y > 0.5) {
+        let tilt = ripple(in.world_position.xz, camera.time.x);
+        n = normalize(vec3<f32>(tilt.x, 1.0, tilt.y));
+    }
+    var color = shade(albedo, n, 1.0);
+
+    // Glint: the sun mirrored by the surface, seen when the reflection points at the eye.
+    let to_eye = normalize(camera.eye.xyz - in.world_position);
+    let mirrored = reflect(-atmosphere.sun_direction.xyz, n);
+    let glint = pow(max(dot(mirrored, to_eye), 0.0), GLINT_SHARPNESS) * GLINT_STRENGTH;
+    color += atmosphere.sun_color.rgb * glint * (1.0 - foam);
+
+    // Shallow water lets the ground show through; deep water and foam hide it.
+    let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.4 * foam, 0.0, 1.0);
+    return vec4<f32>(haze(color, in.world_position), alpha);
+}
+
+// ---------- Particles: one cube mesh drawn once per instance ----------
+
+// Rust side: `ParticleInstance` in src/particles.rs (per instance) and the cube vertices.
+struct ParticleInput {
+    @location(0) corner: vec3<f32>,   // cube vertex, in [-0.5, 0.5]³
+    @location(1) normal: vec3<f32>,
+    @location(2) centre_size: vec4<f32>,  // instance: centre xyz, edge length w
+    @location(3) color: vec4<f32>,        // instance: linear rgb, a unused
+}
+
+struct ParticleOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec3<f32>,
+}
+
+@vertex
+fn vs_particle(in: ParticleInput) -> ParticleOutput {
+    var out: ParticleOutput;
+    let world_position = in.centre_size.xyz + in.corner * in.centre_size.w;
+    out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
+    out.world_position = world_position;
+    out.normal = in.normal;
+    out.color = in.color.rgb;
+    return out;
+}
+
+@fragment
+fn fs_particle(in: ParticleOutput) -> @location(0) vec4<f32> {
+    let color = shade(in.color, normalize(in.normal), 1.0);
+    return vec4<f32>(haze(color, in.world_position), 1.0);
 }

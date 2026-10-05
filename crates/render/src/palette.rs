@@ -40,6 +40,84 @@ pub fn earth() -> Palette {
     ]
 }
 
+/// Water by depth: lagoon turquoise → deep sea blue.
+///
+/// Luminance strictly *decreases* along the stops (L* ≈ 73 → 29): depth reads as darkness,
+/// whatever the hue, as in real water. Saturated enough to read as water and not as stone
+/// even in shallow, almost transparent places.
+pub fn water() -> Palette {
+    [
+        srgb_hex(0x5cc4c0), // L* 73.3
+        srgb_hex(0x35a3b3), // L* 61.8
+        srgb_hex(0x24829f), // L* 50.5
+        srgb_hex(0x1c6488), // L* 39.8
+        srgb_hex(0x16496b), // L* 29.4
+    ]
+}
+
+/// Foam on fast water: pale sea green → off-white. Brighter than any water stop, so foam
+/// reads by luminance.
+pub fn foam() -> Palette {
+    [
+        srgb_hex(0xa9d2c4),
+        srgb_hex(0xc0ddd0),
+        srgb_hex(0xd5e7dc),
+        srgb_hex(0xe6efe6),
+        srgb_hex(0xf4f4ec),
+    ]
+}
+
+/// Number of entries of the material colour table.
+pub const MATERIAL_SLOTS: usize = 16;
+
+/// Colour of each material of the world, indexed by material id (`world::Material`, same
+/// order). Golden-hour tones: yellow-green grass, warm sand, warm grey rock.
+///
+/// Distinct materials differ in lightness, not only in hue (snow L* 95, sand 84, grass 66,
+/// rock 54, pine 41, wood 35), so they stay distinguishable in greyscale.
+pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
+    [
+        srgb_hex(0x000000), // 0 air (never drawn)
+        srgb_hex(0x98a74f), // 1 grass
+        srgb_hex(0x6f8a3e), // 2 forest floor
+        srgb_hex(0x8a6440), // 3 dirt
+        srgb_hex(0xe8cf98), // 4 sand
+        srgb_hex(0xe0aa6a), // 5 desert sand
+        srgb_hex(0xc58252), // 6 sandstone
+        srgb_hex(0x8c8079), // 7 rock
+        srgb_hex(0xf2f1ee), // 8 snow
+        srgb_hex(0x9c948a), // 9 gravel
+        srgb_hex(0x6b4a33), // 10 wood
+        srgb_hex(0x7f9e3e), // 11 leaves
+        srgb_hex(0x3f6b4a), // 12 pine needles
+        srgb_hex(0x6f9a55), // 13 cactus
+        srgb_hex(0xc2ad62), // 14 dry grass
+        srgb_hex(0xb5683f), // 15 clay
+    ]
+}
+
+/// Material colours as read by the shaders.
+///
+/// WGSL side (`shaders/voxel.wgsl`):
+/// ```wgsl
+/// struct Materials {
+///     colors: array<vec4<f32>, 16>,  // offset 0, size 256 (rgb + unused w)
+/// }
+/// ```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MaterialsUniform {
+    pub colors: [[f32; 4]; MATERIAL_SLOTS],
+}
+
+impl MaterialsUniform {
+    pub fn new(colors: &[[f32; 3]; MATERIAL_SLOTS]) -> Self {
+        Self {
+            colors: colors.map(|[r, g, b]| [r, g, b, 1.0]),
+        }
+    }
+}
+
 /// Light and air of the scene.
 #[derive(Clone, Copy, Debug)]
 pub struct Atmosphere {
@@ -61,17 +139,18 @@ pub struct Atmosphere {
     pub fog_max: f32,
 }
 
-/// Late-afternoon light: low warm sun, blue-violet sky light in the shadows, peach haze.
+/// Late-afternoon light: warm sun, blue sky light in the shadows, a light cream haze that
+/// only veils what is far beyond the camera target.
 pub fn golden_hour() -> Atmosphere {
     Atmosphere {
-        sun_direction: [0.7, 0.55, -0.45],
-        sun_color: srgb_hex(0xffd2a1),
-        sky_color: srgb_hex(0x6f7fa8),
-        ground_color: srgb_hex(0x7a5440),
-        fog_color: srgb_hex(0xe7a873),
-        fog_start: -10.0,
-        fog_end: 50.0,
-        fog_max: 0.55,
+        sun_direction: [0.45, 0.8, -0.4],
+        sun_color: srgb_hex(0xffe6c4),
+        sky_color: srgb_hex(0x8ea6c8),
+        ground_color: srgb_hex(0x7c6a55),
+        fog_color: srgb_hex(0xefd6b8),
+        fog_start: 60.0,
+        fog_end: 400.0,
+        fog_max: 0.35,
     }
 }
 
@@ -145,6 +224,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn materials_layout_matches_wgsl() {
+        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 256);
+    }
+
+    #[test]
     fn atmosphere_layout_matches_wgsl() {
         assert_eq!(std::mem::size_of::<AtmosphereUniform>(), 96);
         assert_eq!(std::mem::offset_of!(AtmosphereUniform, fog), 80);
@@ -184,6 +268,20 @@ mod tests {
     fn concentration_leaves_room_for_lighting() {
         let l = concentration().map(lightness);
         assert!(l[0] > 30.0 && l[STOP_COUNT - 1] < 75.0, "{l:?}");
+    }
+
+    #[test]
+    fn foam_is_brighter_than_water() {
+        let foam = foam().map(lightness);
+        assert!(foam.windows(2).all(|w| w[0] < w[1]), "{foam:?}");
+        let brightest_water = water().map(lightness)[0];
+        assert!(foam[0] > brightest_water, "{foam:?}");
+    }
+
+    #[test]
+    fn deeper_water_is_darker() {
+        let l = water().map(lightness);
+        assert!(l.windows(2).all(|w| w[0] > w[1]), "{l:?}");
     }
 
     #[test]

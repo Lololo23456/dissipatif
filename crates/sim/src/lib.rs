@@ -3,4 +3,5 @@
 
 pub mod gray_scott;
 pub mod grid;
+pub mod hydrology;
 pub mod rng;

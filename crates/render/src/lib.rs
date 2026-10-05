@@ -8,10 +8,14 @@ pub mod gpu;
 pub mod mesh;
 pub mod mesher;
 pub mod palette;
+pub mod particles;
+pub mod png;
 pub mod renderer;
 pub mod volume;
+pub mod water_mesher;
 
 pub use camera::OrbitCamera;
 pub use gpu::Gpu;
+pub use particles::ParticleInstance;
 pub use renderer::{Renderer, VolumeId};
 pub use volume::{LifeStyle, VolumeStyle};

@@ -47,3 +47,29 @@ Une réaction qui occupe tout le volume est illisible : aucun repère fixe, et l
 
 ## 2026-10-05 — La terre est vivante
 La réaction ne vit plus dans un bassin séparé : elle tourne dans la couche de surface du terrain (grille 2D de 72×72, une cellule par colonne, parois étanches aux bords du monde) et se lit dans la couleur du sol. Le terrain ne change jamais de forme : maillé une fois, seul un champ « vie » est envoyé au GPU à chaque image. Le shader mélange la couleur de la terre (palette `earth`) et celle du vivant (palette `concentration`) selon v : terre teintée au bord d'une tache, or au cœur, plus clair que la terre (lisible sans la teinte). Limites assumées pour l'instant : la diffusion ignore le relief, et la terre ne nourrit pas la réaction (F uniforme). **Provisoire.**
+
+## 2026-10-05 — D'abord un monde vivant : eau, érosion, forêts
+La réaction (Gray-Scott, « l'anomalie ») est mise de côté dans le jeu ; son code, ses tests et sa fiche restent dans `crates/sim`, et l'état « terre vivante » est dans le commit 472e8e3. Le monde lui-même devient dynamique, en trois phases : (1) terrain en carte de hauteurs continues + eau (modèle des tuyaux virtuels, Mei et al. 2007 : source, pluie, évaporation, bords ouverts vers la mer) ; (2) érosion et dépôt, la rivière change de cours ; (3) végétation couplée à l'eau, dont les racines freinent l'érosion. Rivières, deltas et fronts de forêt restent des structures dissipatives : on garde l'esprit du projet. Affichage : l'eau peu profonde teinte le sol (mélange base + vie), l'eau profonde devient des voxels. **Provisoire.**
+
+## 2026-10-05 — Érosion, méandres, eau transparente et particules
+- **Érosion** (Mei et al.) : capacité de transport ∝ pente · vitesse · min(1, profondeur / d_ref). Sans le facteur de profondeur, la pellicule de pluie, rapide mais infime, rasait tout le monde (mesuré : −146 cellules en 6 min). Éboulement au-delà d'un talus pour éviter puits et aiguilles.
+- **Transport du sédiment par les tuyaux** de l'eau (même fraction que l'eau qui part), au lieu du schéma semi-lagrangien de Mei : celui-ci perdait 8 % de la matière ; le nôtre la conserve exactement en monde fermé.
+- **Méandres** : la rive extérieure d'un virage perd de la matière ∝ courbure · vitesse, déposée à l'identique côté intérieur. Mesuré : environ la moitié du lit se déplace toutes les 2 minutes de jeu.
+- **Eau** : surface transparente à la hauteur exacte de l'eau (et non plus des voxels arrondis, invisibles pour un ruisseau de 30 cm), opacité selon la profondeur, écume sur les rapides, rides animées, reflet du soleil. Volume réel : le joueur pourra y entrer.
+- **Particules** d'écume et d'embruns : cubes en instancing, mis à jour sur CPU (version GPU plus tard, selon la règle CPU d'abord). Décoratives : elles lisent l'eau sans la modifier.
+Coût mesuré : 7,7 ms CPU par image (simulation 96×96 à 20 pas par image + affichage + particules). **Provisoire.**
+
+## 2026-10-05 — Une montagne d'où viennent les rivières
+Le terrain n'est plus une pente générale : un massif au fond du monde (sommet ≈ 25 cellules), ses flancs taillés de crêtes et de vallons par un bruit « en arêtes », une plaine qui s'en éloigne. Les sources ne sont plus à des coordonnées fixes : elles sont placées au point le plus bas d'un anneau autour du sommet, côté plaine, donc dans un vallon où l'eau se rassemblerait. Pluie orographique : jusqu'à 5 fois plus au sommet que dans la plaine. Au-dessus de 15 cellules, roche nue au lieu de l'herbe. **Provisoire.**
+
+## 2026-10-05 — D'abord construire le monde, sans simulation
+L'eau dynamique et l'érosion donnaient un résultat illisible (vu enfin grâce à l'outil de capture : brume écrasante, bouillie de pixels, pas de vraies couleurs). On construit d'abord un monde statique, entièrement procédural ; la vie (eau qui coule, érosion, végétation qui pousse) reviendra par-dessus. Le code de simulation reste dans `crates/sim` ; les morceaux de jeu qui en dépendent sont dans `crates/game/parked/`, non compilés. **Actée.**
+
+## 2026-10-05 — Un crate `world` pour la génération du monde
+Ni simulation (`sim`), ni rendu : la génération est pure, déterministe et testable sans GPU. Étapes : continentalité (île, archipel ou côte selon la graine, toujours de la mer aux bords), collines, massifs en bruit d'arêtes ; climat (température : bruit + gradient nord-sud − altitude ; humidité : bruit + mer), contraste du bruit étiré car un bruit fractal reste près de 0,5 ; biomes de Whittaker + plages + ligne de neige ; dunes ; hydrographie par « priority flood » (lacs = cuvettes comblées, rivières = débit accumulé fort, lits creusés) ; végétation sur grille décalée aléatoirement (feuillus, conifères, acacias, cactus, buissons). Monde 256×64×256 généré en ~20 ms. **Provisoire** sur les réglages.
+
+## 2026-10-05 — Couleurs par table de matériaux
+Les voxels du monde portent un matériau (herbe, sable, roche, neige, bois, feuilles…), pas une valeur continue : un dégradé ne convient pas. Le champ de couleur stocke `id + variation` dans un f32 (partie entière : couleur dans une table de 16 matériaux, partie décimale : petite variation de luminosité). Les matériaux se distinguent aussi par leur luminance. **Actée.**
+
+## 2026-10-05 — Outil de capture hors écran
+`--capture` rend une image sans fenêtre (texture hors écran relue par le CPU, encodeur PNG minimal sans dépendance). Sert à vérifier visuellement chaque changement de rendu, y compris par Claude. **Actée.**
