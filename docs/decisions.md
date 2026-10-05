@@ -73,3 +73,6 @@ Les voxels du monde portent un matériau (herbe, sable, roche, neige, bois, feui
 
 ## 2026-10-05 — Outil de capture hors écran
 `--capture` rend une image sans fenêtre (texture hors écran relue par le CPU, encodeur PNG minimal sans dépendance). Sert à vérifier visuellement chaque changement de rendu, y compris par Claude. **Actée.**
+
+## 2026-10-05 — Vision : un naturaliste dans un monde très vivant
+Le jeu devient d'abord une exploration contemplative : un personnage vu de haut observe et cherche à comprendre un monde procédural très vivant (faune aux comportements émergents, flore qui semble animée, cycle jour-nuit, ciel étoilé vu dans les reflets, télescope à construire). Les anomalies sont une autre forme de vie, des structures dissipatives qui coexistent avec la faune et la flore ; elles sont rares, pour que l'étrange se détache du normal. Interactions systémiques (propriétés + règles générales). Deux résolutions : terrain en gros cubes, vivant et détails en micro-cubes. Les mécaniques de la version précédente (flux, bifurcations, hystérésis, culture) deviennent des pistes pour agir sur les anomalies. Remplace la vision « jeu de gestion de parcelles » ; voir `design.md`. **Actée** pour la direction, ce que le joueur cherche au fond reste **à trancher**.

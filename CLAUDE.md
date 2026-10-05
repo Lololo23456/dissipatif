@@ -1,8 +1,10 @@
 # Dissipatif (nom provisoire)
 
-Jeu voxel de gestion et d'exploration où le joueur cultive des structures dissipatives
-(réaction-diffusion, systèmes loin de l'équilibre) en agissant uniquement sur les flux.
-Tout l'art est procédural : aucune texture, aucun asset dessiné, l'apparence découle de l'état de la simulation.
+Jeu voxel d'exploration contemplative : un naturaliste vu de haut observe et cherche à comprendre
+un monde procédural très vivant (faune, flore animée, jour et nuit, ciel étoilé), où existe une autre
+forme de vie, les anomalies : des structures dissipatives (réaction-diffusion, systèmes loin de l'équilibre).
+Priorité actuelle : l'ambiance. Tout l'art est procédural : aucune texture, aucun asset dessiné,
+l'apparence découle de l'état du monde.
 Le game design complet est dans `docs/design.md` : lis-le seulement quand une tâche touche au gameplay.
 Les décisions passées et les choix encore provisoires sont dans `docs/decisions.md`. Consulte-le avant de remettre en cause un choix d'architecture.
 
