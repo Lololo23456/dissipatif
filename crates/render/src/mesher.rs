@@ -1,4 +1,6 @@
-//! Turns a simulation field into a voxel mesh.
+//! Turns voxel grids into meshes: a field (solid above a threshold, coloured later from a
+//! texture) or a grid of materials (a plant model, coloured by the material carried in each
+//! vertex).
 //!
 //! A cell is solid when its value exceeds a threshold. Only faces between a solid cell and
 //! an empty one (or the outside of the grid) are emitted: faces between two solid cells can
@@ -8,9 +10,11 @@
 //! Each corner also gets an ambient occlusion value: a corner tucked against solid
 //! neighbours receives less light from the sky, so creases and cavities darken.
 
-use sim::grid::Field3;
+use sim::grid::{Dims, Field3};
 
-use crate::mesh::{FACE_CORNERS, FACE_NORMALS, MAX_GRID_SIZE, MeshData, face_tangents};
+use crate::mesh::{
+    FACE_CORNERS, FACE_NORMALS, MAX_GRID_SIZE, MeshData, face_tangents, pack_material,
+};
 
 /// Rebuilds `mesh` from the cells of `field` whose value is strictly above `threshold`.
 ///
@@ -29,51 +33,97 @@ pub fn mesh_field(field: &Field3, threshold: f32, mesh: &mut MeshData) {
         "grid {dims:?} too large to mesh"
     );
     // NaN compares false, so a corrupted cell shows as empty instead of crashing.
-    let solid = |x: isize, y: isize, z: isize| -> bool {
-        let inside = x >= 0
-            && y >= 0
-            && z >= 0
-            && (x as usize) < dims.nx
-            && (y as usize) < dims.ny
-            && (z as usize) < dims.nz;
-        inside && field.get(x as usize, y as usize, z as usize) > threshold
-    };
+    let solid = |x: usize, y: usize, z: usize| field.get(x, y, z) > threshold;
+    visible_faces(dims, solid, |cell, normal, ao| {
+        mesh.push_face(cell, normal, ao);
+    });
+}
 
-    // z outermost, x innermost: same order as the memory layout of `Field3`.
+/// Rebuilds `mesh` from a grid of material ids (0 = empty), for a model drawn at `scale` world
+/// units per voxel, with `anchor` (in voxels) at the origin of the mesh. Each vertex carries its
+/// material and a brightness variation drawn from `seed` (see `mesh::pack_material`).
+pub fn mesh_materials(
+    voxels: &[u8],
+    dims: Dims,
+    anchor: [f32; 3],
+    scale: f32,
+    seed: u64,
+    mesh: &mut MeshData,
+) {
+    assert_eq!(voxels.len(), dims.len(), "grid size");
+    mesh.clear();
+    let solid = |x: usize, y: usize, z: usize| voxels[dims.index(x, y, z)] != 0;
+    let offset = anchor.map(|a| -a * scale);
+    visible_faces(dims, solid, |cell, normal, ao| {
+        let [x, y, z] = cell.map(|c| c as usize);
+        let id = voxels[dims.index(x, y, z)];
+        let variation = (variation_hash(seed, x, y, z) >> 56) as u8;
+        mesh.push_face_scaled(
+            cell,
+            normal,
+            ao,
+            offset,
+            scale,
+            pack_material(id, variation),
+        );
+    });
+}
+
+/// Calls `emit(cell, normal, ao)` for every face between a solid cell and an empty one (or the
+/// outside of the grid), with the ambient occlusion of its 4 corners.
+fn visible_faces(
+    dims: Dims,
+    solid: impl Fn(usize, usize, usize) -> bool,
+    mut emit: impl FnMut([u32; 3], [i32; 3], [f32; 4]),
+) {
+    // Outside the grid counts as empty, so the boundary of the grid is closed.
+    let at = |p: [isize; 3]| -> bool {
+        p.iter().all(|&c| c >= 0)
+            && (p[0] as usize) < dims.nx
+            && (p[1] as usize) < dims.ny
+            && (p[2] as usize) < dims.nz
+            && solid(p[0] as usize, p[1] as usize, p[2] as usize)
+    };
+    // z outermost, x innermost: same order as the memory layout of the grids.
     for z in 0..dims.nz as isize {
         for y in 0..dims.ny as isize {
             for x in 0..dims.nx as isize {
-                if !solid(x, y, z) {
+                if !at([x, y, z]) {
                     continue;
                 }
                 for normal in FACE_NORMALS {
                     let cell = [x, y, z];
                     // The cell in front of the face: the face is visible only if it is empty.
                     let front: [isize; 3] = std::array::from_fn(|i| cell[i] + normal[i] as isize);
-                    if solid(front[0], front[1], front[2]) {
+                    if at(front) {
                         continue;
                     }
                     let (u, v) = face_tangents(normal);
                     let ao = FACE_CORNERS.map(|(su, sv)| {
                         // Towards this corner along each tangent: -1 or +1.
-                        let (du, dv) = (2 * su - 1, 2 * sv - 1);
-                        let at = |a: isize, b: isize| {
-                            let p: [isize; 3] = std::array::from_fn(|i| {
+                        let (du, dv) = ((2 * su - 1) as isize, (2 * sv - 1) as isize);
+                        let near = |a: isize, b: isize| {
+                            at(std::array::from_fn(|i| {
                                 front[i] + a * u[i] as isize + b * v[i] as isize
-                            });
-                            solid(p[0], p[1], p[2])
+                            }))
                         };
-                        corner_ao(
-                            at(du as isize, 0),
-                            at(0, dv as isize),
-                            at(du as isize, dv as isize),
-                        )
+                        corner_ao(near(du, 0), near(0, dv), near(du, dv))
                     });
-                    mesh.push_face([x as u32, y as u32, z as u32], normal, ao);
+                    emit([x as u32, y as u32, z as u32], normal, ao);
                 }
             }
         }
     }
+}
+
+/// A well-mixed hash of a voxel position: its top bits make the brightness variation.
+fn variation_hash(seed: u64, x: usize, y: usize, z: usize) -> u64 {
+    let mut h = seed ^ 0x9E37_79B9_7F4A_7C15;
+    for c in [x, y, z] {
+        h = (h ^ c as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 31;
+    }
+    h
 }
 
 /// Ambient occlusion of a face corner from the three cells around it, in the layer in front
@@ -136,6 +186,23 @@ mod tests {
         let mut field = Field3::filled(Dims::cube(3), 0.5);
         field.set(0, 0, 0, f32::NAN);
         assert_eq!(faces(&field), 0);
+    }
+
+    #[test]
+    fn material_models_are_scaled_and_carry_their_material() {
+        // A 2×2×2 block of material 5 with its anchor at the centre of its bottom face.
+        let dims = Dims::cube(2);
+        let voxels = vec![5u8; 8];
+        let mut mesh = MeshData::default();
+        mesh_materials(&voxels, dims, [1.0, 0.0, 1.0], 0.25, 3, &mut mesh);
+        assert_eq!(mesh.face_count(), 6 * 4);
+        for v in &mesh.vertices {
+            // Positions in [-0.25, 0.25] × [0, 0.5] × [-0.25, 0.25].
+            assert!(v.position[0].abs() <= 0.25 && v.position[2].abs() <= 0.25);
+            assert!((0.0..=0.5).contains(&v.position[1]));
+            assert_eq!(v.cell & 0xff, 5);
+            assert_ne!(v.cell & crate::mesh::DIRECT_MATERIAL, 0);
+        }
     }
 
     #[test]

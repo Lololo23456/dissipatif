@@ -1,17 +1,29 @@
-//! Draws the voxel scene: owns the render pipeline, the frame data (camera, atmosphere),
-//! the volumes (terrain, parcels) and the depth buffer.
+//! Draws the voxel scene: owns the render pipelines, the frame data (camera, atmosphere,
+//! materials, shadow map), the volumes (terrain, water…) and the depth buffer.
+//!
+//! A frame is two passes: the shadow pass draws the opaque volumes seen from the sun, keeping
+//! only depth (the shadow map); the main pass draws everything seen from the camera and asks
+//! the shadow map, for each pixel, whether the sun reaches it.
 
+use glam::Vec3;
 use sim::grid::Field3;
 use wgpu::util::DeviceExt;
 
-use crate::camera::{CameraUniform, OrbitCamera};
+use crate::camera::{CameraUniform, OrbitCamera, light_view_proj};
 use crate::gpu::Gpu;
 use crate::mesh::{MeshData, Vertex};
+use crate::models::{GpuModel, ModelInstance};
 use crate::palette::{self, AtmosphereUniform, MaterialsUniform};
 use crate::particles::{CubeVertex, ParticleInstance, unit_cube};
 use crate::volume::{Volume, VolumeStyle};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Side of the shadow map in texels. Must match `SHADOW_TEXEL` in the shader.
+const SHADOW_SIZE: u32 = 2048;
+
+/// Handle to a model added with `Renderer::add_model`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelId(usize);
 
 /// Handle to a volume added with `Renderer::add_volume`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,8 +41,24 @@ pub struct Renderer {
     particle_buffer: wgpu::Buffer,
     particle_count: u32,
     camera_buffer: wgpu::Buffer,
-    /// Group 0: camera and atmosphere.
+    /// Group 0: camera, atmosphere, materials, shadow map.
     frame_bind_group: wgpu::BindGroup,
+    /// Draws depth only, from the sun.
+    shadow_pipeline: wgpu::RenderPipeline,
+    /// Models (plants): drawn by instancing, in the main pass and in the shadow pass.
+    model_pipeline: wgpu::RenderPipeline,
+    model_shadow_pipeline: wgpu::RenderPipeline,
+    models: Vec<GpuModel>,
+    /// Group 1 for models: a material volume with no fields of its own (models carry their
+    /// materials in their vertices), for the volume uniform the fragment shader reads.
+    model_volume: Volume,
+    /// Group 0 of the shadow pass: the camera only. The shadow map cannot be bound for reading
+    /// while it is being drawn into.
+    shadow_bind_group: wgpu::BindGroup,
+    shadow_view: wgpu::TextureView,
+    /// Towards the sun, and the box the shadow map must cover.
+    sun_direction: Vec3,
+    scene_bounds: (Vec3, Vec3),
     /// Background, the colour of the haze (linear RGB).
     clear_color: wgpu::Color,
     /// Group 1: one bind group per volume, all with this layout.
@@ -64,6 +92,31 @@ impl Renderer {
             contents: bytemuck::bytes_of(&MaterialsUniform::new(&palette::materials())),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        // Shadow map: a depth texture drawn by the shadow pass and read by the main pass.
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow map"),
+            size: wgpu::Extent3d {
+                width: SHADOW_SIZE,
+                height: SHADOW_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Comparison sampler: returns "is the given depth ≤ the stored one" instead of the
+        // depth itself; with linear filtering, the GPU blends 4 such comparisons for free.
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
         let [r, g, b] = atmosphere.fog_color.map(f64::from);
         let clear_color = wgpu::Color { r, g, b, a: 1.0 };
 
@@ -87,6 +140,22 @@ impl Renderer {
                 uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 uniform_entry(1, wgpu::ShaderStages::FRAGMENT),
                 uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
             ],
         });
         // Bind group: the actual resources plugged into that signature.
@@ -106,15 +175,37 @@ impl Renderer {
                     binding: 2,
                     resource: materials_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
             ],
+        });
+        let shadow_frame_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow frame layout"),
+                entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
+            });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow frame"),
+            layout: &shadow_frame_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
         });
 
         // Group 1: a volume. Two 3D textures of f32 (base and life) read with `textureLoad`
         // (exact texels, hence `filterable: false` and no sampler), and the volume uniform
         // (origin, palettes).
+        // The base field is also read by the vertex stage (foliage sways by material).
         let field_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 view_dimension: wgpu::TextureViewDimension::D3,
@@ -155,6 +246,41 @@ impl Renderer {
             VoxelPass::Transparent,
         );
 
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow layout"),
+            bind_group_layouts: &[Some(&shadow_frame_layout), Some(&volume_layout)],
+            immediate_size: 0,
+        });
+        let shadow_pipeline = create_shadow_pipeline(device, &shadow_layout, &shader, false);
+        let model_shadow_pipeline = create_shadow_pipeline(device, &shadow_layout, &shader, true);
+        let model_pipeline =
+            create_voxel_pipeline(device, &pipeline_layout, &shader, format, VoxelPass::Model);
+        let mut model_volume = Volume::new(
+            device,
+            &VolumeStyle {
+                origin: [0.0; 3],
+                palette: palette::earth(),
+                value_range: (0.0, 1.0),
+                materials: true,
+                life: crate::volume::LifeStyle {
+                    palette: palette::foam(),
+                    fade: (1.0, 2.0),
+                    value_range: (1.0, 2.0),
+                },
+                transparent: false,
+            },
+        );
+        // A 1×1×1 field only to complete the bind group: never read by models.
+        let empty = Field3::filled(
+            sim::grid::Dims {
+                nx: 1,
+                ny: 1,
+                nz: 1,
+            },
+            0.0,
+        );
+        model_volume.upload_base(device, gpu.queue(), &volume_layout, &empty);
+
         // Particles: only group 0 (camera, atmosphere), two vertex buffers (the cube, per
         // vertex; the instances, per cube).
         let particle_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -185,6 +311,15 @@ impl Renderer {
             particle_count: 0,
             camera_buffer,
             frame_bind_group,
+            shadow_pipeline,
+            model_pipeline,
+            model_shadow_pipeline,
+            models: Vec::new(),
+            model_volume,
+            shadow_bind_group,
+            shadow_view,
+            sun_direction: Vec3::from(atmosphere.sun_direction),
+            scene_bounds: (Vec3::ZERO, Vec3::splat(64.0)),
             clear_color,
             volume_layout,
             volumes: Vec::new(),
@@ -198,6 +333,26 @@ impl Renderer {
         }
         self.gpu.resize(width, height);
         self.depth_view = create_depth_view(self.gpu.device(), width, height);
+    }
+
+    /// The box (world coordinates) that casts and receives shadows. Outside it, everything is
+    /// lit. Tighter is sharper: the shadow map's texels are spread over this box.
+    pub fn set_scene_bounds(&mut self, min: Vec3, max: Vec3) {
+        self.scene_bounds = (min, max);
+    }
+
+    /// Adds a model (a mesh made with `mesher::mesh_materials`). Nothing is drawn until it has
+    /// instances.
+    pub fn add_model(&mut self, mesh: &MeshData) -> ModelId {
+        let (device, queue) = (self.gpu.device(), self.gpu.queue());
+        self.models.push(GpuModel::new(device, queue, mesh));
+        ModelId(self.models.len() - 1)
+    }
+
+    /// Where a model is drawn: one copy per instance.
+    pub fn set_model_instances(&mut self, id: ModelId, instances: &[ModelInstance]) {
+        let (device, queue) = (self.gpu.device(), self.gpu.queue());
+        self.models[id.0].set_instances(device, queue, instances);
     }
 
     /// Adds a volume to the scene. Nothing is drawn for it until it has a mesh and a field.
@@ -262,7 +417,9 @@ impl Renderer {
         let Some(frame) = self.gpu.acquire_frame() else {
             return;
         };
-        let uniform = CameraUniform::new(camera, self.aspect(), time);
+        let (min, max) = self.scene_bounds;
+        let light = light_view_proj(self.sun_direction, min, max);
+        let uniform = CameraUniform::new(camera, self.aspect(), time, light);
         self.gpu
             .queue()
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -274,6 +431,39 @@ impl Renderer {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("frame"),
                 });
+        {
+            // Shadow pass: depth of the opaque volumes seen from the sun. No colour target.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        // Kept: the main pass reads it.
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.shadow_bind_group, &[]);
+            for volume in self.volumes.iter().filter(|v| !v.transparent) {
+                if let (Some(mesh), Some(fields)) = (&volume.mesh, &volume.fields)
+                    && mesh.index_count > 0
+                {
+                    pass.set_bind_group(1, &fields.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+            pass.set_pipeline(&self.model_shadow_pipeline);
+            self.draw_models(&mut pass);
+        }
         {
             // A render pass = a series of draws into the same target images.
             // `LoadOp::Clear` fills the image before drawing, `StoreOp::Store` keeps the result.
@@ -330,6 +520,11 @@ impl Renderer {
                         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     }
                 }
+                // Models are opaque: drawn with the opaque volumes.
+                if !transparent {
+                    pass.set_pipeline(&self.model_pipeline);
+                    self.draw_models(&mut pass);
+                }
             }
         }
         self.gpu.queue().submit([encoder.finish()]);
@@ -337,10 +532,88 @@ impl Renderer {
     }
 }
 
+/// Depth only, from the sun. Back faces are culled like in the main pass; a depth bias
+/// pushes the stored depths slightly away from the sun, so that lit surfaces do not find
+/// themselves "behind" their own depth (shadow acne).
+fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    models: bool,
+) -> wgpu::RenderPipeline {
+    let model_buffers = [Some(Vertex::layout()), Some(ModelInstance::layout())];
+    let volume_buffers = [Some(Vertex::layout())];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(if models {
+            "model shadow pipeline"
+        } else {
+            "shadow pipeline"
+        }),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(if models {
+                "vs_model_shadow"
+            } else {
+                "vs_shadow"
+            }),
+            compilation_options: Default::default(),
+            buffers: if models {
+                &model_buffers
+            } else {
+                &volume_buffers
+            },
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            // Mirrored models reverse their winding: no culling for them (see the main pass).
+            cull_mode: (!models).then_some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        // No fragment stage: only the depth is written.
+        fragment: None,
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+impl Renderer {
+    /// Draws every model with instances, with the pipeline already set on `pass`.
+    fn draw_models(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if let Some(fields) = &self.model_volume.fields {
+            pass.set_bind_group(1, &fields.bind_group, &[]);
+        }
+        for model in &self.models {
+            if model.instance_count == 0 || model.mesh.index_count == 0 {
+                continue;
+            }
+            pass.set_vertex_buffer(0, model.mesh.vertex_buffer.slice(..));
+            pass.set_vertex_buffer(1, model.instances.slice(..));
+            pass.set_index_buffer(model.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..model.mesh.index_count, 0, 0..model.instance_count);
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoxelPass {
     Opaque,
     Transparent,
+    /// Opaque models drawn by instancing (vertex + instance buffers).
+    Model,
 }
 
 fn create_voxel_pipeline(
@@ -351,24 +624,34 @@ fn create_voxel_pipeline(
     pass: VoxelPass,
 ) -> wgpu::RenderPipeline {
     let transparent = pass == VoxelPass::Transparent;
+    let (label, entry_point) = match pass {
+        VoxelPass::Opaque => ("voxel pipeline", "vs_main"),
+        VoxelPass::Transparent => ("transparent voxel pipeline", "vs_main"),
+        VoxelPass::Model => ("model pipeline", "vs_model"),
+    };
+    let model_buffers = [Some(Vertex::layout()), Some(ModelInstance::layout())];
+    let volume_buffers = [Some(Vertex::layout())];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(if transparent {
-            "transparent voxel pipeline"
-        } else {
-            "voxel pipeline"
-        }),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
+            entry_point: Some(entry_point),
             compilation_options: Default::default(),
-            buffers: &[Some(Vertex::layout())],
+            buffers: if pass == VoxelPass::Model {
+                &model_buffers
+            } else {
+                &volume_buffers
+            },
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             front_face: wgpu::FrontFace::Ccw,
-            // Faces seen from behind are never visible on closed volumes: skip them.
-            cull_mode: Some(wgpu::Face::Back),
+            // Faces seen from behind are never visible on closed volumes: skip them. Not for
+            // models: a mirrored instance reverses the winding of its triangles, and culling
+            // would then remove its front faces (holes). Their meshes are closed, so depth
+            // testing hides the back faces anyway.
+            cull_mode: (pass != VoxelPass::Model).then_some(wgpu::Face::Back),
             ..Default::default()
         },
         // Depth test: each pixel keeps the closest surface, whatever the drawing order.

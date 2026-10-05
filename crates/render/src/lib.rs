@@ -7,6 +7,7 @@ pub mod field_texture;
 pub mod gpu;
 pub mod mesh;
 pub mod mesher;
+pub mod models;
 pub mod palette;
 pub mod particles;
 pub mod png;
@@ -16,6 +17,7 @@ pub mod water_mesher;
 
 pub use camera::OrbitCamera;
 pub use gpu::Gpu;
+pub use models::ModelInstance;
 pub use particles::ParticleInstance;
-pub use renderer::{Renderer, VolumeId};
+pub use renderer::{ModelId, Renderer, VolumeId};
 pub use volume::{LifeStyle, VolumeStyle};

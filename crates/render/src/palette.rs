@@ -68,7 +68,7 @@ pub fn foam() -> Palette {
 }
 
 /// Number of entries of the material colour table.
-pub const MATERIAL_SLOTS: usize = 16;
+pub const MATERIAL_SLOTS: usize = 32;
 
 /// Colour of each material of the world, indexed by material id (`world::Material`, same
 /// order). Golden-hour tones: yellow-green grass, warm sand, warm grey rock.
@@ -93,6 +93,22 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
         srgb_hex(0x6f9a55), // 13 cactus
         srgb_hex(0xc2ad62), // 14 dry grass
         srgb_hex(0xb5683f), // 15 clay
+        srgb_hex(0xa9b955), // 16 tall grass (L* 72)
+        srgb_hex(0xd0503c), // 17 red flower (51)
+        srgb_hex(0xeac54a), // 18 yellow flower (81)
+        srgb_hex(0xf2eee2), // 19 white flower (94)
+        srgb_hex(0x9468bd), // 20 violet flower (52)
+        srgb_hex(0x5c9040), // 21 fern (55)
+        srgb_hex(0x9a5038), // 22 mushroom cap (42)
+        srgb_hex(0xeae0c8), // 23 mushroom stem (89)
+        srgb_hex(0xe4dfd2), // 24 birch bark (89)
+        srgb_hex(0xaabd4c), // 25 birch leaves (73)
+        srgb_hex(0x9c7c54), // 26 palm trunk (54)
+        srgb_hex(0x6c9e3a), // 27 palm leaves (60)
+        srgb_hex(0x8c7f72), // 28 dead wood (54)
+        srgb_hex(0xaaa49c), // 29 stone (68)
+        srgb_hex(0x8cad52), // 30 willow leaves (67)
+        srgb_hex(0xa38c55), // 31 dry shrub (59)
     ]
 }
 
@@ -101,7 +117,7 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
 /// WGSL side (`shaders/voxel.wgsl`):
 /// ```wgsl
 /// struct Materials {
-///     colors: array<vec4<f32>, 16>,  // offset 0, size 256 (rgb + unused w)
+///     colors: array<vec4<f32>, 32>,  // offset 0, size 512 (rgb + unused w)
 /// }
 /// ```
 #[repr(C)]
@@ -225,7 +241,7 @@ mod tests {
 
     #[test]
     fn materials_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 256);
+        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 512);
     }
 
     #[test]

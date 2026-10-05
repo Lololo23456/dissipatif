@@ -39,6 +39,24 @@ pub fn value(x: f32, z: f32, scale: f32, seed: u64) -> f32 {
     top * (1.0 - tz) + bottom * tz
 }
 
+/// Smooth 3D noise in [0, 1]: like `value`, on a 3D lattice, blended trilinearly.
+pub fn value3(x: f32, y: f32, z: f32, scale: f32, seed: u64) -> f32 {
+    let q = [x / scale, y / scale, z / scale];
+    let c = q.map(f32::floor);
+    let smooth = |f: f32| f * f * (3.0 - 2.0 * f);
+    let t = [0, 1, 2].map(|i| smooth(q[i] - c[i]));
+    let i = c.map(|v| v as i64);
+    let mut sum = 0.0;
+    for corner in 0..8 {
+        let o = [corner & 1, (corner >> 1) & 1, (corner >> 2) & 1];
+        let weight: f32 = (0..3)
+            .map(|k| if o[k] == 1 { t[k] } else { 1.0 - t[k] })
+            .product();
+        sum += weight * hash_unit(seed, &[i[0] + o[0], i[1] + o[1], i[2] + o[2]]);
+    }
+    sum
+}
+
 /// Fractal noise in [0, 1]: `octaves` layers of `value`, each twice finer and half as strong.
 /// Large shapes from the first octave, details from the next ones.
 pub fn fbm(x: f32, z: f32, scale: f32, octaves: u32, seed: u64) -> f32 {
@@ -87,6 +105,7 @@ mod tests {
                 value(x, z, 8.0, 1),
                 fbm(x, z, 32.0, 5, 2),
                 ridged(x, z, 32.0, 4, 3),
+                value3(x, z * 0.5, x + z, 5.0, 4),
             ] {
                 assert!((0.0..=1.0).contains(&v), "{v}");
             }

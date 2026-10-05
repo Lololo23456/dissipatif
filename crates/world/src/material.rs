@@ -21,10 +21,26 @@ pub enum Material {
     Cactus = 13,
     DryGrass = 14,
     Clay = 15,
+    TallGrass = 16,
+    FlowerRed = 17,
+    FlowerYellow = 18,
+    FlowerWhite = 19,
+    FlowerViolet = 20,
+    Fern = 21,
+    MushroomCap = 22,
+    MushroomStem = 23,
+    BirchBark = 24,
+    BirchLeaves = 25,
+    PalmTrunk = 26,
+    PalmLeaves = 27,
+    DeadWood = 28,
+    Stone = 29,
+    WillowLeaves = 30,
+    DryShrub = 31,
 }
 
 /// Number of materials, `Air` included: the size of the colour table.
-pub const MATERIAL_COUNT: usize = 16;
+pub const MATERIAL_COUNT: usize = 32;
 
 impl Material {
     /// Every material, in id order.
@@ -45,6 +61,22 @@ impl Material {
         Material::Cactus,
         Material::DryGrass,
         Material::Clay,
+        Material::TallGrass,
+        Material::FlowerRed,
+        Material::FlowerYellow,
+        Material::FlowerWhite,
+        Material::FlowerViolet,
+        Material::Fern,
+        Material::MushroomCap,
+        Material::MushroomStem,
+        Material::BirchBark,
+        Material::BirchLeaves,
+        Material::PalmTrunk,
+        Material::PalmLeaves,
+        Material::DeadWood,
+        Material::Stone,
+        Material::WillowLeaves,
+        Material::DryShrub,
     ];
 
     pub const fn id(self) -> u8 {
@@ -59,11 +91,33 @@ impl Material {
         !matches!(self, Material::Air)
     }
 
-    /// Part of a plant (trunk, foliage, cactus), not of the ground.
+    /// Part of a plant or of what lies on the ground (stones), not of the ground itself.
     pub const fn is_plant(self) -> bool {
+        !matches!(
+            self,
+            Material::Air
+                | Material::Grass
+                | Material::ForestFloor
+                | Material::Dirt
+                | Material::Sand
+                | Material::DesertSand
+                | Material::Sandstone
+                | Material::Rock
+                | Material::Snow
+                | Material::Gravel
+                | Material::DryGrass
+                | Material::Clay
+        )
+    }
+
+    /// Leaves of a tree crown: where falling leaves come from.
+    pub const fn is_canopy(self) -> bool {
         matches!(
             self,
-            Material::Wood | Material::Leaves | Material::PineNeedles | Material::Cactus
+            Material::Leaves
+                | Material::BirchLeaves
+                | Material::WillowLeaves
+                | Material::PalmLeaves
         )
     }
 }

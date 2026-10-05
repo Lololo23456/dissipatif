@@ -28,6 +28,60 @@ pub enum Plant {
     Cactus,
     /// Low round shrub.
     Bush,
+    /// Slender white-barked tree with a light, narrow crown.
+    Birch,
+    /// Weeping tree whose foliage hangs in curtains; grows by the water.
+    Willow,
+    /// Curved trunk and a crown of drooping fronds; grows on beaches.
+    Palm,
+    /// Bare grey trunk and a few broken branches.
+    DeadTree,
+    // Ground cover: small, dense, many per area.
+    /// A tuft of tall grass blades.
+    Grass,
+    /// A flower on its stem.
+    Flower,
+    /// Fronds radiating from the ground.
+    Fern,
+    /// One to three mushrooms.
+    Mushroom,
+    /// A stone or a few pebbles.
+    Stone,
+    /// A twiggy dry shrub of hot, dry lands.
+    DryShrub,
+}
+
+impl Plant {
+    pub const ALL: [Plant; 15] = [
+        Plant::Broadleaf,
+        Plant::Pine,
+        Plant::Acacia,
+        Plant::Cactus,
+        Plant::Bush,
+        Plant::Birch,
+        Plant::Willow,
+        Plant::Palm,
+        Plant::DeadTree,
+        Plant::Grass,
+        Plant::Flower,
+        Plant::Fern,
+        Plant::Mushroom,
+        Plant::Stone,
+        Plant::DryShrub,
+    ];
+
+    /// Small things on the ground, scattered densely, not trees.
+    pub const fn is_ground_cover(self) -> bool {
+        matches!(
+            self,
+            Plant::Grass
+                | Plant::Flower
+                | Plant::Fern
+                | Plant::Mushroom
+                | Plant::Stone
+                | Plant::DryShrub
+        )
+    }
 }
 
 impl Biome {
@@ -80,13 +134,65 @@ impl Biome {
     /// Plants of the biome, each with the probability that a candidate spot grows one.
     pub const fn plants(self) -> &'static [(Plant, f32)] {
         match self {
-            Biome::Forest => &[(Plant::Broadleaf, 0.75), (Plant::Bush, 0.15)],
-            Biome::Taiga => &[(Plant::Pine, 0.8)],
-            Biome::Plains => &[(Plant::Broadleaf, 0.05), (Plant::Bush, 0.12)],
-            Biome::Savanna => &[(Plant::Acacia, 0.12), (Plant::Bush, 0.1)],
-            Biome::Desert => &[(Plant::Cactus, 0.12)],
-            Biome::Mountain => &[(Plant::Pine, 0.08)],
-            Biome::Ocean | Biome::Beach | Biome::SnowyPeak => &[],
+            Biome::Forest => &[
+                (Plant::Broadleaf, 0.55),
+                (Plant::Birch, 0.15),
+                (Plant::Bush, 0.12),
+                (Plant::DeadTree, 0.02),
+            ],
+            Biome::Taiga => &[
+                (Plant::Pine, 0.72),
+                (Plant::Birch, 0.06),
+                (Plant::DeadTree, 0.03),
+            ],
+            Biome::Plains => &[
+                (Plant::Broadleaf, 0.04),
+                (Plant::Birch, 0.02),
+                (Plant::Bush, 0.12),
+            ],
+            Biome::Savanna => &[
+                (Plant::Acacia, 0.12),
+                (Plant::Bush, 0.08),
+                (Plant::DeadTree, 0.02),
+            ],
+            Biome::Desert => &[(Plant::Cactus, 0.12), (Plant::DeadTree, 0.01)],
+            Biome::Mountain => &[(Plant::Pine, 0.08), (Plant::DeadTree, 0.02)],
+            Biome::Beach => &[(Plant::Palm, 0.1)],
+            Biome::Ocean | Biome::SnowyPeak => &[],
+        }
+    }
+
+    /// Ground cover of the biome: for each column, the chance of each kind.
+    pub const fn ground_cover(self) -> &'static [(Plant, f32)] {
+        match self {
+            Biome::Plains => &[
+                (Plant::Grass, 0.45),
+                (Plant::Flower, 0.045),
+                (Plant::Stone, 0.01),
+            ],
+            Biome::Forest => &[
+                (Plant::Fern, 0.12),
+                (Plant::Grass, 0.12),
+                (Plant::Mushroom, 0.025),
+                (Plant::Flower, 0.02),
+                (Plant::Stone, 0.01),
+            ],
+            Biome::Taiga => &[
+                (Plant::Fern, 0.08),
+                (Plant::Mushroom, 0.03),
+                (Plant::Stone, 0.02),
+                (Plant::Grass, 0.04),
+            ],
+            Biome::Savanna => &[
+                (Plant::Grass, 0.35),
+                (Plant::DryShrub, 0.008),
+                (Plant::Stone, 0.01),
+            ],
+            Biome::Desert => &[(Plant::DryShrub, 0.008), (Plant::Stone, 0.012)],
+            Biome::Beach => &[(Plant::Stone, 0.01)],
+            Biome::Mountain => &[(Plant::Stone, 0.05), (Plant::Grass, 0.04)],
+            Biome::SnowyPeak => &[(Plant::Stone, 0.015)],
+            Biome::Ocean => &[],
         }
     }
 }

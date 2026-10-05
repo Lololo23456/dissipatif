@@ -1,26 +1,32 @@
-//! Turns a generated `World` into what the renderer draws: the ground and plant voxels (one
-//! opaque volume coloured by material) and the water surface (one transparent volume).
+//! Turns a generated `World` into what the renderer draws: the ground voxels (one opaque
+//! volume coloured by material), the plants (micro-voxel models drawn by instancing) and the
+//! water surface (one transparent volume).
 
+use glam::Vec3;
 use render::mesh::MeshData;
-use render::mesher::mesh_field;
+use render::mesher::{mesh_field, mesh_materials};
 use render::palette;
 use render::water_mesher::mesh_water;
-use render::{LifeStyle, Renderer, VolumeStyle};
+use render::{LifeStyle, ModelInstance, Renderer, VolumeStyle};
 use sim::grid::{Dims, Field2, Field3};
 use world::noise::hash_unit;
-use world::{Material, World};
+use world::plants::{MICRO, VARIANTS};
+use world::{Biome, Material, Plant, World};
 
 /// Seed offset of the per-voxel brightness variation.
 const VARIATION_SEED: u64 = 0x5eed;
 
 /// The world, ready to upload.
 pub struct SceneData {
+    dims: Dims,
     /// Material id + brightness variation in [0, 1) per voxel (see `VolumeStyle::materials`).
     solid_look: Field3,
     solid_mesh: MeshData,
     /// Water: depth per column (a 2D grid stored with a height of 1), and its surface mesh.
     water_depth: Field3,
     water_mesh: MeshData,
+    /// One mesh per plant model (kind × variant) and where each is drawn.
+    plant_models: Vec<(MeshData, Vec<ModelInstance>)>,
     /// No overlays yet: zero fields with the shapes of the textures above.
     no_overlay_solid: Field3,
     no_overlay_water: Field3,
@@ -33,7 +39,9 @@ impl SceneData {
         let mut occupied = Field3::filled(dims, 0.0);
         let mut solid_look = Field3::filled(dims, 0.0);
         for (i, &id) in world.blocks().iter().enumerate() {
-            if id == Material::Air.id() {
+            // Plants are drawn from their models; the world grid only has a coarse copy.
+            let plant = Material::from_id(id).is_some_and(Material::is_plant);
+            if id == Material::Air.id() || plant {
                 continue;
             }
             occupied.data[i] = 1.0;
@@ -62,7 +70,51 @@ impl SceneData {
         let mut water_mesh = MeshData::default();
         mesh_water(&floor, &surface, &mut water_mesh);
 
+        // Plants: one mesh per model, a quarter of a cell per micro-voxel, its origin where the
+        // plant stands (centre of the bottom of its base cell).
+        // Instances grouped by model in one pass: index = kind × VARIANTS + variant.
+        let model_index = |plant: Plant, variant: u32| {
+            let kind = Plant::ALL.iter().position(|&p| p == plant).unwrap_or(0);
+            kind * VARIANTS as usize + variant as usize
+        };
+        let mut grouped = vec![Vec::new(); Plant::ALL.len() * VARIANTS as usize];
+        for p in world.plants() {
+            let [x, y, z] = p.base;
+            let biome = world.biome(x, z);
+            grouped[model_index(p.plant, p.variant)].push(ModelInstance::new(
+                [
+                    x as f32 + 0.5 + p.offset[0],
+                    y as f32,
+                    z as f32 + 0.5 + p.offset[1],
+                ],
+                p.rotation,
+                p.mirrored,
+                p.scale,
+                foliage_tint(p.plant, biome, p.base, p.offset, seed),
+                flexibility(p.plant),
+            ));
+        }
+        let mut plant_models = Vec::new();
+        for plant in Plant::ALL {
+            for variant in 0..VARIANTS {
+                let model = world.model(plant, variant);
+                let mut mesh = MeshData::default();
+                mesh_materials(
+                    &model.voxels,
+                    model.dims,
+                    model.anchor.map(|a| a as f32),
+                    1.0 / MICRO as f32,
+                    seed ^ (plant as u64 * 31 + variant as u64),
+                    &mut mesh,
+                );
+                let instances = std::mem::take(&mut grouped[model_index(plant, variant)]);
+                plant_models.push((mesh, instances));
+            }
+        }
+
         Self {
+            dims,
+            plant_models,
             no_overlay_solid: Field3::filled(dims, 0.0),
             no_overlay_water: Field3::filled(columns, 0.0),
             solid_look,
@@ -80,9 +132,17 @@ impl SceneData {
         self.water_mesh.face_count()
     }
 
+    /// Faces of all plant models (each drawn many times).
+    pub fn plant_model_faces(&self) -> usize {
+        self.plant_models.iter().map(|(m, _)| m.face_count()).sum()
+    }
+
     /// Adds the world's volumes to a renderer and uploads everything (the world is static,
     /// nothing needs updating afterwards).
     pub fn install(&self, renderer: &mut Renderer) {
+        // The whole world casts and receives shadows.
+        let Dims { nx, ny, nz } = self.dims;
+        renderer.set_scene_bounds(Vec3::ZERO, Vec3::new(nx as f32, ny as f32, nz as f32));
         let solid = renderer.add_volume(&VolumeStyle {
             origin: [0.0; 3],
             palette: palette::earth(),
@@ -106,7 +166,72 @@ impl SceneData {
         renderer.upload_base(water, &self.water_depth);
         renderer.upload_life(water, &self.no_overlay_water);
         renderer.upload_mesh(water, &self.water_mesh);
+        for (mesh, instances) in &self.plant_models {
+            let model = renderer.add_model(mesh);
+            renderer.set_model_instances(model, instances);
+        }
     }
+}
+
+/// How much a plant bends in the wind: 1 for a broadleaf tree, less for stiffer plants, 0 for
+/// a cactus.
+///
+/// The bending grows with the square of the height (see `wind` in voxel.wgsl), so small plants
+/// need a large flexibility to move at all: a grass blade is a hundred times shorter than a tree.
+fn flexibility(plant: Plant) -> f32 {
+    match plant {
+        Plant::Broadleaf | Plant::Birch => 1.0,
+        Plant::Willow => 0.9,
+        Plant::Acacia => 0.8,
+        Plant::Palm => 0.7,
+        Plant::Pine => 0.6,
+        Plant::Bush => 0.5,
+        Plant::DeadTree => 0.2,
+        Plant::Grass => 4.0,
+        Plant::Flower => 3.5,
+        Plant::Fern => 2.0,
+        Plant::DryShrub => 0.8,
+        Plant::Cactus | Plant::Mushroom | Plant::Stone => 0.0,
+    }
+}
+
+/// Seed offset of the foliage shades.
+const TINT_SEED: u64 = 0x7147;
+/// Share of broadleaf trees already turning orange.
+const AUTUMN_SHARE: f32 = 0.07;
+
+/// Colour multiplier of a plant's foliage: each plant its own shade. Brightness and warmth
+/// (from blue-green to yellow-green) vary; a few broadleaf trees have turned orange. Conifers
+/// stay in cooler, darker greens.
+fn foliage_tint(
+    plant: Plant,
+    biome: Biome,
+    base: [usize; 3],
+    offset: [f32; 2],
+    seed: u64,
+) -> [f32; 3] {
+    // Ground cover shares columns: the offset tells two tufts of the same column apart.
+    let sub = (offset[0] * 997.0) as i64 ^ ((offset[1] * 991.0) as i64) << 16;
+    let draw = |k: i64| hash_unit(seed ^ TINT_SEED, &[base[0] as i64, base[2] as i64, sub, k]);
+    if plant == Plant::Grass && biome == Biome::Savanna {
+        // Dry season grass: straw yellow.
+        let b = 0.9 + 0.2 * draw(4);
+        return [1.25 * b, 1.05 * b, 0.55 * b];
+    }
+    if plant == Plant::Broadleaf && draw(0) < AUTUMN_SHARE {
+        // Late-summer turn: from golden to burnt orange.
+        let t = draw(1);
+        return [1.45 + 0.15 * t, 1.0 - 0.15 * t, 0.45];
+    }
+    let (brightness, warmth) = match plant {
+        Plant::Pine => (0.8 + 0.25 * draw(2), -draw(3)),
+        _ => (0.85 + 0.27 * draw(2), 2.0 * draw(3) - 1.0),
+    };
+    [
+        brightness * (1.0 + 0.1 * warmth),
+        brightness * (1.0 + 0.04 * warmth),
+        brightness * (1.0 - 0.15 * warmth),
+    ]
 }
 
 /// An overlay that never shows: its field stays at zero, below the fade.

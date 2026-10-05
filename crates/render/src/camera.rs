@@ -78,6 +78,7 @@ impl OrbitCamera {
 ///     view_proj: mat4x4<f32>,  // offset 0, size 64
 ///     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
 ///     time: vec4<f32>,         // offset 80: x = seconds since start, yzw unused
+///     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
 /// }
 /// ```
 #[repr(C)]
@@ -89,16 +90,50 @@ pub struct CameraUniform {
     pub eye: [f32; 4],
     /// x: seconds since start, for animations (water ripples). yzw unused.
     pub time: [f32; 4],
+    /// World → clip space of the sun, for shadows (see `light_view_proj`).
+    pub light_view_proj: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
-    pub fn new(camera: &OrbitCamera, aspect: f32, time: f32) -> Self {
+    pub fn new(camera: &OrbitCamera, aspect: f32, time: f32, light_view_proj: Mat4) -> Self {
         Self {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
             eye: camera.eye().extend(camera.distance).to_array(),
             time: [time, 0.0, 0.0, 0.0],
+            light_view_proj: light_view_proj.to_cols_array_2d(),
         }
     }
+}
+
+/// The sun's view of the scene, for its shadow map: an orthographic projection (sun rays are
+/// parallel, so no perspective) looking along `-towards_sun`, fitted tightly around the box
+/// [`min`, `max`] so that the whole scene fits in the map and no texel is wasted.
+pub fn light_view_proj(towards_sun: Vec3, min: Vec3, max: Vec3) -> Mat4 {
+    let direction = towards_sun.normalize();
+    let centre = (min + max) * 0.5;
+    let radius = (max - min).length() * 0.5;
+    // Any up vector works as long as it is not parallel to the light.
+    let up = if direction.y.abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let view = look_at_mat4(centre + direction * (2.0 * radius), centre, up);
+    // Bounds of the box seen from the sun.
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for corner in 0..8 {
+        let p = Vec3::new(
+            if corner & 1 == 0 { min.x } else { max.x },
+            if corner & 2 == 0 { min.y } else { max.y },
+            if corner & 4 == 0 { min.z } else { max.z },
+        );
+        let v = view.transform_point3(p);
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    // Right-handed view space looks down −z: the nearest points have the largest z.
+    let proj = directx::orthographic(lo.x, hi.x, lo.y, hi.y, -hi.z, -lo.z);
+    proj * view
 }
 
 #[cfg(test)]
@@ -107,9 +142,40 @@ mod tests {
     use glam::Vec4;
 
     #[test]
+    fn light_projection_contains_the_whole_scene() {
+        let (min, max) = (Vec3::ZERO, Vec3::new(256.0, 64.0, 256.0));
+        let light = light_view_proj(Vec3::new(0.45, 0.8, -0.4), min, max);
+        for corner in 0..8 {
+            let p = Vec3::new(
+                if corner & 1 == 0 { min.x } else { max.x },
+                if corner & 2 == 0 { min.y } else { max.y },
+                if corner & 4 == 0 { min.z } else { max.z },
+            );
+            let clip = light * p.extend(1.0);
+            let ndc = clip / clip.w;
+            assert!(
+                ndc.x.abs() <= 1.0 + 1e-4 && ndc.y.abs() <= 1.0 + 1e-4,
+                "{ndc:?}"
+            );
+            assert!(ndc.z >= -1e-4 && ndc.z <= 1.0 + 1e-4, "{ndc:?}");
+        }
+    }
+
+    #[test]
+    fn closer_to_the_sun_means_smaller_depth() {
+        let light = light_view_proj(Vec3::Y, Vec3::ZERO, Vec3::splat(10.0));
+        let depth = |y: f32| {
+            let clip = light * Vec4::new(5.0, y, 5.0, 1.0);
+            clip.z / clip.w
+        };
+        assert!(depth(9.0) < depth(1.0));
+    }
+
+    #[test]
     fn uniform_layout_matches_wgsl() {
         // Uniform structs must be a multiple of 16 bytes.
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 96);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 160);
+        assert_eq!(std::mem::offset_of!(CameraUniform, light_view_proj), 96);
         assert_eq!(std::mem::offset_of!(CameraUniform, eye), 64);
         assert_eq!(std::mem::offset_of!(CameraUniform, time), 80);
     }

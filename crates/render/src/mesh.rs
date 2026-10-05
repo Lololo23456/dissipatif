@@ -48,6 +48,16 @@ pub struct Vertex {
     pub ao: f32,
 }
 
+/// Flag bit of `Vertex::cell`: the vertex carries its material directly (id in bits 0–7,
+/// brightness variation in bits 8–15) instead of the coordinates of a texel to read it from.
+/// Used by models (plants), which are not part of a voxel field.
+pub const DIRECT_MATERIAL: u32 = 1 << 31;
+
+/// Packs a material id and a brightness variation (0–255) into `Vertex::cell`.
+pub fn pack_material(id: u8, variation: u8) -> u32 {
+    DIRECT_MATERIAL | id as u32 | ((variation as u32) << 8)
+}
+
 /// Packs cell coordinates into one `u32`. Unpacked in `shaders/voxel.wgsl`.
 pub fn pack_cell([x, y, z]: [u32; 3]) -> u32 {
     debug_assert!(x < MAX_GRID_SIZE && y < MAX_GRID_SIZE && z < MAX_GRID_SIZE);
@@ -95,16 +105,31 @@ impl MeshData {
     ///
     /// Triangles are counter-clockwise seen from outside, so back-face culling keeps them.
     pub fn push_face(&mut self, cell: [u32; 3], normal: [i32; 3], ao: [f32; 4]) {
+        self.push_face_scaled(cell, normal, ao, [0.0; 3], 1.0, pack_cell(cell));
+    }
+
+    /// Like `push_face`, for a voxel of `scale` world units whose grid starts at `offset`, with
+    /// `packed` stored in `Vertex::cell` (`pack_cell` or `pack_material`).
+    pub fn push_face_scaled(
+        &mut self,
+        cell: [u32; 3],
+        normal: [i32; 3],
+        ao: [f32; 4],
+        offset: [f32; 3],
+        scale: f32,
+        packed: u32,
+    ) {
         let (u, v) = face_tangents(normal);
         let base = self.vertices.len() as u32;
         let n = normal.map(|c| c as f32);
-        let packed = pack_cell(cell);
         for (k, (su, sv)) in FACE_CORNERS.into_iter().enumerate() {
             // Corner offset in the cube [0,1]³: the face sits on the side the normal points to.
             let corner: [i32; 3] =
                 std::array::from_fn(|i| normal[i].max(0) + su * u[i] + sv * v[i]);
             self.vertices.push(Vertex {
-                position: std::array::from_fn(|i| cell[i] as f32 + corner[i] as f32),
+                position: std::array::from_fn(|i| {
+                    offset[i] + scale * (cell[i] as f32 + corner[i] as f32)
+                }),
                 normal: n,
                 cell: packed,
                 ao: ao[k],

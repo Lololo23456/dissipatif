@@ -1,9 +1,11 @@
-//! Binaire jouable. Pour l'instant : un monde procédural statique (relief, mer, plages, déserts,
-//! forêts, montagnes, rivières, lacs), vu par la caméra plongeante.
+//! Binaire jouable. Pour l'instant : un monde procédural (relief, mer, plages, déserts, forêts,
+//! montagnes, rivières, lacs), vu par la caméra plongeante. Le feuillage ondule au vent, du
+//! pollen flotte dans la lumière, des feuilles tombent.
 //! Commandes : glisser avec le bouton gauche pour tourner, molette pour zoomer.
 //! `--seed N` choisit le monde ; `--capture fichier.png` enregistre une vue sans fenêtre.
 //! Prochaine étape : remettre la vie (eau qui coule, érosion, végétation qui pousse).
 
+mod ambient;
 mod scene;
 
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 use world::{World, WorldConfig};
 
+use ambient::Ambient;
 use scene::SceneData;
 
 /// Radians of rotation per pixel of mouse drag.
@@ -27,6 +30,10 @@ const ZOOM_STEP: f32 = 0.9;
 /// Pixels of trackpad scroll counted as one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 50.0;
 const DEFAULT_SEED: u64 = 1;
+/// Seed offset of the particles in the air.
+const AMBIENT_SEED: u64 = 0xa1b;
+/// Frame duration used to advance the air when capturing (60 frames per second).
+const CAPTURE_STEP: f32 = 1.0 / 60.0;
 
 /// Window and renderer are created together on `resumed`, so they are either both present or both absent.
 struct Graphics {
@@ -38,8 +45,11 @@ struct Graphics {
 
 struct App {
     graphics: Option<Graphics>,
+    world: World,
     data: SceneData,
+    ambient: Ambient,
     start: Instant,
+    last_frame: Instant,
     camera: OrbitCamera,
     dragging: bool,
     last_cursor: Option<PhysicalPosition<f64>>,
@@ -53,19 +63,26 @@ impl App {
         let generated = start.elapsed();
         let data = SceneData::build(&world);
         println!(
-            "Monde {seed} : généré en {:.0} ms, préparé en {:.0} ms ({} faces, {} faces d'eau, {} plantes)",
+            "Monde {seed} : généré en {:.0} ms, préparé en {:.0} ms ({} faces, {} faces d'eau, \
+             {} plantes, {} éléments au sol, {} faces de modèles)",
             generated.as_secs_f64() * 1000.0,
             (start.elapsed() - generated).as_secs_f64() * 1000.0,
             data.solid_faces(),
             data.water_faces(),
             world.plant_count(),
+            world.ground_cover_count(),
+            data.plant_model_faces(),
         );
         let dims = config.dims;
         let centre = Vec3::new(dims.nx as f32 / 2.0, config.sea_level, dims.nz as f32 / 2.0);
+        let ambient = Ambient::new(&world, seed ^ AMBIENT_SEED);
         Self {
             graphics: None,
+            world,
             data,
+            ambient,
             start,
+            last_frame: Instant::now(),
             camera: OrbitCamera::framing(centre, 0.45 * dims.nx.max(dims.nz) as f32),
             dragging: false,
             last_cursor: None,
@@ -103,7 +120,14 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                let time = self.start.elapsed().as_secs_f32();
+                let now = Instant::now();
+                // Clamped: after a pause of the window (dragging, sleep), no huge jump.
+                let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+                self.last_frame = now;
+                let time = (now - self.start).as_secs_f32();
+                let target = [self.camera.target.x, self.camera.target.z];
+                self.ambient.update(dt, time, target, &self.world);
+                graphics.renderer.upload_particles(self.ambient.instances());
                 graphics.renderer.render(&self.camera, time);
             }
             WindowEvent::Resized(size) => graphics.renderer.resize(size.width, size.height),
@@ -157,11 +181,13 @@ struct CaptureOptions {
     pitch: Option<f32>,
     zoom: f32,
     at: Option<(f32, f32)>,
+    /// Seconds of animation (wind, particles) before the picture.
+    time: f32,
 }
 
 impl Options {
     /// `[--seed N] [--capture file.png [--size WxH] [--yaw DEG] [--pitch DEG] [--zoom F]
-    /// [--at X,Z]]`.
+    /// [--at X,Z] [--time SECONDS]]`.
     fn from_args(args: &[String]) -> Result<Self, String> {
         let value = |name: &str| -> Option<&str> {
             args.iter()
@@ -200,6 +226,7 @@ impl Options {
                     pitch: number("--pitch")?,
                     zoom: number("--zoom")?.unwrap_or(1.0),
                     at: pair("--at", ',')?,
+                    time: number("--time")?.unwrap_or(0.0),
                 })
             }
             None => None,
@@ -221,9 +248,17 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.camera.orbit(0.0, pitch.to_radians() - app.camera.pitch);
     }
     app.camera.zoom(options.zoom);
+    // Let the air come to life: run the particles frame by frame up to the requested time.
+    let target = [app.camera.target.x, app.camera.target.z];
+    let frames = (options.time / CAPTURE_STEP) as usize;
+    for frame in 0..frames {
+        let time = frame as f32 * CAPTURE_STEP;
+        app.ambient.update(CAPTURE_STEP, time, target, &app.world);
+    }
     let mut renderer = Renderer::new(Gpu::offscreen(options.width, options.height));
     app.data.install(&mut renderer);
-    renderer.render(&app.camera, 0.0);
+    renderer.upload_particles(app.ambient.instances());
+    renderer.render(&app.camera, options.time);
     let (width, height, pixels) = renderer
         .capture()
         .ok_or("pas d'image hors écran à relire")?;

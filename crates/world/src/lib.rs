@@ -13,12 +13,15 @@ pub mod drainage;
 pub mod land;
 pub mod material;
 pub mod noise;
+pub mod plants;
 pub mod vegetation;
 
 use sim::grid::{Dims, Field2};
 
-pub use biome::Biome;
+pub use biome::{Biome, Plant};
 pub use material::{MATERIAL_COUNT, Material};
+pub use plants::Model;
+pub use vegetation::PlantInstance;
 
 /// Columns within this distance of the open sea and at most `BEACH_RISE` above it are beach.
 const BEACH_WIDTH: u32 = 5;
@@ -62,7 +65,9 @@ pub struct World {
     tops: Vec<usize>,
     /// Material of every voxel, as `Material` ids, indexed like `Dims::index`.
     blocks: Vec<u8>,
-    plants: usize,
+    plants: Vec<PlantInstance>,
+    /// `plants::VARIANTS` models per kind of plant, in `Plant::ALL` order.
+    models: Vec<Model>,
 }
 
 impl World {
@@ -74,10 +79,7 @@ impl World {
         } = config;
         let (nx, nz) = (dims.nx, dims.nz);
         let n = nx * nz;
-        assert!(
-            dims.ny >= vegetation::HEADROOM + 32,
-            "world too low: {dims:?}"
-        );
+        assert!(dims.ny >= 40, "world too low: {dims:?}");
 
         let mut land = land::generate(nx, nz, sea_level, seed);
         // Biomes from the relief before rivers are carved: a river does not change the climate.
@@ -102,7 +104,9 @@ impl World {
         let ground = land.height;
         let water = drainage.water_level;
 
-        let max_top = dims.ny - vegetation::HEADROOM;
+        // Plants only grow where there is room above (see `vegetation::HEADROOM`); the ground
+        // itself may rise almost to the top of the world.
+        let max_top = dims.ny - 2;
         let tops: Vec<usize> = ground
             .data
             .iter()
@@ -132,17 +136,26 @@ impl World {
             }
         }
 
-        let plants = vegetation::grow(
-            &mut blocks,
-            &vegetation::Ground {
-                dims,
-                tops: &tops,
-                height: &ground.data,
-                biomes: &biomes,
-                wet: &wet,
-            },
-            seed,
-        );
+        let water_distance = land::distance_to(&wet, nx, nz);
+        let vegetation_ground = vegetation::Ground {
+            dims,
+            tops: &tops,
+            height: &ground.data,
+            biomes: &biomes,
+            wet: &wet,
+            water_distance: &water_distance,
+        };
+        let mut plants = vegetation::place(&vegetation_ground, seed);
+        let models: Vec<Model> = Plant::ALL
+            .iter()
+            .flat_map(|&plant| (0..plants::VARIANTS).map(move |v| plants::model(plant, v, seed)))
+            .collect();
+        // Only trees and shrubs get a coarse copy in the world grid; ground cover is too small.
+        for plant in &plants {
+            let model = &models[model_index(plant.plant, plant.variant)];
+            vegetation::stamp(&mut blocks, dims, plant, model);
+        }
+        plants.extend(vegetation::place_ground_cover(&vegetation_ground, seed));
 
         Self {
             config,
@@ -152,6 +165,7 @@ impl World {
             tops,
             blocks,
             plants,
+            models,
         }
     }
 
@@ -183,10 +197,33 @@ impl World {
         (self.water.data[i] > self.ground.data[i]).then_some(self.water.data[i])
     }
 
-    /// Number of trees, cacti and bushes grown.
+    /// Number of trees, cacti and bushes grown (ground cover excluded).
     pub fn plant_count(&self) -> usize {
         self.plants
+            .iter()
+            .filter(|p| !p.plant.is_ground_cover())
+            .count()
     }
+
+    /// Number of grass tufts, flowers, ferns, mushrooms, stones and dry shrubs.
+    pub fn ground_cover_count(&self) -> usize {
+        self.plants.len() - self.plant_count()
+    }
+
+    /// Every plant of the world, ground cover included.
+    pub fn plants(&self) -> &[PlantInstance] {
+        &self.plants
+    }
+
+    /// The micro-voxel model of a variant of a plant.
+    pub fn model(&self, plant: Plant, variant: u32) -> &Model {
+        &self.models[model_index(plant, variant)]
+    }
+}
+
+fn model_index(plant: Plant, variant: u32) -> usize {
+    let kind = Plant::ALL.iter().position(|&p| p == plant).unwrap_or(0);
+    kind * plants::VARIANTS as usize + variant as usize
 }
 
 /// (surface, subsoil, bedrock) materials of a column.

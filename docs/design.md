@@ -36,6 +36,7 @@ Généré à partir d'une graine (crate `world`) : la forme des terres (île, ar
 - **Biomes** : mer, plages, déserts à dunes, savanes, prairies, forêts de feuillus, forêts de conifères, montagnes rocheuses, sommets enneigés.
 - **Eau** : mer, lacs dans les cuvettes, rivières qui descendent vers la mer avec leurs affluents.
 - **Plus tard, un monde qui change** : l'eau qui coule et érode, les rivières qui creusent et migrent (méandres), la végétation qui pousse et recule, les saisons et la météo.
+- **Événements** : des phénomènes rares et marquants qui transforment le monde et laissent des traces durables : tornades qui couchent une forêt sur leur passage, arbres qui tombent (vieillesse, tempête, foudre), crues qui déplacent une rivière, incendies de forêt et repousse, éboulements en montagne. Ce sont eux aussi des structures loin de l'équilibre (une tornade est une structure dissipative), et le joueur apprend à les lire et à les anticiper.
 
 ## La vie
 
