@@ -1,0 +1,10 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sim.workspace = true
+render.workspace = true
+winit.workspace = true
+pollster.workspace = true

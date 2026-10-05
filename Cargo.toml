@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/sim", "crates/render", "crates/game", "crates/lab"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+# Versions épinglées : voir docs/decisions.md avant de les changer.
+[workspace.dependencies]
+wgpu = "30.0"
+winit = "0.30"
+glam = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+
+sim = { path = "crates/sim" }
+render = { path = "crates/render" }
+
+[profile.dev.package."*"]
+# Les dépendances (wgpu…) compilées optimisées même en debug : le jeu reste fluide pendant le développement.
+opt-level = 2

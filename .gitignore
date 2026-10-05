@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+CLAUDE.local.md
+.claude/settings.local.json
+/crates/lab/results/
