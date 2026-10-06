@@ -51,16 +51,16 @@ Il existe, mais pas à la Minecraft :
 - **la nature réagit** : l'eau s'accumule dans le trou, un sol sans soutien s'éboule, les racines tiennent le terrain, le trou se comble avec le temps ;
 - techniquement, il demande un remaillage local : à faire avec la simulation de l'eau et des éboulements, pas avant.
 
-### L'artisanat : des propriétés, pas des recettes
+### L'artisanat : la fonction naît de la physique
 
-On ne combine pas « 3 bois + 2 pierres = hache » : on assemble des matières, et leurs propriétés décident de ce que l'objet peut faire.
+Pas de recettes, pas de menu, pas de structures prédéfinies. On **pose** des objets dans le monde, et une **simulation physique** décide de ce qu'ils deviennent (`docs/reactions/chaleur-combustion.md`) :
+- des brindilles qui brûlent font un feu ; des pierres autour chauffent et gardent la chaleur ; enfermer le feu le rend plus chaud mais l'étouffe : un four émerge, personne ne l'a programmé ;
+- le feu s'allume par friction : l'effort donne une **braise**, qui allume de l'**amadou**, qui allume le **petit bois** ;
+- une argile modelée doit **sécher** ; humide dans le feu, elle **éclate** ; sèche et maintenue au-dessus de 600 °C, elle devient de la **terre cuite**.
 
-- **Un objet = ses matériaux + sa forme.** Une pierre tranchante attachée à un bâton long coupe et porte loin. Le jeu ne connaît pas « la hache » : il calcule le tranchant (de la pierre), le levier (du manche), la solidité (du plus faible des deux).
-- **Les verbes restent généraux** : assembler, tailler, tresser, chauffer, mouiller, sécher. Chacun transforme des propriétés ; il n'y a pas de verbe « fabriquer » par objet.
-- **La qualité vient du matériau, pas d'un niveau.** Un manche en bois vert plie, en bois sec il casse net, en bois mort il est fragile. Le joueur l'apprend en observant, pas dans un menu : c'est le pilier « comprendre » appliqué à l'artisanat.
-- **Les objets s'usent et retournent à la nature** : le bois pourrit, le métal rouille, la corde moisit à l'humidité. Rien n'est permanent sans entretien.
-- **Pas d'escalade de puissance**, pas d'outil en diamant. Les objets servent à observer, mesurer, survivre ou agir localement, jamais à dominer : un meilleur outil est plus précis, pas plus destructeur.
-- **Les ressources sont locales** : les matières dépendent du biome, donc ce qu'on peut fabriquer dépend de l'endroit où l'on est. Cela pousse à explorer.
+**La matière garde son histoire** : son origine (argile de berge ou terre rouge de savane, riche en fer), ce qu'elle a subi (la plus haute température, le temps passé à cuire, l'eau qu'elle contenait). Les objets qui en sont faits en héritent, et les impuretés suivront plus loin dans la chaîne.
+
+Le seul geste « de fabrication » est celui des mains : **modeler** une matière plastique. Tout le reste, c'est poser, attendre, observer.
 
 ## Le joueur
 

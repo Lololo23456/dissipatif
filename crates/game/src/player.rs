@@ -51,6 +51,8 @@ pub struct Controls {
     pub right: bool,
     pub run: bool,
     pub jump: bool,
+    /// Rubbing a fire drill (held).
+    pub rub: bool,
 }
 
 pub struct Player {
@@ -324,6 +326,7 @@ impl Player {
             look: self.look,
             airborne: !self.on_ground && !self.in_water,
             time,
+            gesture: None,
         }
     }
 }

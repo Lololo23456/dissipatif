@@ -167,6 +167,32 @@ pub struct Motion {
     pub airborne: bool,
     /// Seconds since start, for breathing.
     pub time: f32,
+    /// What the hands are doing, if anything (an action's animation).
+    pub gesture: Option<Gesture>,
+}
+
+/// A gesture of the hands, posed over the body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GestureKind {
+    /// Crouching, an arm reaching to the ground: laying or picking something up.
+    Reach,
+    /// Kneeling at a fire drill: one hand holds the spindle, the other saws the bow.
+    Rub,
+    /// Kneeling low, the face close to the ember.
+    Blow,
+    /// A hand up to the mouth.
+    Eat,
+    /// Kneeling at the water, leaning over it.
+    Drink,
+    /// Both hands working a lump in front of the chest.
+    Shape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gesture {
+    pub kind: GestureKind,
+    /// How far into it, 0 (not at all) to 1 (fully): rises and falls for one-off gestures.
+    pub amount: f32,
 }
 
 /// The naturalist in the renderer.
@@ -221,13 +247,15 @@ impl Naturalist {
         let bob = m.stride_phase.sin().abs() * 0.05 * m.stride;
         let breath = (m.time * 1.7).sin() * 0.008 * (1.0 - m.stride);
         let tuck = if m.airborne { 0.5 } else { 0.0 };
-        let root = Mat4::from_translation(m.position + Vec3::Y * (bob + breath))
+        // Gesture: how low the body goes (crouch, kneel), how far the torso leans, the arms.
+        let pose = gesture_pose(m.gesture, m.time);
+        let root = Mat4::from_translation(m.position + Vec3::Y * (bob + breath - pose.lower))
             * Mat4::from_rotation_y(m.facing);
         let place = |part: usize, rotation: Mat4| {
             root * Mat4::from_translation(self.parts[part].attach) * rotation
         };
         // A negative angle around x swings a hanging limb forward (towards +z).
-        let torso = Mat4::from_rotation_x(m.lean);
+        let torso = Mat4::from_rotation_x(m.lean + pose.lean);
         let torso_top = |part: usize, rotation: Mat4| {
             // Arms and head follow the torso's lean: pivot on the waist.
             let waist = self.parts[TORSO].attach;
@@ -237,22 +265,106 @@ impl Naturalist {
                 * rotation
         };
         [
-            place(LEFT_LEG, Mat4::from_rotation_x(-swing - tuck)),
-            place(RIGHT_LEG, Mat4::from_rotation_x(swing - tuck)),
+            place(LEFT_LEG, Mat4::from_rotation_x(-swing - tuck - pose.knees)),
+            place(RIGHT_LEG, Mat4::from_rotation_x(swing - tuck - pose.knees)),
             place(TORSO, torso),
             torso_top(
                 HEAD,
-                Mat4::from_rotation_y(m.look[0]) * Mat4::from_rotation_x(m.look[1] - m.lean),
+                Mat4::from_rotation_y(m.look[0])
+                    * Mat4::from_rotation_x(m.look[1] - m.lean + pose.nod),
             ),
             torso_top(
                 LEFT_ARM,
-                Mat4::from_rotation_x(swing * 0.8) * Mat4::from_rotation_z(-0.06),
+                Mat4::from_rotation_x(swing * 0.8 * (1.0 - pose.hold) + pose.left_arm)
+                    * Mat4::from_rotation_z(-0.06),
             ),
             torso_top(
                 RIGHT_ARM,
-                Mat4::from_rotation_x(-swing * 0.8) * Mat4::from_rotation_z(0.06),
+                Mat4::from_rotation_x(-swing * 0.8 * (1.0 - pose.hold) + pose.right_arm)
+                    * Mat4::from_rotation_z(0.06),
             ),
         ]
+    }
+}
+
+/// How a gesture bends the body: lowered by `lower` (cells), knees forward by `knees`, torso
+/// leaning `lean` and head nodding `nod` (radians), each arm rotated (negative: forward and
+/// up), and how much the arms stop swinging with the walk (`hold`).
+#[derive(Default)]
+struct Pose {
+    lower: f32,
+    knees: f32,
+    lean: f32,
+    nod: f32,
+    left_arm: f32,
+    right_arm: f32,
+    hold: f32,
+}
+
+fn gesture_pose(gesture: Option<Gesture>, time: f32) -> Pose {
+    let Some(g) = gesture else {
+        return Pose::default();
+    };
+    let a = g.amount.clamp(0.0, 1.0);
+    // Kneeling: the body comes down about a leg's length, knees forward.
+    let kneel = |depth: f32| Pose {
+        lower: 0.42 * depth * a,
+        knees: 1.25 * depth * a,
+        hold: a,
+        ..Pose::default()
+    };
+    match g.kind {
+        GestureKind::Reach => Pose {
+            lean: 0.6 * a,
+            nod: 0.3 * a,
+            right_arm: -1.2 * a,
+            ..kneel(0.6)
+        },
+        GestureKind::Rub => {
+            // The bow saws back and forth, a few strokes a second.
+            let stroke = (time * 9.0).sin();
+            Pose {
+                lean: 0.45 * a,
+                nod: 0.4 * a,
+                left_arm: -1.1 * a,
+                right_arm: (-0.9 + 0.35 * stroke) * a,
+                ..kneel(1.0)
+            }
+        }
+        GestureKind::Blow => {
+            let breath = 0.05 * (time * 2.5).sin();
+            Pose {
+                lean: (0.9 + breath) * a,
+                nod: 0.5 * a,
+                left_arm: -0.5 * a,
+                right_arm: -0.5 * a,
+                ..kneel(1.0)
+            }
+        }
+        GestureKind::Eat => Pose {
+            nod: -0.15 * a,
+            right_arm: -2.4 * a,
+            hold: a,
+            ..Pose::default()
+        },
+        GestureKind::Drink => Pose {
+            lean: 1.0 * a,
+            nod: 0.4 * a,
+            left_arm: -1.3 * a,
+            right_arm: -1.3 * a,
+            ..kneel(1.0)
+        },
+        GestureKind::Shape => {
+            let knead = 0.25 * (time * 6.0).sin();
+            Pose {
+                lean: 0.2 * a,
+                nod: 0.35 * a,
+                left_arm: (-1.0 + knead) * a,
+                right_arm: (-1.0 - knead) * a,
+                hold: a,
+                ..Pose::default()
+            }
+        }
     }
 }
 
@@ -270,6 +382,7 @@ mod tests {
             look: [0.0; 2],
             airborne: false,
             time: 0.0,
+            gesture: None,
         }
     }
 

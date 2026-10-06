@@ -86,17 +86,38 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     // ---- What the hands can do ----
     line_y -= LINE * s + 2.0 * s;
     let mut actions = Vec::new();
-    if let Some((_, matter)) = input.state.target(input.world, input.me) {
+    let objects = input.state.objects();
+    if let Some(i) = input.state.object_in_reach(input.me) {
+        let matter = objects.placed()[i].matter;
+        if objects.handleable(i) {
+            actions.push(format!("E  Reprendre : {}", matter.name()));
+        } else {
+            actions.push(format!("{} : trop chaud", matter.name()));
+        }
+    } else if let Some((_, matter)) = input.state.target(input.world, input.me) {
         actions.push(format!("E  Ramasser : {}", matter.name()));
+    } else if let Some(matter) = input.state.ground_sample(input.world, input.me) {
+        actions.push(format!("E  Prélever : {}", matter.name()));
     }
-    if input.state.can_lay(input.me, input.selected) {
-        actions.push("P  Poser le caillou".to_owned());
+    if let Some(stack) = stacks.get(input.selected)
+        && input.state.lay_point(input.world, input.me).is_some()
+    {
+        actions.push(format!("P  Poser : {}", stack.matter.name()));
+    }
+    if input.state.can_shape(input.me, input.selected) {
+        actions.push("F  Modeler une coupelle".to_owned());
+    }
+    if input.state.would_blow(input.me) {
+        actions.push("G (maintenir)  Souffler sur la braise".to_owned());
+    } else if input.state.rub_target(input.me).is_some() {
+        actions.push("G (maintenir)  Frotter pour une braise".to_owned());
     }
     if input.state.can_drink(input.world, input.me) {
         actions.push("B  Boire".to_owned());
     }
     if let Some(stack) = stacks.get(input.selected)
         && stack.matter.edible()
+        && !input.state.can_shape(input.me, input.selected)
     {
         actions.push("F  Manger".to_owned());
     }
@@ -106,15 +127,13 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
         ui.text_shadowed((width - w) / 2.0, line_y, &line, s, ink);
     }
 
-    // ---- Observing the anomaly ----
-    if let Some(anomaly) = input.state.anomaly() {
-        let feet = me.body.position;
-        if anomaly.near(feet.x, feet.z, 3.0) {
-            let activity = (anomaly.activity() * 100.0).round();
-            let line = format!("Le tapis vit sur {activity:.0} % de sa surface");
-            let w = Ui::text_width(&line, s);
-            ui.text_shadowed((width - w) / 2.0, 10.0 * s, &line, s, faint);
-        }
+    // ---- Fire drill progress ----
+    if me.rubbing > 0.0 {
+        let share = (me.rubbing / crate::state::RUB_SECONDS).min(1.0);
+        let (w, h) = (80.0 * s, 3.0 * s);
+        let (x, y) = ((width - w) / 2.0, height * 0.62);
+        ui.rect(x, y, w, h, [0.0, 0.0, 0.0, 0.4]);
+        ui.rect(x, y, w * share, h, rgba(0xf2a35a, 0.9));
     }
 
     // ---- Needs ----

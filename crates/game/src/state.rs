@@ -1,5 +1,6 @@
 //! The state of the game that matters to everyone (what would be shared in multiplayer): the
-//! players' bodies, bags and needs, and what has been taken from the world.
+//! players' bodies, bags and needs, what has been taken from the world, and the objects laid
+//! in it with their physics (heat, fire, firing).
 //!
 //! It changes only in two ways, so that it could one day run on a host and be mirrored:
 //! - `Command`s: every action of a player (steering, picking up, eating, drinking) is a
@@ -12,11 +13,12 @@
 use std::collections::HashMap;
 
 use glam::{Vec2, Vec3};
-use world::World;
+use sim::thermal::KELVIN;
+use world::{Material, World};
 
-use crate::anomaly::Anomaly;
-use crate::items::{Harvest, Inventory, Matter, Refusal, harvest};
+use crate::items::{ClaySource, Harvest, Inventory, Matter, Refusal, harvest};
 use crate::needs::{self, Exposure, Needs};
+use crate::objects::Objects;
 use crate::obstacles::Obstacles;
 use crate::player::{Controls, Player};
 
@@ -26,8 +28,16 @@ pub type PlayerId = u32;
 pub const STEP: f32 = 1.0 / 60.0;
 /// How far the hands reach, horizontally, from the feet.
 const REACH: f32 = 1.4;
-/// Pebbles one can gather at the foot of a boulder (enough to build small walls).
+/// Pebbles one can gather at the foot of a boulder (enough for a hearth).
 const PEBBLES_PER_STONE: u32 = 5;
+/// Seconds of rubbing with a fire drill to get an ember.
+pub const RUB_SECONDS: f32 = 8.0;
+/// How far in front of the feet things are laid, cells.
+const LAY_DISTANCE: f32 = 0.8;
+/// How far from the feet the hands reach when pointing (cells).
+pub const ARM_REACH: f32 = 2.2;
+/// Lumps of clay a dish takes.
+const CLAY_PER_DISH: u32 = 2;
 
 pub struct PlayerState {
     pub id: PlayerId,
@@ -36,6 +46,8 @@ pub struct PlayerState {
     pub needs: Needs,
     controls: Controls,
     camera_yaw: f32,
+    /// Seconds of rubbing towards an ember, while the drill key is held.
+    pub rubbing: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,8 +64,18 @@ pub enum Command {
     Eat { player: PlayerId, slot: usize },
     /// Drink from water within reach.
     Drink { player: PlayerId },
-    /// Lay one of slot `slot` (a stone) on the ground just in front.
+    /// Lay one of slot `slot` on the ground just in front (on top of what is there).
     Lay { player: PlayerId, slot: usize },
+    /// Lay one of slot `slot` at a point the player points at (the mouse), within arm's reach.
+    LayAt {
+        player: PlayerId,
+        slot: usize,
+        at: Vec2,
+    },
+    /// Take what lies at a point (a laid object, a plant, a handful of ground), within reach.
+    PickAt { player: PlayerId, at: Vec2 },
+    /// Shape what slot `slot` holds with the hands (wet clay into a dish).
+    Shape { player: PlayerId, slot: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,8 +84,14 @@ pub enum Failure {
     Bag(Refusal),
     NotEdible,
     NoWater,
-    /// Only stones can be laid, and only on the anomaly's carpet.
+    /// Too hot to take in the hand.
+    TooHot,
+    /// Nowhere to lay it in front (water, a drop).
     CannotLay,
+    /// Nothing that can be shaped (or not enough of it).
+    NothingToShape,
+    /// The fire drill gives no ember in the rain.
+    TooWet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,6 +113,28 @@ pub enum Event {
         player: PlayerId,
         matter: Matter,
     },
+    /// A laid object taken back into the bag.
+    TookBack {
+        player: PlayerId,
+        matter: Matter,
+    },
+    Shaped {
+        player: PlayerId,
+        matter: Matter,
+    },
+    /// The fire drill gave an ember, on the fuel at hand.
+    Ember {
+        player: PlayerId,
+    },
+    /// A plant cleared away from where something was laid (index in `World::plants`).
+    Cleared {
+        plant: usize,
+    },
+    /// Physics changed an object (fired, burst, burnt to ash).
+    Changed {
+        from: Matter,
+        to: Matter,
+    },
     Failed {
         player: PlayerId,
         failure: Failure,
@@ -100,7 +150,14 @@ pub struct GameState {
     /// Things that can be picked, by column (x, z).
     pickables: HashMap<(i64, i64), Vec<usize>>,
     next_id: PlayerId,
-    anomaly: Option<Anomaly>,
+    /// Things laid in the world, and their physics.
+    objects: Objects,
+    /// Rain at the last step (whether a fire drill works).
+    rain: f32,
+    /// What happened during the steps, until the presentation reads it.
+    events: Vec<Event>,
+    /// Scratch list of the objects' changes (reused: no allocation per step).
+    changes: Vec<(Vec3, Matter, Matter)>,
 }
 
 impl GameState {
@@ -122,60 +179,206 @@ impl GameState {
             obstacles: Obstacles::from_world(world),
             pickables,
             next_id: 0,
-            anomaly: None,
+            objects: Objects::default(),
+            rain: 0.0,
+            events: Vec::new(),
+            changes: Vec::new(),
         }
     }
 
-    /// Grows the anomaly in the clearing nearest to `near`. The plants of the clearing give
-    /// way to it: returns them (indices in `World::plants`), to stop drawing them.
-    pub fn grow_anomaly(
-        &mut self,
-        world: &World,
-        near: Vec3,
-        ahead: Vec2,
-        seed: u64,
-    ) -> Vec<usize> {
-        let Some(anomaly) = Anomaly::grow(world, near, ahead, seed) else {
-            return Vec::new();
-        };
-        let mut covered = Vec::new();
-        for (i, p) in world.plants().iter().enumerate() {
-            let (x, z) = position(p);
-            if anomaly.covers(x, z) && !self.removed[i] {
-                self.removed[i] = true;
-                self.obstacles.remove(i);
-                covered.push(i);
+    pub fn objects(&self) -> &Objects {
+        &self.objects
+    }
+
+    /// What happened during the last steps (each event once).
+    pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
+        self.events.drain(..)
+    }
+
+    /// Where player `id` would lay something: on the ground (or on what lies there) a little
+    /// in front of the feet. None over water or a drop.
+    pub fn lay_point(&self, world: &World, id: PlayerId) -> Option<Vec3> {
+        let body = &self.player(id)?.body;
+        let facing = body.facing();
+        let at = Vec2::new(body.position.x, body.position.z)
+            + Vec2::new(facing.sin(), facing.cos()) * LAY_DISTANCE;
+        let dims = world.dims();
+        if at.x < 1.0 || at.y < 1.0 || at.x >= dims.nx as f32 - 1.0 || at.y >= dims.nz as f32 - 1.0
+        {
+            return None;
+        }
+        let (x, z) = (at.x as usize, at.y as usize);
+        if world.water_level(x, z).is_some() {
+            return None;
+        }
+        let ground = world.ground_top(x, z) as f32;
+        if (ground - body.position.y).abs() > 1.1 {
+            return None;
+        }
+        Some(self.objects.resting_point(at.x, at.y, ground))
+    }
+
+    /// Where something laid at `at` would rest, if `at` is within player `id`'s reach, on
+    /// dry ground roughly level with them.
+    pub fn lay_point_at(&self, world: &World, id: PlayerId, at: Vec2) -> Option<Vec3> {
+        let body = &self.player(id)?.body;
+        let feet = Vec2::new(body.position.x, body.position.z);
+        if feet.distance(at) > ARM_REACH {
+            return None;
+        }
+        let dims = world.dims();
+        if at.x < 1.0 || at.y < 1.0 || at.x >= dims.nx as f32 - 1.0 || at.y >= dims.nz as f32 - 1.0
+        {
+            return None;
+        }
+        let (x, z) = (at.x as usize, at.y as usize);
+        if world.water_level(x, z).is_some() {
+            return None;
+        }
+        let ground = world.ground_top(x, z) as f32;
+        if (ground - body.position.y).abs() > 1.6 {
+            return None;
+        }
+        Some(self.objects.resting_point(at.x, at.y, ground))
+    }
+
+    /// The laid object at `at` (within a few centimetres of its centre), if any.
+    pub fn object_at(&self, at: Vec2) -> Option<usize> {
+        self.objects
+            .placed()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, Vec2::new(p.base.x, p.base.z).distance(at)))
+            .filter(|&(i, d)| d < self.objects.body(i).radius + 0.12)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// The plant to gather nearest to `at` (within half a cell), if any.
+    pub fn plant_at(&self, world: &World, at: Vec2) -> Option<(usize, Matter)> {
+        let (cx, cz) = (at.x.floor() as i64, at.y.floor() as i64);
+        let mut best: Option<(f32, usize, Matter)> = None;
+        for z in cz - 1..=cz + 1 {
+            for x in cx - 1..=cx + 1 {
+                for &i in self.pickables.get(&(x, z)).into_iter().flatten() {
+                    if self.removed[i] {
+                        continue;
+                    }
+                    let plant = &world.plants()[i];
+                    let matter = match harvest(plant) {
+                        Some(Harvest::Whole(m)) => m,
+                        Some(Harvest::Part(m))
+                            if self.pebbles_taken.get(&i).copied().unwrap_or(0)
+                                < PEBBLES_PER_STONE =>
+                        {
+                            m
+                        }
+                        _ => continue,
+                    };
+                    let (px, pz) = position(plant);
+                    let d = Vec2::new(px, pz).distance(at);
+                    if d < 0.5 && best.is_none_or(|b| d < b.0) {
+                        best = Some((d, i, matter));
+                    }
+                }
             }
         }
-        self.anomaly = Some(anomaly);
-        covered
+        best.map(|(_, i, m)| (i, m))
     }
 
-    pub fn anomaly(&self) -> Option<&Anomaly> {
-        self.anomaly.as_ref()
+    /// The laid object nearest player `id`'s hands, if within reach.
+    pub fn object_in_reach(&self, id: PlayerId) -> Option<usize> {
+        let body = &self.player(id)?.body;
+        let facing = body.facing();
+        let hands = Vec2::new(body.position.x, body.position.z)
+            + Vec2::new(facing.sin(), facing.cos()) * (LAY_DISTANCE * 0.6);
+        self.objects
+            .placed()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i, Vec2::new(p.base.x, p.base.z).distance(hands)))
+            .filter(|&(_, d)| d < 0.9)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
-    /// Where player `id` would lay something: on the ground just in front of the feet.
-    pub fn lay_point(&self, id: PlayerId) -> Option<Vec2> {
+    /// Where player `id`'s hands are, on the ground in front.
+    pub fn hands(&self, id: PlayerId) -> Option<Vec2> {
         let body = &self.player(id)?.body;
         let facing = body.facing();
         Some(
             Vec2::new(body.position.x, body.position.z)
-                + Vec2::new(facing.sin(), facing.cos()) * 0.9,
+                + Vec2::new(facing.sin(), facing.cos()) * (LAY_DISTANCE * 0.6),
         )
     }
 
-    /// Whether player `id` could lay what is in slot `slot` now.
-    pub fn can_lay(&self, id: PlayerId, slot: usize) -> bool {
-        let (Some(p), Some(anomaly), Some(at)) =
-            (self.player(id), &self.anomaly, self.lay_point(id))
-        else {
-            return false;
-        };
-        matches!(
-            p.inventory.stacks().get(slot).map(|s| s.matter),
-            Some(Matter::Pebble { .. })
-        ) && anomaly.covers(at.x, at.y)
+    /// Whether player `id` would blow (something glows at their hands) rather than rub.
+    pub fn would_blow(&self, id: PlayerId) -> bool {
+        self.hands(id)
+            .is_some_and(|h| self.objects.glowing_near(h.x, h.y))
+    }
+
+    /// Where a fire drill's ember would fall: into the tinder, the dry fuel within reach that
+    /// catches most easily (lowest ignition temperature), nearest the hands if several.
+    pub fn rub_target(&self, id: PlayerId) -> Option<usize> {
+        let body = &self.player(id)?.body;
+        let facing = body.facing();
+        let hands = Vec2::new(body.position.x, body.position.z)
+            + Vec2::new(facing.sin(), facing.cos()) * (LAY_DISTANCE * 0.6);
+        self.objects
+            .placed()
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| {
+                let b = self.objects.body(i);
+                b.fuel.is_some_and(|f| f.mass > 0.0) && b.water < 1e-4 && !b.burning
+            })
+            .map(|(i, p)| (i, Vec2::new(p.base.x, p.base.z).distance(hands)))
+            .filter(|&(_, d)| d < 0.9)
+            .min_by(|a, b| {
+                let ignition =
+                    |i: usize| self.objects.body(i).fuel.map_or(f32::MAX, |f| f.ignition);
+                ignition(a.0)
+                    .total_cmp(&ignition(b.0))
+                    .then(a.1.total_cmp(&b.1))
+            })
+            .map(|(i, _)| i)
+    }
+
+    /// Whether slot `slot` holds enough of something to shape with the hands.
+    pub fn can_shape(&self, id: PlayerId, slot: usize) -> bool {
+        self.player(id)
+            .and_then(|p| p.inventory.stacks().get(slot))
+            .is_some_and(|s| matches!(s.matter, Matter::Clay { .. }) && s.count >= CLAY_PER_DISH)
+    }
+
+    /// What player `id` could take from the ground under their feet: clay on a river bank or
+    /// in a clay soil, sand on a beach or in the desert.
+    pub fn ground_sample(&self, world: &World, id: PlayerId) -> Option<Matter> {
+        let feet = self.player(id)?.body.position;
+        let dims = world.dims();
+        let (x, z) = (feet.x.floor(), feet.z.floor());
+        if x < 1.0 || z < 1.0 || x >= dims.nx as f32 - 1.0 || z >= dims.nz as f32 - 1.0 {
+            return None;
+        }
+        let (x, z) = (x as usize, z as usize);
+        let top = world.ground_top(x, z);
+        if top == 0 {
+            return None;
+        }
+        let near_water = (0..9).any(|k| world.water_level(x + k % 3 - 1, z + k / 3 - 1).is_some());
+        match world.block(x, top - 1, z) {
+            Material::Sand | Material::DesertSand => Some(Matter::Sand),
+            Material::Clay | Material::DryGrass => Some(Matter::Clay {
+                source: ClaySource::RedEarth,
+            }),
+            Material::Grass | Material::ForestFloor | Material::Dirt if near_water => {
+                Some(Matter::Clay {
+                    source: ClaySource::Bank,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// A new player standing at `feet`.
@@ -189,6 +392,7 @@ impl GameState {
             needs: Needs::default(),
             controls: Controls::default(),
             camera_yaw: 0.0,
+            rubbing: 0.0,
         });
         id
     }
@@ -205,6 +409,14 @@ impl GameState {
 
     fn player_mut(&mut self, id: PlayerId) -> Option<&mut PlayerState> {
         self.players.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Puts `matter` straight into player `id`'s bag, bypassing the world: a development tool
+    /// (captures, tests), never used by the game itself.
+    pub fn give(&mut self, id: PlayerId, matter: Matter) {
+        if let Some(p) = self.player_mut(id) {
+            let _ = p.inventory.add(matter);
+        }
     }
 
     /// Moves a player's body to `feet` (tools, captures).
@@ -307,35 +519,32 @@ impl GameState {
                 None
             }
             Command::Pick { player } => {
-                let Some((plant, matter)) = self.target(world, player) else {
-                    return Some(Event::Failed {
-                        player,
-                        failure: Failure::NothingInReach,
-                    });
-                };
-                let p = self.player_mut(player)?;
-                if let Err(refusal) = p.inventory.add(matter) {
-                    return Some(Event::Failed {
-                        player,
-                        failure: Failure::Bag(refusal),
-                    });
+                // A laid object within reach first: taking it back.
+                if let Some(i) = self.object_in_reach(player) {
+                    return self.take_back(player, i);
                 }
-                let removed = match harvest(&world.plants()[plant]) {
-                    Some(Harvest::Whole(_)) => {
-                        self.removed[plant] = true;
-                        self.obstacles.remove(plant);
-                        Some(plant)
+                let Some((plant, matter)) = self.target(world, player) else {
+                    // Nothing to gather: a handful of the ground, if worth taking.
+                    let Some(matter) = self.ground_sample(world, player) else {
+                        return Some(Event::Failed {
+                            player,
+                            failure: Failure::NothingInReach,
+                        });
+                    };
+                    let p = self.player_mut(player)?;
+                    if let Err(refusal) = p.inventory.add(matter) {
+                        return Some(Event::Failed {
+                            player,
+                            failure: Failure::Bag(refusal),
+                        });
                     }
-                    _ => {
-                        *self.pebbles_taken.entry(plant).or_default() += 1;
-                        None
-                    }
+                    return Some(Event::Picked {
+                        player,
+                        matter,
+                        removed: None,
+                    });
                 };
-                Some(Event::Picked {
-                    player,
-                    matter,
-                    removed,
-                })
+                self.gather(world, player, plant, matter)
             }
             Command::Eat { player, slot } => {
                 let p = self.player_mut(player)?;
@@ -351,17 +560,64 @@ impl GameState {
                 p.needs.eat(properties.nutrition, properties.toxicity);
                 Some(Event::Ate { player, matter })
             }
-            Command::Lay { player, slot } => {
-                if !self.can_lay(player, slot) {
+            Command::LayAt { player, slot, at } => {
+                let Some(at) = self.lay_point_at(world, player, at) else {
                     return Some(Event::Failed {
                         player,
                         failure: Failure::CannotLay,
                     });
+                };
+                self.lay_matter(world, player, slot, at)
+            }
+            Command::PickAt { player, at } => {
+                let feet = self.player(player)?.body.position;
+                if Vec2::new(feet.x, feet.z).distance(at) > ARM_REACH {
+                    return Some(Event::Failed {
+                        player,
+                        failure: Failure::NothingInReach,
+                    });
                 }
-                let at = self.lay_point(player)?;
-                let matter = self.player_mut(player)?.inventory.take(slot)?;
-                self.anomaly.as_mut()?.lay_stone(at.x, at.y);
-                Some(Event::Laid { player, matter })
+                if let Some(i) = self.object_at(at) {
+                    return self.take_back(player, i);
+                }
+                if let Some((plant, matter)) = self.plant_at(world, at) {
+                    return self.gather(world, player, plant, matter);
+                }
+                Some(Event::Failed {
+                    player,
+                    failure: Failure::NothingInReach,
+                })
+            }
+            Command::Lay { player, slot } => {
+                let Some(at) = self.lay_point(world, player) else {
+                    return Some(Event::Failed {
+                        player,
+                        failure: Failure::CannotLay,
+                    });
+                };
+                self.lay_matter(world, player, slot, at)
+            }
+            Command::Shape { player, slot } => {
+                if !self.can_shape(player, slot) {
+                    return Some(Event::Failed {
+                        player,
+                        failure: Failure::NothingToShape,
+                    });
+                }
+                let p = self.player_mut(player)?;
+                let Matter::Clay { source } = p.inventory.stacks()[slot].matter else {
+                    return None;
+                };
+                for _ in 0..CLAY_PER_DISH {
+                    p.inventory.take(slot);
+                }
+                let dish = Matter::RawDish { source };
+                // The clay just left the bag: there is room for the dish.
+                let _ = p.inventory.add(dish);
+                Some(Event::Shaped {
+                    player,
+                    matter: dish,
+                })
             }
             Command::Drink { player } => {
                 if !self.can_drink(world, player) {
@@ -376,24 +632,167 @@ impl GameState {
         }
     }
 
+    /// Lays one of slot `slot` at `at` (already checked), clearing the low plants around.
+    fn lay_matter(
+        &mut self,
+        world: &World,
+        player: PlayerId,
+        slot: usize,
+        at: Vec3,
+    ) -> Option<Event> {
+        let air = KELVIN + needs::temperature(world, at, 12.0, self.rain);
+        let matter = self.player_mut(player)?.inventory.take(slot)?;
+        self.objects.lay(matter, at, air);
+        // Laying something clears the low plants around it (as one clears a spot
+        // for a fire).
+        let (cx, cz) = (at.x.floor() as i64, at.z.floor() as i64);
+        for z in cz - 1..=cz + 1 {
+            for x in cx - 1..=cx + 1 {
+                let Some(list) = self.pickables.get(&(x, z)) else {
+                    continue;
+                };
+                for &plant in list {
+                    let p = &world.plants()[plant];
+                    let (px, pz) = position(p);
+                    let close = Vec2::new(px - at.x, pz - at.z).length() < 0.45;
+                    if close
+                        && !self.removed[plant]
+                        && matches!(harvest(p), Some(Harvest::Whole(_)))
+                    {
+                        self.removed[plant] = true;
+                        self.events.push(Event::Cleared { plant });
+                    }
+                }
+            }
+        }
+        Some(Event::Laid { player, matter })
+    }
+
+    /// Takes laid object `i` back into player's bag, unless too hot.
+    fn take_back(&mut self, player: PlayerId, i: usize) -> Option<Event> {
+        if !self.objects.handleable(i) {
+            return Some(Event::Failed {
+                player,
+                failure: Failure::TooHot,
+            });
+        }
+        let matter = self.objects.placed()[i].matter;
+        let p = self.player_mut(player)?;
+        if let Err(refusal) = p.inventory.add(matter) {
+            return Some(Event::Failed {
+                player,
+                failure: Failure::Bag(refusal),
+            });
+        }
+        self.objects.take(i);
+        Some(Event::TookBack { player, matter })
+    }
+
+    /// Gathers `matter` from plant `plant` into player's bag.
+    fn gather(
+        &mut self,
+        world: &World,
+        player: PlayerId,
+        plant: usize,
+        matter: Matter,
+    ) -> Option<Event> {
+        let p = self.player_mut(player)?;
+        if let Err(refusal) = p.inventory.add(matter) {
+            return Some(Event::Failed {
+                player,
+                failure: Failure::Bag(refusal),
+            });
+        }
+        let removed = match harvest(&world.plants()[plant]) {
+            Some(Harvest::Whole(_)) => {
+                self.removed[plant] = true;
+                self.obstacles.remove(plant);
+                Some(plant)
+            }
+            _ => {
+                *self.pebbles_taken.entry(plant).or_default() += 1;
+                None
+            }
+        };
+        Some(Event::Picked {
+            player,
+            matter,
+            removed,
+        })
+    }
+
     /// One fixed step of time: bodies move as steered, needs follow the conditions.
     /// `hour` in [0, 24), `rain` in [0, 1].
     pub fn step(&mut self, world: &World, hour: f32, rain: f32) {
-        if let Some(anomaly) = &mut self.anomaly {
-            anomaly.step();
+        self.rain = rain;
+        // Objects' physics, in the air around the first player (the objects lie near them).
+        let around = self.players.first().map_or(Vec3::ZERO, |p| p.body.position);
+        let air = KELVIN + needs::temperature(world, around, hour, rain);
+        // Blowing (the drill key held over something glowing): fresh air for this step.
+        for p in &self.players {
+            if p.controls.rub {
+                let facing = p.body.facing();
+                let hands = Vec2::new(p.body.position.x, p.body.position.z)
+                    + Vec2::new(facing.sin(), facing.cos()) * (LAY_DISTANCE * 0.6);
+                if self.objects.glowing_near(hands.x, hands.y) {
+                    self.objects.blow(hands.x, hands.y);
+                }
+            }
         }
+        self.changes.clear();
+        self.objects.step(STEP, air, &mut self.changes);
+        for &(_, from, to) in &self.changes {
+            self.events.push(Event::Changed { from, to });
+        }
+        let mut embers = Vec::new();
         for p in &mut self.players {
             p.body.pace = p.needs.pace();
             p.body
                 .update(&p.controls, p.camera_yaw, STEP, world, &self.obstacles);
             p.controls.jump = false;
             let moving = p.body.velocity().length() > 0.5;
+            // A fire close by warms the air.
+            let feet = p.body.position;
+            let fire = self.objects.warmth(feet.x, feet.z, 3.0);
             let exposure = Exposure {
-                temperature: needs::temperature(world, p.body.position, hour, rain),
+                temperature: needs::temperature(world, feet, hour, rain) + fire,
                 running: p.controls.run && moving,
                 in_water: p.body.in_water(),
             };
             p.needs.update(STEP, &exposure);
+            // The fire drill: held still, rubbing turns effort into heat, then an ember. Not
+            // while blowing on something already glowing.
+            let facing = p.body.facing();
+            let hands = Vec2::new(feet.x, feet.z)
+                + Vec2::new(facing.sin(), facing.cos()) * (LAY_DISTANCE * 0.6);
+            let blowing = self.objects.glowing_near(hands.x, hands.y);
+            if p.controls.rub && !moving && !blowing {
+                p.rubbing += STEP;
+                p.needs.food = (p.needs.food - STEP * 0.002).max(0.0);
+                if p.rubbing >= RUB_SECONDS {
+                    p.rubbing = 0.0;
+                    embers.push(p.id);
+                }
+            } else {
+                p.rubbing = 0.0;
+            }
+        }
+        for player in embers {
+            let event = match self.rub_target(player) {
+                _ if rain > 0.5 => Event::Failed {
+                    player,
+                    failure: Failure::TooWet,
+                },
+                Some(i) => {
+                    self.objects.drop_ember(i);
+                    Event::Ember { player }
+                }
+                None => Event::Failed {
+                    player,
+                    failure: Failure::NothingInReach,
+                },
+            };
+            self.events.push(event);
         }
     }
 }
@@ -556,5 +955,97 @@ mod tests {
             state.step(&world, 12.0, 0.0);
         }
         assert!(state.player(id).unwrap().body.position.distance(start) > 1.0);
+    }
+
+    /// A fire from scratch, through commands, the way it is really made: a nest of dry grass,
+    /// an ember from the drill, the grass flames, twigs laid on it catch.
+    #[test]
+    fn a_fire_from_scratch() {
+        let (world, mut state, id) = setup();
+        // Somewhere open and level.
+        let dims = world.dims();
+        let spot = (20..dims.nz - 20)
+            .flat_map(|z| (20..dims.nx - 20).map(move |x| (x, z)))
+            .find(|&(x, z)| {
+                let top = world.ground_top(x, z);
+                (0..3).all(|d| {
+                    world.ground_top(x, z + d) == top && world.water_level(x, z + d).is_none()
+                })
+            })
+            .expect("no flat ground");
+        let feet = Vec3::new(
+            spot.0 as f32 + 0.5,
+            world.ground_top(spot.0, spot.1) as f32,
+            spot.1 as f32 + 0.5,
+        );
+        state.place(id, feet);
+        let lay = |state: &mut GameState, matter: Matter| {
+            state.give(id, matter);
+            let slot = state
+                .player(id)
+                .unwrap()
+                .inventory
+                .stacks()
+                .iter()
+                .position(|s| s.matter == matter)
+                .unwrap();
+            state.apply(&world, Command::Lay { player: id, slot })
+        };
+        // A nest of dry grass, then the drill over it.
+        assert!(matches!(
+            lay(&mut state, Matter::GrassFibre),
+            Some(Event::Laid { .. })
+        ));
+        lay(&mut state, Matter::GrassFibre);
+        let steer = |state: &mut GameState, rub: bool| {
+            let controls = Controls {
+                rub,
+                ..Controls::default()
+            };
+            state.apply(
+                &world,
+                Command::Steer {
+                    player: id,
+                    controls,
+                    camera_yaw: 0.0,
+                },
+            );
+        };
+        steer(&mut state, true);
+        for _ in 0..(60.0 * (RUB_SECONDS + 0.5)) as usize {
+            state.step(&world, 12.0, 0.0);
+        }
+        assert!(
+            state
+                .drain_events()
+                .any(|e| matches!(e, Event::Ember { .. }))
+        );
+        steer(&mut state, false);
+        let any_burning = |state: &GameState| {
+            (0..state.objects().placed().len()).any(|i| state.objects().body(i).burning)
+        };
+        // Blow until the grass flames, then lay the twigs on it.
+        let mut seconds = 0;
+        while !any_burning(&state) && seconds < 120 {
+            for _ in 0..60 {
+                state.step(&world, 12.0, 0.0);
+            }
+            seconds += 1;
+        }
+        assert!(any_burning(&state), "the grass never caught");
+        for _ in 0..3 {
+            lay(&mut state, Matter::DeadTwigs);
+        }
+        let mut twigs_burning = false;
+        for _ in 0..60 * 90 {
+            state.step(&world, 12.0, 0.0);
+            let objects = state.objects();
+            twigs_burning |= objects
+                .placed()
+                .iter()
+                .enumerate()
+                .any(|(i, p)| p.matter == Matter::DeadTwigs && objects.body(i).burning);
+        }
+        assert!(twigs_burning, "the twigs never caught");
     }
 }

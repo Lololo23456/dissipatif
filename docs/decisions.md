@@ -180,3 +180,24 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Boucle centrale : prélever dans le monde → analyser au labo → comprendre → retourner dehors avec une hypothèse. Survie, sac et ramassage servent à rapporter des échantillons ; Gray-Scott (et d'autres règles) anime les récipients ; le labo est la progression (verre, creuset, filtre, balance).
 - Réconciliation avec « la nature est plus forte » : le labo est une petite île de contrôle ; les réactions sont sensibles (température, concentration, impuretés) ; les matières varient selon le lieu.
 - Le tapis d'anomalie dans la clairière est un prototype abandonné ; son code sera retiré ou réutilisé pour les récipients.
+
+## 2026-10-06 — Le joueur construit tout, en commençant par son labo
+- **Actée** : voie stricte pour les réactifs (tout vient du monde par des procédés historiques réels, chaîne dans `docs/chimie/belooussov-jabotinski.md`) ; Belooussov-Jabotinski comme première expérience visée (au manganèse puis au cérium : la ferroïne, molécule de synthèse, est hors d'atteinte). Le joueur construit le labo de départ lui-même et l'améliore librement.
+- Construction par propriétés (`game/src/build.rs`) : un projet demande des choses ayant les bonnes propriétés, pas des objets nommés. Foyer (6 pierres dures et résistantes à la chaleur), paillasse (10), coupelle (2 matières à modeler). Les structures font partie de l'état partagé ; commandes `Build` et `Use` (action selon le contexte : ajouter du combustible, allumer par friction, cuire, sortir, poser sur la paillasse, recueillir les cendres).
+- Le feu : brûle son combustible (0,01 kg/s), s'éteint sans combustible ou sous forte pluie, laisse des cendres (4 %), réchauffe à 3 cases (+14 °C), cuit l'argile en 90 s de feu vif.
+- Prélever : sans plante à cueillir, E prend une poignée du sol : argile sur les berges et en savane, sable sur les plages et au désert.
+- L'Oregonator est préparé dans `crates/sim` (fiche `docs/reactions/oregonator.md`, tests en exercice) ; la vue de près de la boîte viendra quand une réaction aura lieu dans une coupelle.
+- Touches : C construire (puis 1–3), G utiliser. Capture : `--demo-camp`.
+
+## 2026-10-06 — L'artisanat par la physique (remplace la construction par menu)
+- **Actée** : « la fonction naît de la physique » et « la matière garde son histoire ». Plus de menu ni de structures prédéfinies (foyer, paillasse retirés) : on pose des objets (P), une simulation de chaleur et de combustion décide (`sim::thermal`, fiche `docs/reactions/chaleur-combustion.md`), écrite par Claude à la demande de l'utilisateur, qui relit.
+- Réseau thermique : un corps par objet (constantes localisées), échanges par contact, rayonnement exact en T⁴, panache convectif limité à la température des gaz, enfermement par angles solides, combustion avec part retenue (flamme 5 %, braise 60 %) et part chauffée (couche fine), palier d'ébullition, séchage accéléré pour le jeu.
+- Objets posés (`game/src/objects.rs`) avec histoire ; transformations : coupelle crue → terre cuite (> 600 °C pendant 60 s), coupelle humide → tessons (la vapeur la fait éclater), combustible brûlé → cendres. Argile de berge ou rouge (savane) : l'origine suit la matière.
+- Gestes : poser (P), reprendre (E, sauf si trop chaud), modeler (F, argile), frotter (G maintenu, 8 s : une braise sur le combustible sec le plus proche des mains). Poser couche l'herbe autour.
+- Calibré sur des grandeurs réelles et vérifié par des traces : un nid de deux poignées d'herbe prend en ~60 s à la braise, les brindilles posées dessus en ~30 s, ~45 kW, ~1100 K ; une coupelle dans un feu de six fagots monte à ~840 °C (plage réelle de la terre cuite). Les tests encodent la bonne procédure (amadou d'abord) et l'échec de la mauvaise.
+- Capture : `--demo-fire` refait ces gestes.
+
+## 2026-10-06 — Feu jouable, souris, gestes
+- Le feu était infaisable sans connaître la technique. Ajouts réalistes : **souffler** (G maintenu quand quelque chose rougeoit aux mains) apporte de l'air même à un corps enfermé et accélère la combustion (×3) ; la braise tombe dans l'**amadou** (le combustible sec qui s'allume le plus bas) ; un combustible chaud **fume** avant de s'enflammer (pyrolyse), signe qu'il va prendre. Test : en soufflant, même une touffe étouffée sous des brindilles finit par les allumer.
+- Souris : un rayon depuis le curseur jusqu'au sol (à travers feuillages et plantes) ; clic gauche pose, clic droit reprend ou cueille, glisser avec le bouton droit tourne la caméra ; une petite marque montre où l'on pointe (lumineuse si l'on peut poser), portée du bras 2,2 cases. Commandes `LayAt` et `PickAt`.
+- Gestes animés (`naturalist::GestureKind`) : se pencher pour poser ou prendre, à genoux au foret (archet qui va et vient), penché pour souffler, main à la bouche, à genoux pour boire, pétrir l'argile. Joués à partir des événements, ou tant que G est maintenu. Capture : `--pose`.

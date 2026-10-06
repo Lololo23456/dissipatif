@@ -1,14 +1,15 @@
 //! Binaire jouable. Un naturaliste se promène dans un monde procédural (relief, mer, plages,
 //! déserts, forêts, montagnes, rivières, lacs), suivi par la caméra plongeante. Le feuillage
 //! ondule au vent, du pollen flotte dans la lumière, des feuilles tombent.
-//! Commandes (touches par position, ZQSD sur un clavier AZERTY) : Z Q S D pour marcher,
-//! Maj pour courir, Espace pour sauter, E pour ramasser, 1 à 8 pour choisir dans le sac,
-//! F pour manger, B pour boire ; glisser avec le bouton gauche pour tourner la caméra, molette
-//! pour zoomer. T (maintenu) accélère la journée, R lance ou arrête la pluie.
+//! Commandes (touches par position, ZQSD sur un clavier AZERTY) : Z Q S D pour marcher, Maj
+//! pour courir, Espace pour sauter. Souris : clic gauche pose ce qu'on tient là où pointe le
+//! curseur, clic droit le reprend (ou cueille), glisser avec le bouton droit tourne la
+//! caméra, molette pour zoomer. Clavier : E ramasser, P poser devant soi, 1 à 8 choisir dans
+//! le sac, F manger ou modeler, B boire, G (maintenu) frotter le foret à feu ou souffler sur
+//! la braise. T (maintenu) accélère la journée, R lance ou arrête la pluie.
 //! `--seed N` choisit le monde ; `--capture fichier.png` enregistre une vue sans fenêtre.
 
 mod ambient;
-mod anomaly;
 mod audio;
 mod clock;
 mod fauna;
@@ -17,6 +18,8 @@ mod items;
 mod listen;
 mod naturalist;
 mod needs;
+mod objects;
+mod objects_view;
 mod obstacles;
 mod player;
 mod scene;
@@ -43,7 +46,9 @@ use ambient::Ambient;
 use audio::Audio;
 use clock::Clock;
 use fauna::Fauna;
-use naturalist::Naturalist;
+use items::Matter;
+use naturalist::{Gesture, GestureKind, Naturalist};
+use objects_view::ObjectsView;
 use player::Controls;
 use scene::SceneData;
 use state::{Command, Event, Failure, GameState, PlayerId};
@@ -51,6 +56,8 @@ use traces::Traces;
 use trample::Trample;
 use weather::Weather;
 
+/// Pixels the cursor must move, button held, to be a drag rather than a click.
+const DRAG_THRESHOLD: f64 = 6.0;
 /// Radians of rotation per pixel of mouse drag.
 const ORBIT_SPEED: f32 = 0.005;
 /// Distance factor per wheel notch.
@@ -99,9 +106,8 @@ struct App {
     selected: usize,
     /// A short message for the player, and the seconds it stays.
     message: Option<(String, f32)>,
+    objects_view: ObjectsView,
     trample: Trample,
-    /// How the anomaly is drawn.
-    look: anomaly::Look,
     controls: Controls,
     clock: Clock,
     /// None when there is no sound (no device, or a capture).
@@ -116,6 +122,14 @@ struct App {
     camera: OrbitCamera,
     dragging: bool,
     last_cursor: Option<PhysicalPosition<f64>>,
+    /// Where the right button went down (a click or the start of a drag).
+    right_down: Option<PhysicalPosition<f64>>,
+    /// The ground point under the cursor, updated each frame.
+    hover: Option<Vec3>,
+    /// A one-off gesture being played (laying, eating…) and when it began.
+    gesture: Option<(GestureKind, f32)>,
+    /// Seconds since start, as of the last frame.
+    now: f32,
 }
 
 impl App {
@@ -141,20 +155,6 @@ impl App {
         let spawn = player::spawn_point(&world);
         let me = state.join(spawn);
         let camera = OrbitCamera::framing(spawn + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
-        // The anomaly grows in front of the first view.
-        let ahead = glam::Vec2::new(-camera.yaw.sin(), -camera.yaw.cos());
-        let covered = state.grow_anomaly(&world, spawn, ahead, seed ^ 0xa40);
-        let mut data = data;
-        for plant in covered {
-            data.hide(plant);
-        }
-        if let Some(anomaly) = state.anomaly() {
-            let o = anomaly.origin();
-            println!(
-                "Une anomalie pousse dans une clairière vers ({:.0}, {:.0}).",
-                o.x, o.z
-            );
-        }
         let trample = Trample::new(data.pliable());
         Self {
             graphics: None,
@@ -171,8 +171,8 @@ impl App {
             accumulator: 0.0,
             selected: 0,
             message: None,
+            objects_view: ObjectsView::new(),
             trample,
-            look: anomaly::Look::Carpet,
             controls: Controls::default(),
             clock: Clock::new(clock::START_HOUR),
             audio: None,
@@ -184,6 +184,10 @@ impl App {
             camera,
             dragging: false,
             last_cursor: None,
+            right_down: None,
+            hover: None,
+            gesture: None,
+            now: 0.0,
         }
     }
 }
@@ -191,6 +195,7 @@ impl App {
 impl App {
     /// One frame of the world: the player moves, the camera follows, the air lives.
     fn tick(&mut self, dt: f32, time: f32) {
+        self.now = time;
         self.clock.advance(dt);
         self.run_steps(dt);
         if let Some((_, left)) = &mut self.message {
@@ -215,9 +220,6 @@ impl App {
         self.particles.extend_from_slice(self.fauna.particles());
         self.particles.extend_from_slice(self.traces.instances());
         self.particles.extend_from_slice(self.weather.particles());
-        if let Some(anomaly) = self.state.anomaly() {
-            anomaly.draw(&self.world, night, self.look, &mut self.particles);
-        }
         self.update_sound(dt, time);
         // Plants pushed aside by the body, springing back once free.
         let data = &mut self.data;
@@ -249,10 +251,55 @@ impl App {
             }
             self.state.step(&self.world, hour, rain);
         }
+        // What the physics did meanwhile (an ember, a dish fired or burst…).
+        let events: Vec<Event> = self.state.drain_events().collect();
+        for event in events {
+            self.on_event(event);
+        }
+    }
+
+    /// What the hands are doing now: a one-off gesture (rising then falling over its
+    /// duration), or rubbing or blowing while the key is held.
+    fn current_gesture(&self, time: f32) -> Option<Gesture> {
+        if let Some((kind, start)) = self.gesture {
+            let duration = match kind {
+                GestureKind::Drink => 1.4,
+                GestureKind::Eat | GestureKind::Shape => 1.0,
+                _ => 0.7,
+            };
+            let t = (time - start) / duration;
+            if (0.0..1.0).contains(&t) {
+                return Some(Gesture {
+                    kind,
+                    amount: (t * std::f32::consts::PI).sin(),
+                });
+            }
+        }
+        if self.controls.rub {
+            let kind = if self.state.would_blow(self.me) {
+                GestureKind::Blow
+            } else {
+                GestureKind::Rub
+            };
+            return Some(Gesture { kind, amount: 1.0 });
+        }
+        None
     }
 
     /// What the presentation does when something happens in the game.
     fn on_event(&mut self, event: Event) {
+        let gesture = match event {
+            Event::Laid { .. } | Event::TookBack { .. } | Event::Picked { .. } => {
+                Some(GestureKind::Reach)
+            }
+            Event::Ate { .. } => Some(GestureKind::Eat),
+            Event::Drank { .. } => Some(GestureKind::Drink),
+            Event::Shaped { .. } => Some(GestureKind::Shape),
+            _ => None,
+        };
+        if let Some(kind) = gesture {
+            self.gesture = Some((kind, self.now));
+        }
         let text = match event {
             Event::Picked {
                 matter, removed, ..
@@ -267,14 +314,34 @@ impl App {
             }
             Event::Ate { matter, .. } => format!("Vous mangez : {}", matter.name()),
             Event::Drank { .. } => "Vous buvez quelques gorgées.".to_owned(),
+            Event::Cleared { plant } => {
+                self.data.hide(plant);
+                return;
+            }
             Event::Laid { matter, .. } => format!("Vous posez : {}", matter.name()),
+            Event::TookBack { matter, .. } => format!("Vous reprenez : {}", matter.name()),
+            Event::Shaped { matter, .. } => format!("Vous modelez : {}", matter.name()),
+            Event::Ember { .. } => "À force de frotter, une braise tombe.".to_owned(),
+            Event::Changed { from, to } => match (from, to) {
+                (Matter::RawDish { .. }, Matter::Shards) => {
+                    "Crac ! La coupelle encore humide éclate dans le feu.".to_owned()
+                }
+                (Matter::RawDish { .. }, Matter::FiredDish { .. }) => {
+                    "La coupelle a cuit : de la terre cuite.".to_owned()
+                }
+                (_, Matter::Ash) => format!("{} : il n'en reste que des cendres.", from.name()),
+                _ => format!("{} devient {}", from.name(), to.name()),
+            },
             Event::Failed { failure, .. } => match failure {
                 Failure::NothingInReach => "Rien à ramasser à portée de main.",
                 Failure::Bag(items::Refusal::TooHeavy) => "Le sac est trop lourd.",
                 Failure::Bag(items::Refusal::Full) => "Le sac est plein.",
                 Failure::NotEdible => "Ça ne se mange pas.",
                 Failure::NoWater => "Pas d'eau à portée.",
-                Failure::CannotLay => "Un caillou se pose seulement sur le tapis.",
+                Failure::TooHot => "Trop chaud pour le prendre à la main.",
+                Failure::CannotLay => "Impossible de poser ici.",
+                Failure::NothingToShape => "Il faut deux mottes d'argile pour modeler.",
+                Failure::TooWet => "Le bois est trop humide : la friction ne donne rien.",
             }
             .to_owned(),
         };
@@ -351,10 +418,14 @@ impl App {
                 self.pending.push(Command::Pick { player: self.me });
             }
             KeyCode::KeyF if pressed && !event.repeat => {
-                self.pending.push(Command::Eat {
-                    player: self.me,
-                    slot: self.selected,
-                });
+                // In the hands: shape what can be shaped, eat what can be eaten.
+                let (player, slot) = (self.me, self.selected);
+                let command = if self.state.can_shape(player, slot) {
+                    Command::Shape { player, slot }
+                } else {
+                    Command::Eat { player, slot }
+                };
+                self.pending.push(command);
             }
             KeyCode::KeyP if pressed && !event.repeat => {
                 self.pending.push(Command::Lay {
@@ -362,6 +433,8 @@ impl App {
                     slot: self.selected,
                 });
             }
+            // Hold G: rub a fire drill.
+            KeyCode::KeyG => self.controls.rub = pressed,
             KeyCode::KeyB if pressed && !event.repeat => {
                 self.pending.push(Command::Drink { player: self.me });
             }
@@ -401,6 +474,7 @@ impl ApplicationHandler for App {
         self.naturalist.install(&mut renderer);
         self.fauna.install(&mut renderer);
         self.weather.install(&mut renderer);
+        self.objects_view.install(&mut renderer);
         self.graphics = Some(Graphics { window, renderer });
         match Audio::start(0x5eed) {
             Ok(audio) => self.audio = Some(audio),
@@ -421,10 +495,11 @@ impl ApplicationHandler for App {
                 self.last_frame = now;
                 let time = (now - self.start).as_secs_f32();
                 self.tick(dt, time);
+                let mut motion = self.state.body(self.me).motion(time);
+                motion.gesture = self.current_gesture(time);
                 if let Some(graphics) = self.graphics.as_mut() {
                     let renderer = &mut graphics.renderer;
-                    self.naturalist
-                        .pose(renderer, &self.state.body(self.me).motion(time));
+                    self.naturalist.pose(renderer, &motion);
                     self.data.upload_changes(renderer);
                     self.weather.draw(renderer);
                     set_sky(
@@ -434,6 +509,12 @@ impl ApplicationHandler for App {
                         renderer,
                     );
                     self.fauna.draw(renderer);
+                    self.objects_view.draw(
+                        self.state.objects(),
+                        time,
+                        renderer,
+                        &mut self.particles,
+                    );
                     draw_hud(
                         &self.state,
                         &self.world,
@@ -445,6 +526,34 @@ impl ApplicationHandler for App {
                     );
                     let (ripples, prints) = self.traces.marks();
                     renderer.set_marks(ripples, prints);
+                    // What the cursor points at, and a small mark there.
+                    let (width, height) = renderer.size();
+                    self.hover = self.last_cursor.and_then(|c| {
+                        let ndc = glam::Vec2::new(
+                            (2.0 * c.x / width as f64 - 1.0) as f32,
+                            (1.0 - 2.0 * c.y / height as f64) as f32,
+                        );
+                        pointed_ground(&self.world, &self.camera, renderer.aspect(), ndc)
+                    });
+                    if let Some(at) = self.hover {
+                        let laying = self
+                            .state
+                            .player(self.me)
+                            .is_some_and(|p| p.inventory.stacks().get(self.selected).is_some())
+                            && self
+                                .state
+                                .lay_point_at(&self.world, self.me, glam::Vec2::new(at.x, at.z))
+                                .is_some();
+                        let (color, glow) = if laying {
+                            ([1.0, 0.92, 0.75], -0.8)
+                        } else {
+                            ([0.5, 0.5, 0.5], 0.0)
+                        };
+                        self.particles.push(render::ParticleInstance {
+                            centre_size: [at.x, at.y + 0.02, at.z, 0.06],
+                            color: [color[0], color[1], color[2], glow],
+                        });
+                    }
                     renderer.upload_particles(&self.particles);
                     renderer.render(&self.camera, time);
                 }
@@ -459,17 +568,55 @@ impl ApplicationHandler for App {
                     graphics.renderer.resize(size.width, size.height);
                 }
             }
+            // Left click: lay what is in hand where the cursor points.
             WindowEvent::MouseInput {
-                state,
+                state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.dragging = state == ElementState::Pressed,
+            } => {
+                if let Some(at) = self.hover {
+                    self.pending.push(Command::LayAt {
+                        player: self.me,
+                        slot: self.selected,
+                        at: glam::Vec2::new(at.x, at.z),
+                    });
+                }
+            }
+            // Right button: a click takes what is under the cursor, a drag turns the camera.
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if state == ElementState::Pressed {
+                    self.right_down = self.last_cursor;
+                    self.dragging = false;
+                } else {
+                    if !self.dragging
+                        && let Some(at) = self.hover
+                    {
+                        self.pending.push(Command::PickAt {
+                            player: self.me,
+                            at: glam::Vec2::new(at.x, at.z),
+                        });
+                    }
+                    self.right_down = None;
+                    self.dragging = false;
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
-                if let (true, Some(last)) = (self.dragging, self.last_cursor) {
-                    let dx = (position.x - last.x) as f32;
-                    let dy = (position.y - last.y) as f32;
-                    // Dragging right turns the scene right; dragging down raises the camera.
-                    self.camera.orbit(-dx * ORBIT_SPEED, dy * ORBIT_SPEED);
+                if let (Some(down), Some(last)) = (self.right_down, self.last_cursor) {
+                    let moved =
+                        ((position.x - down.x).powi(2) + (position.y - down.y).powi(2)).sqrt();
+                    if moved > DRAG_THRESHOLD {
+                        self.dragging = true;
+                    }
+                    if self.dragging {
+                        let dx = (position.x - last.x) as f32;
+                        let dy = (position.y - last.y) as f32;
+                        // Dragging right turns the scene right; dragging down raises the camera.
+                        self.camera.orbit(-dx * ORBIT_SPEED, dy * ORBIT_SPEED);
+                    }
                 }
                 self.last_cursor = Some(position);
             }
@@ -493,7 +640,111 @@ impl ApplicationHandler for App {
     }
 }
 
-/// The interface over the image, and the weariness of the local player.
+/// A small fire made the way a player would, in front of the naturalist on level ground: a
+/// ring of pebbles, dry grass in the middle, twigs around it, a raw dish set a little aside to
+/// dry in the heat; then the fire drill until an ember falls on the grass. For captures.
+fn demo_fire(app: &mut App) {
+    let me = app.me;
+    // The nearest level, dry ground (5 × 5 cells).
+    let start = app.state.body(me).position;
+    let world = &app.world;
+    let dims = world.dims();
+    let level = |x: usize, z: usize| {
+        let top = world.ground_top(x, z);
+        (0..25).all(|k| {
+            let (cx, cz) = (x + k % 5 - 2, z + k / 5 - 2);
+            world.ground_top(cx, cz) == top && world.water_level(cx, cz).is_none()
+        })
+    };
+    let spot = (3..dims.nz - 3)
+        .flat_map(|z| (3..dims.nx - 3).map(move |x| (x, z)))
+        .filter(|&(x, z)| level(x, z))
+        .min_by(|a, b| {
+            let d =
+                |p: (usize, usize)| (p.0 as f32 - start.x).powi(2) + (p.1 as f32 - start.z).powi(2);
+            d(*a).total_cmp(&d(*b))
+        });
+    let Some((x, z)) = spot else {
+        return;
+    };
+    let centre = Vec3::new(
+        x as f32 + 0.5,
+        world.ground_top(x, z) as f32,
+        z as f32 + 0.5,
+    );
+    app.camera.target = centre + Vec3::Y * LOOK_HEIGHT;
+    // Laying at a point: stand 0.8 behind it (the body faces +z at first).
+    let lay_at = |app: &mut App, at: Vec3, matter: items::Matter| {
+        app.state.place(me, at - Vec3::new(0.0, 0.0, 0.8));
+        app.state.give(me, matter);
+        let slot = app.state.player(me).map_or(0, |p| {
+            p.inventory
+                .stacks()
+                .iter()
+                .position(|s| s.matter == matter)
+                .unwrap_or(0)
+        });
+        if let Some(event) = app
+            .state
+            .apply(&app.world, Command::Lay { player: me, slot })
+        {
+            app.on_event(event);
+        }
+    };
+    for k in 0..7 {
+        let a = std::f32::consts::TAU * k as f32 / 7.0;
+        lay_at(
+            app,
+            centre + Vec3::new(0.38 * a.cos(), 0.0, 0.38 * a.sin()),
+            items::Matter::Pebble { dark: k % 2 == 0 },
+        );
+    }
+    // The tinder alone, then the fire drill with the hands right over it (0.48 in front of
+    // the feet): twigs piled on the grass at once would take its heat and its air.
+    // A nest of two handfuls of dry grass: one alone burns out before the twigs catch.
+    lay_at(app, centre, items::Matter::GrassFibre);
+    lay_at(app, centre, items::Matter::GrassFibre);
+    app.state.place(me, centre - Vec3::new(0.0, 0.0, 0.48));
+    app.controls.rub = true;
+    let mut frame = 0;
+    let mut wait = |app: &mut App, seconds: f32| {
+        for _ in 0..(60.0 * seconds) as usize {
+            app.tick(CAPTURE_STEP, frame as f32 * CAPTURE_STEP);
+            frame += 1;
+        }
+    };
+    wait(app, state::RUB_SECONDS + 0.3);
+    app.controls.rub = false;
+    // Blowing on the ember until the grass flames (a minute or so), then the twigs on it.
+    for _ in 0..120 {
+        let objects = app.state.objects();
+        if (0..objects.placed().len()).any(|i| objects.body(i).burning) {
+            break;
+        }
+        wait(app, 1.0);
+    }
+    for k in 0..3 {
+        let a = std::f32::consts::TAU * k as f32 / 3.0 + 0.4;
+        lay_at(
+            app,
+            centre + Vec3::new(0.12 * a.cos(), 0.0, 0.12 * a.sin()),
+            items::Matter::DeadTwigs,
+        );
+    }
+    // A raw dish set a little aside, to dry in the heat.
+    lay_at(
+        app,
+        centre + Vec3::new(0.75, 0.0, 0.0),
+        items::Matter::RawDish {
+            source: items::ClaySource::RedEarth,
+        },
+    );
+    // Step back to watch.
+    app.state.place(me, centre + Vec3::new(-1.2, 0.0, 1.0));
+}
+
+/// The interface over the image, and the weariness of the local player. A free function
+/// (not a method of `App`) so that the renderer, held by `App`, can be borrowed beside it.
 fn draw_hud(
     state: &GameState,
     world: &World,
@@ -519,6 +770,46 @@ fn draw_hud(
     renderer.set_ui(ui.vertices());
     let weariness = state.player(me).map_or(0.0, |p| p.needs.weariness());
     renderer.set_weariness(weariness);
+}
+
+/// The ground (or water) the cursor points at: a ray from the eye through the pixel at `ndc`
+/// (−1 to 1), marched until it meets solid ground or water. Leaves and plants are seen
+/// through, so one can point under a tree.
+fn pointed_ground(
+    world: &World,
+    camera: &OrbitCamera,
+    aspect: f32,
+    ndc: glam::Vec2,
+) -> Option<Vec3> {
+    let inverse = camera.view_proj(aspect).inverse();
+    let near = inverse.project_point3(Vec3::new(ndc.x, ndc.y, 0.0));
+    let far = inverse.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
+    let direction = (far - near).normalize_or_zero();
+    let dims = world.dims();
+    let mut p = camera.eye();
+    let step = 0.05;
+    for _ in 0..12_000 {
+        p += direction * step;
+        if p.x < 0.0 || p.z < 0.0 || p.y < 0.0 {
+            return None;
+        }
+        let (x, y, z) = (p.x as usize, p.y as usize, p.z as usize);
+        if x >= dims.nx || z >= dims.nz {
+            return None;
+        }
+        if y >= dims.ny {
+            continue;
+        }
+        if world.water_level(x, z).is_some_and(|level| p.y <= level) {
+            return Some(p);
+        }
+        let material = world.block(x, y, z);
+        if material.is_solid() && !material.is_plant() {
+            // Back to the surface: the top of the cell entered.
+            return Some(Vec3::new(p.x, (y + 1) as f32, p.z));
+        }
+    }
+    None
 }
 
 /// Light and weather of the moment, to the renderer.
@@ -559,17 +850,11 @@ struct CaptureOptions {
     start: Option<(f32, f32)>,
     /// Times the naturalist tries to pick something up before the picture.
     pick: u32,
-}
-
-/// `--anomaly-look tapis|tiges|lichen|lueurs`.
-fn look_option(args: &[String]) -> Result<Option<anomaly::Look>, String> {
-    let Some(i) = args.iter().position(|a| a == "--anomaly-look") else {
-        return Ok(None);
-    };
-    let name = args.get(i + 1).map(String::as_str).unwrap_or("");
-    anomaly::Look::parse(name)
-        .map(Some)
-        .ok_or_else(|| format!("--anomaly-look {name} : attendu tapis, tiges, lichen ou lueurs"))
+    /// Makes a small fire in front of the naturalist, the way a player would (see
+    /// `demo_fire`): to look at fire and objects.
+    demo_fire: bool,
+    /// Holds the naturalist in a gesture (`--pose rub|blow|reach|eat|drink|shape`).
+    pose: Option<GestureKind>,
 }
 
 impl Options {
@@ -619,6 +904,17 @@ impl Options {
                     rain: value("--weather") == Some("rain"),
                     start: pair("--start", ',')?,
                     pick: number("--pick")?.unwrap_or(0.0) as u32,
+                    demo_fire: args.iter().any(|a| a == "--demo-fire"),
+                    pose: match value("--pose") {
+                        None => None,
+                        Some("rub") => Some(GestureKind::Rub),
+                        Some("blow") => Some(GestureKind::Blow),
+                        Some("reach") => Some(GestureKind::Reach),
+                        Some("eat") => Some(GestureKind::Eat),
+                        Some("drink") => Some(GestureKind::Drink),
+                        Some("shape") => Some(GestureKind::Shape),
+                        Some(other) => return Err(format!("--pose {other} : geste inconnu")),
+                    },
                 })
             }
             None => None,
@@ -628,9 +924,8 @@ impl Options {
 }
 
 /// Generates the world, renders one frame offscreen, saves it as PNG.
-fn capture(seed: u64, look: anomaly::Look, options: &CaptureOptions) -> Result<(), String> {
+fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     let mut app = App::new(seed);
-    app.look = look;
     app.clock = Clock::new(options.hour);
     if let Some((x, z)) = options.start {
         let dims = app.world.dims();
@@ -653,6 +948,10 @@ fn capture(seed: u64, look: anomaly::Look, options: &CaptureOptions) -> Result<(
         app.camera.orbit(0.0, pitch.to_radians() - app.camera.pitch);
     }
     app.camera.zoom(options.zoom);
+    // Built first, so the fire has `time` to catch.
+    if options.demo_fire {
+        demo_fire(&mut app);
+    }
     // Run the world frame by frame: standing still for `time`, then walking for `walk`.
     let still = (options.time / CAPTURE_STEP) as usize;
     let walking = (options.walk / CAPTURE_STEP) as usize;
@@ -673,8 +972,12 @@ fn capture(seed: u64, look: anomaly::Look, options: &CaptureOptions) -> Result<(
     let mut renderer = Renderer::new(Gpu::offscreen(options.width, options.height));
     app.data.install(&mut renderer);
     app.naturalist.install(&mut renderer);
-    app.naturalist
-        .pose(&mut renderer, &app.state.body(app.me).motion(time));
+    let mut motion = app.state.body(app.me).motion(time);
+    motion.gesture = match options.pose {
+        Some(kind) => Some(Gesture { kind, amount: 1.0 }),
+        None => app.current_gesture(time),
+    };
+    app.naturalist.pose(&mut renderer, &motion);
     app.data.upload_changes(&mut renderer);
     app.weather.install(&mut renderer);
     app.weather.draw(&mut renderer);
@@ -686,6 +989,9 @@ fn capture(seed: u64, look: anomaly::Look, options: &CaptureOptions) -> Result<(
     );
     app.fauna.install(&mut renderer);
     app.fauna.draw(&mut renderer);
+    app.objects_view.install(&mut renderer);
+    app.objects_view
+        .draw(app.state.objects(), time, &mut renderer, &mut app.particles);
     draw_hud(
         &app.state,
         &app.world,
@@ -729,15 +1035,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let look = match look_option(&args) {
-        Ok(look) => look.unwrap_or(anomaly::Look::Carpet),
-        Err(message) => {
-            eprintln!("Option invalide : {message}");
-            std::process::exit(2);
-        }
-    };
     if let Some(capture_options) = &options.capture {
-        if let Err(message) = capture(options.seed, look, capture_options) {
+        if let Err(message) = capture(options.seed, capture_options) {
             eprintln!("Capture impossible : {message}");
             std::process::exit(1);
         }
@@ -745,8 +1044,24 @@ fn main() {
     }
     let event_loop = EventLoop::new().expect("création de la boucle d'événements");
     let mut app = App::new(options.seed);
-    app.look = look;
     event_loop
         .run_app(&mut app)
         .expect("exécution de la boucle d'événements");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_centre_of_the_screen_points_at_the_ground_the_camera_looks_at() {
+        let world = World::generate(WorldConfig::standard(1));
+        let feet = player::spawn_point(&world);
+        let camera = OrbitCamera::framing(feet + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
+        let hit = pointed_ground(&world, &camera, 1.6, glam::Vec2::ZERO).expect("no ground");
+        // The camera looks at the chest: the ray meets the ground just beyond the feet.
+        let offset = glam::Vec2::new(hit.x - feet.x, hit.z - feet.z).length();
+        assert!(offset < 3.0, "pointed {offset} cells from the feet");
+        assert!((hit.y - feet.y).abs() < 2.5);
+    }
 }

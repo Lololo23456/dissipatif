@@ -15,6 +15,15 @@ pub enum Flower {
     Buttercup,
 }
 
+/// Where a clay comes from: it keeps it, and so do the dishes made of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClaySource {
+    /// Grey clay of a river or lake bank: fine sediment left by slow water.
+    Bank,
+    /// Red earth of the savanna: a clay soil rich in iron oxides (it fires red).
+    RedEarth,
+}
+
 /// What an item is made of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Matter {
@@ -33,6 +42,24 @@ pub enum Matter {
     Mushroom {
         spotted: bool,
     },
+    /// Wet clay: plastic, hard once fired. Keeps where it comes from.
+    Clay {
+        source: ClaySource,
+    },
+    /// Sand from a beach or the desert.
+    Sand,
+    /// Wood ash, left in the hearth (rich in potash).
+    Ash,
+    /// A small dish shaped from clay: still raw and wet, it must dry before the fire.
+    RawDish {
+        source: ClaySource,
+    },
+    /// The same dish, fired: terracotta, holds water and heat.
+    FiredDish {
+        source: ClaySource,
+    },
+    /// What is left of a dish that burst in the fire (steam from its water).
+    Shards,
 }
 
 /// What a matter can do, each in [0, 1] unless stated.
@@ -51,6 +78,10 @@ pub struct Properties {
     pub nutrition: f32,
     /// How bad it is to eat (0 harmless).
     pub toxicity: f32,
+    /// Can be shaped by hand (wet clay).
+    pub plasticity: f32,
+    /// Stands a fire without burning, cracking or melting.
+    pub heat_resistance: f32,
 }
 
 impl Matter {
@@ -62,6 +93,49 @@ impl Matter {
                 hardness: if dark { 0.9 } else { 0.75 },
                 sharpness: if dark { 0.4 } else { 0.1 },
                 fragility: if dark { 0.3 } else { 0.1 },
+                heat_resistance: 0.8,
+                ..base
+            },
+            Matter::Clay { .. } => Properties {
+                mass: 0.5,
+                hardness: 0.1,
+                plasticity: 0.9,
+                heat_resistance: 0.7,
+                ..base
+            },
+            Matter::Sand => Properties {
+                mass: 0.5,
+                hardness: 0.2,
+                heat_resistance: 0.9,
+                ..base
+            },
+            Matter::Ash => Properties {
+                mass: 0.05,
+                fragility: 1.0,
+                heat_resistance: 1.0,
+                ..base
+            },
+            Matter::RawDish { .. } => Properties {
+                mass: 0.4,
+                hardness: 0.2,
+                fragility: 0.8,
+                plasticity: 0.4,
+                heat_resistance: 0.7,
+                ..base
+            },
+            Matter::FiredDish { .. } => Properties {
+                mass: 0.35,
+                hardness: 0.6,
+                fragility: 0.5,
+                heat_resistance: 0.9,
+                ..base
+            },
+            Matter::Shards => Properties {
+                mass: 0.3,
+                hardness: 0.6,
+                sharpness: 0.3,
+                fragility: 0.6,
+                heat_resistance: 0.9,
                 ..base
             },
             Matter::DeadTwigs => Properties {
@@ -124,6 +198,22 @@ impl Matter {
             Matter::Flower(Flower::Buttercup) => "Bouton d'or",
             Matter::Mushroom { spotted: false } => "Champignon",
             Matter::Mushroom { spotted: true } => "Champignon tacheté",
+            Matter::Clay {
+                source: ClaySource::Bank,
+            } => "Argile de berge",
+            Matter::Clay {
+                source: ClaySource::RedEarth,
+            } => "Argile rouge",
+            Matter::Sand => "Sable",
+            Matter::Ash => "Cendres",
+            Matter::RawDish { .. } => "Coupelle crue",
+            Matter::FiredDish {
+                source: ClaySource::Bank,
+            } => "Coupelle en terre cuite",
+            Matter::FiredDish {
+                source: ClaySource::RedEarth,
+            } => "Coupelle en terre cuite rouge",
+            Matter::Shards => "Tessons",
         }
     }
 
@@ -140,6 +230,19 @@ impl Matter {
             Matter::Flower(Flower::Lavender) => Material::FlowerViolet,
             Matter::Flower(Flower::Buttercup) => Material::FlowerYellow,
             Matter::Mushroom { .. } => Material::MushroomCap,
+            Matter::Clay {
+                source: ClaySource::Bank,
+            }
+            | Matter::RawDish {
+                source: ClaySource::Bank,
+            } => Material::Gravel,
+            Matter::Clay { .. } | Matter::RawDish { .. } => Material::Clay,
+            Matter::Sand => Material::Sand,
+            Matter::Ash => Material::Snow,
+            Matter::FiredDish {
+                source: ClaySource::Bank,
+            } => Material::DesertSand,
+            Matter::FiredDish { .. } | Matter::Shards => Material::Sandstone,
         }
     }
 

@@ -4,4 +4,6 @@
 pub mod gray_scott;
 pub mod grid;
 pub mod hydrology;
+pub mod oregonator;
 pub mod rng;
+pub mod thermal;
