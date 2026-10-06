@@ -60,7 +60,23 @@ pub enum Matter {
     },
     /// What is left of a dish that burst in the fire (steam from its water).
     Shards,
+    /// A straight dead stick, pulled from a bundle of twigs.
+    Stick,
+    /// A sharp flake struck off a fine-grained stone: an edge.
+    Flake,
+    /// Crumbled bits of a stone that would not flake.
+    Chips,
+    /// A flake bound to a stick with fibre: it cuts. `uses` left before the binding gives
+    /// way (from 0 to `KNIFE_USES`).
+    Knife {
+        uses: u8,
+    },
+    /// Green wood cut from a living bush: heavy with sap, it burns badly until dried.
+    GreenWood,
 }
+
+/// Cuts a knife makes before its grass binding gives way.
+pub const KNIFE_USES: u8 = 8;
 
 /// What a matter can do, each in [0, 1] unless stated.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -94,6 +110,45 @@ impl Matter {
                 sharpness: if dark { 0.4 } else { 0.1 },
                 fragility: if dark { 0.3 } else { 0.1 },
                 heat_resistance: 0.8,
+                ..base
+            },
+            Matter::Stick => Properties {
+                mass: 0.06,
+                hardness: 0.35,
+                flexibility: 0.2,
+                fragility: 0.4,
+                flammability: 0.8,
+                ..base
+            },
+            Matter::Flake => Properties {
+                mass: 0.04,
+                hardness: 0.9,
+                sharpness: 0.9,
+                fragility: 0.5,
+                heat_resistance: 0.8,
+                ..base
+            },
+            Matter::Chips => Properties {
+                mass: 0.1,
+                hardness: 0.7,
+                sharpness: 0.2,
+                fragility: 0.2,
+                heat_resistance: 0.8,
+                ..base
+            },
+            Matter::Knife { .. } => Properties {
+                mass: 0.12,
+                hardness: 0.6,
+                sharpness: 0.85,
+                fragility: 0.4,
+                flammability: 0.4,
+                ..base
+            },
+            Matter::GreenWood => Properties {
+                mass: 0.3,
+                hardness: 0.4,
+                flexibility: 0.6,
+                flammability: 0.2,
                 ..base
             },
             Matter::Clay { .. } => Properties {
@@ -214,6 +269,11 @@ impl Matter {
                 source: ClaySource::RedEarth,
             } => "Coupelle en terre cuite rouge",
             Matter::Shards => "Tessons",
+            Matter::Stick => "Baguette sèche",
+            Matter::Flake => "Éclat tranchant",
+            Matter::Chips => "Débris de pierre",
+            Matter::Knife { .. } => "Couteau emmanché",
+            Matter::GreenWood => "Bois vert",
         }
     }
 
@@ -243,6 +303,9 @@ impl Matter {
                 source: ClaySource::Bank,
             } => Material::DesertSand,
             Matter::FiredDish { .. } | Matter::Shards => Material::Sandstone,
+            Matter::Stick | Matter::Knife { .. } => Material::DeadWood,
+            Matter::Flake | Matter::Chips => Material::Rock,
+            Matter::GreenWood => Material::Wood,
         }
     }
 
@@ -259,6 +322,8 @@ pub enum Harvest {
     Whole(Matter),
     /// A part of it (a pebble at the foot of a boulder): the plant stays.
     Part(Matter),
+    /// Only with something that cuts in hand; the plant is cut down.
+    NeedsBlade(Matter),
 }
 
 /// What can be picked from this plant, if anything. Trees and bushes cannot.
@@ -275,6 +340,8 @@ pub fn harvest(plant: &PlantInstance) -> Option<Harvest> {
             dark: plant.variant.is_multiple_of(3),
         })),
         Plant::DryShrub => Some(Harvest::Whole(Matter::DeadTwigs)),
+        // A bush only gives way to a blade (see `GameState`): green wood.
+        Plant::Bush => Some(Harvest::NeedsBlade(Matter::GreenWood)),
         Plant::Grass => Some(Harvest::Whole(Matter::GrassFibre)),
         Plant::Fern => Some(Harvest::Whole(Matter::Frond)),
         Plant::Flower => Some(Harvest::Whole(Matter::Flower(

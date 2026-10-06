@@ -104,8 +104,8 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     {
         actions.push(format!("P  Poser : {}", stack.matter.name()));
     }
-    if input.state.can_shape(input.me, input.selected) {
-        actions.push("F  Modeler une coupelle".to_owned());
+    if let Some(work) = input.state.work_plan(input.me, input.selected) {
+        actions.push(format!("F  {}", work.describe()));
     }
     if input.state.would_blow(input.me) {
         actions.push("G (maintenir)  Souffler sur la braise".to_owned());
@@ -117,7 +117,7 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     }
     if let Some(stack) = stacks.get(input.selected)
         && stack.matter.edible()
-        && !input.state.can_shape(input.me, input.selected)
+        && input.state.work_plan(input.me, input.selected).is_none()
     {
         actions.push("F  Manger".to_owned());
     }

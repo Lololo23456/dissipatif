@@ -212,3 +212,8 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Actée** : verbe central, le joueur est la **cause sans le vouloir** de la disparition : prélever et expérimenter altèrent le monde, comprendre a un coût.
 - Noyau retenu (`design.md`) : comprendre un monde fragile en reproduisant ses structures dans une verrerie ; boucle prélever → labo → déduire → dehors ; l'écologie donne la raison d'avancer.
 - À trancher : la nature des sorts et leur coût (suggestion : qu'ils obéissent à la grammaire des flux).
+
+## 2026-10-06 — Outils par la matière
+- Une seule commande de travail des mains (F, `Command::Work`), qui fait ce que permet ce qu'on tient : modeler une coupelle (2 argiles), **tailler** (frapper un caillou avec un autre : roche sombre à grain fin, éclat tranchant 70 % ; caillou clair grenu, 15 %, sinon débris), tirer 3 baguettes d'un fagot, **emmancher** (éclat + baguette + fibre souple → couteau).
+- Le couteau coupe les buissons (bois vert, plein de sève : il doit sécher avant de brûler) ; il s'use à chaque coupe (8), puis la ligature lâche et rend l'éclat et la baguette. Un éclat tenu à nu se brise souvent (40 %).
+- Hasard tiré d'un générateur à graine (déterministe). Exemple de rituel des sorts consigné dans `design.md` (cerfs en cercle les soirs de pleine lune).

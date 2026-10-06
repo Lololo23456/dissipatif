@@ -36,6 +36,37 @@ pub const RUB_SECONDS: f32 = 8.0;
 const LAY_DISTANCE: f32 = 0.8;
 /// How far from the feet the hands reach when pointing (cells).
 pub const ARM_REACH: f32 = 2.2;
+/// What the hands can make, from what is held. The result follows the matter: a fine-grained
+/// dark stone flakes well, a coarse light one mostly crumbles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Work {
+    /// Two lumps of wet clay into a dish.
+    ShapeDish,
+    /// Strike the held stone with another: a sharp flake, or chips.
+    Knap,
+    /// Pull straight sticks out of a bundle of twigs.
+    PullSticks,
+    /// Bind a flake to a stick with fibre: a knife.
+    Haft,
+}
+
+impl Work {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Work::ShapeDish => "Modeler une coupelle",
+            Work::Knap => "Tailler la pierre (frapper avec une autre)",
+            Work::PullSticks => "Tirer des baguettes du fagot",
+            Work::Haft => "Emmancher l'éclat (baguette et fibre)",
+        }
+    }
+}
+
+/// Chance that a strike gives a sharp flake: fine-grained dark rock, coarse light stone.
+const FLAKE_CHANCE_DARK: f32 = 0.7;
+const FLAKE_CHANCE_LIGHT: f32 = 0.15;
+/// Sticks pulled out of a bundle of twigs.
+const STICKS_PER_BUNDLE: u32 = 3;
+
 /// Hollows remembered at once.
 const MAX_DUG: usize = 96;
 /// Lumps of clay a dish takes.
@@ -76,8 +107,8 @@ pub enum Command {
     },
     /// Take what lies at a point (a laid object, a plant, a handful of ground), within reach.
     PickAt { player: PlayerId, at: Vec2 },
-    /// Shape what slot `slot` holds with the hands (wet clay into a dish).
-    Shape { player: PlayerId, slot: usize },
+    /// Work what slot `slot` holds with the hands (see `Work`).
+    Work { player: PlayerId, slot: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,7 +122,8 @@ pub enum Failure {
     /// Nowhere to lay it in front (water, a drop).
     CannotLay,
     /// Nothing that can be shaped (or not enough of it).
-    NothingToShape,
+    /// Nothing the hands can work from what is held.
+    NothingToWork,
     /// The fire drill gives no ember in the rain.
     TooWet,
 }
@@ -120,9 +152,11 @@ pub enum Event {
         player: PlayerId,
         matter: Matter,
     },
-    Shaped {
+    Worked {
         player: PlayerId,
-        matter: Matter,
+        work: Work,
+        /// What came of it (a dish, a flake or only chips, sticks, a knife).
+        made: Matter,
     },
     /// The fire drill gave an ember, on the fuel at hand.
     Ember {
@@ -163,6 +197,8 @@ pub struct GameState {
     /// Hollows left where handfuls of ground were taken (centre, depth in [0, 1]); the oldest
     /// go when there are too many.
     dug: Vec<(Vec3, f32)>,
+    /// Chance in the players' gestures (knapping), seeded: deterministic.
+    rng: sim::rng::SplitMix64,
 }
 
 impl GameState {
@@ -189,6 +225,7 @@ impl GameState {
             events: Vec::new(),
             changes: Vec::new(),
             dug: Vec::new(),
+            rng: sim::rng::SplitMix64::new(world.config.seed ^ 0x4ea9),
         }
     }
 
@@ -204,6 +241,52 @@ impl GameState {
     /// What happened during the last steps (each event once).
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, Event> {
         self.events.drain(..)
+    }
+
+    /// Whether player `id` carries something that cuts.
+    pub fn has_blade(&self, id: PlayerId) -> bool {
+        self.player(id).is_some_and(|p| {
+            p.inventory
+                .stacks()
+                .iter()
+                .any(|s| matches!(s.matter, Matter::Knife { .. } | Matter::Flake))
+        })
+    }
+
+    /// What plant `i` gives now, if anything (pebbles run out; a bush needs a blade).
+    fn available(&self, i: usize, plant: &world::PlantInstance, blade: bool) -> Option<Matter> {
+        match harvest(plant)? {
+            Harvest::Whole(m) => Some(m),
+            Harvest::Part(m) => {
+                (self.pebbles_taken.get(&i).copied().unwrap_or(0) < PEBBLES_PER_STONE).then_some(m)
+            }
+            Harvest::NeedsBlade(m) => blade.then_some(m),
+        }
+    }
+
+    /// What working slot `slot` with the hands would do now, if anything.
+    pub fn work_plan(&self, id: PlayerId, slot: usize) -> Option<Work> {
+        let p = self.player(id)?;
+        let stacks = p.inventory.stacks();
+        let held = stacks.get(slot)?;
+        let count = |f: fn(Matter) -> bool| -> u32 {
+            stacks.iter().filter(|s| f(s.matter)).map(|s| s.count).sum()
+        };
+        match held.matter {
+            Matter::Clay { .. } if held.count >= CLAY_PER_DISH => Some(Work::ShapeDish),
+            // Knapping: the held stone struck with another hard stone.
+            Matter::Pebble { .. } if count(|m| matches!(m, Matter::Pebble { .. })) >= 2 => {
+                Some(Work::Knap)
+            }
+            Matter::DeadTwigs => Some(Work::PullSticks),
+            Matter::Flake
+                if count(|m| m == Matter::Stick) >= 1
+                    && count(|m| m.properties().flexibility >= 0.8) >= 1 =>
+            {
+                Some(Work::Haft)
+            }
+            _ => None,
+        }
     }
 
     /// Where player `id` would lay something: on the ground (or on what lies there) a little
@@ -266,7 +349,8 @@ impl GameState {
     }
 
     /// The plant to gather nearest to `at` (within half a cell), if any.
-    pub fn plant_at(&self, world: &World, at: Vec2) -> Option<(usize, Matter)> {
+    pub fn plant_at(&self, world: &World, id: PlayerId, at: Vec2) -> Option<(usize, Matter)> {
+        let blade = self.has_blade(id);
         let (cx, cz) = (at.x.floor() as i64, at.y.floor() as i64);
         let mut best: Option<(f32, usize, Matter)> = None;
         for z in cz - 1..=cz + 1 {
@@ -276,15 +360,8 @@ impl GameState {
                         continue;
                     }
                     let plant = &world.plants()[i];
-                    let matter = match harvest(plant) {
-                        Some(Harvest::Whole(m)) => m,
-                        Some(Harvest::Part(m))
-                            if self.pebbles_taken.get(&i).copied().unwrap_or(0)
-                                < PEBBLES_PER_STONE =>
-                        {
-                            m
-                        }
-                        _ => continue,
+                    let Some(matter) = self.available(i, plant, blade) else {
+                        continue;
                     };
                     let (px, pz) = position(plant);
                     let d = Vec2::new(px, pz).distance(at);
@@ -354,13 +431,6 @@ impl GameState {
                     .then(a.1.total_cmp(&b.1))
             })
             .map(|(i, _)| i)
-    }
-
-    /// Whether slot `slot` holds enough of something to shape with the hands.
-    pub fn can_shape(&self, id: PlayerId, slot: usize) -> bool {
-        self.player(id)
-            .and_then(|p| p.inventory.stacks().get(slot))
-            .is_some_and(|s| matches!(s.matter, Matter::Clay { .. }) && s.count >= CLAY_PER_DISH)
     }
 
     /// What player `id` could take from the ground under their feet: clay on a river bank or
@@ -461,6 +531,7 @@ impl GameState {
     /// The thing player `id` would pick up now: the nearest within reach, those in front
     /// first. Its index in `World::plants` and what it would give.
     pub fn target(&self, world: &World, id: PlayerId) -> Option<(usize, Matter)> {
+        let blade = self.has_blade(id);
         let p = self.player(id)?;
         let feet = p.body.position;
         let facing = p.body.facing();
@@ -477,15 +548,8 @@ impl GameState {
                         continue;
                     }
                     let plant = &world.plants()[i];
-                    let matter = match harvest(plant) {
-                        Some(Harvest::Whole(m)) => m,
-                        Some(Harvest::Part(m))
-                            if self.pebbles_taken.get(&i).copied().unwrap_or(0)
-                                < PEBBLES_PER_STONE =>
-                        {
-                            m
-                        }
-                        _ => continue,
+                    let Some(matter) = self.available(i, plant, blade) else {
+                        continue;
                     };
                     let (px, pz) = position(plant);
                     let offset = Vec2::new(px - feet.x, pz - feet.z);
@@ -609,7 +673,7 @@ impl GameState {
                 if let Some(i) = self.object_at(at) {
                     return self.take_back(player, i);
                 }
-                if let Some((plant, matter)) = self.plant_at(world, at) {
+                if let Some((plant, matter)) = self.plant_at(world, player, at) {
                     return self.gather(world, player, plant, matter);
                 }
                 if let Some(matter) = self.ground_sample_at(world, at) {
@@ -641,27 +705,71 @@ impl GameState {
                 };
                 self.lay_matter(world, player, slot, at)
             }
-            Command::Shape { player, slot } => {
-                if !self.can_shape(player, slot) {
+            Command::Work { player, slot } => {
+                let Some(work) = self.work_plan(player, slot) else {
                     return Some(Event::Failed {
                         player,
-                        failure: Failure::NothingToShape,
+                        failure: Failure::NothingToWork,
                     });
-                }
-                let p = self.player_mut(player)?;
-                let Matter::Clay { source } = p.inventory.stacks()[slot].matter else {
-                    return None;
                 };
-                for _ in 0..CLAY_PER_DISH {
-                    p.inventory.take(slot);
-                }
-                let dish = Matter::RawDish { source };
-                // The clay just left the bag: there is room for the dish.
-                let _ = p.inventory.add(dish);
-                Some(Event::Shaped {
-                    player,
-                    matter: dish,
-                })
+                let roll = self.rng.next_f32();
+                let p = self.player_mut(player)?;
+                let held = p.inventory.stacks()[slot].matter;
+                // Effort: working with the hands costs a little food.
+                p.needs.food = (p.needs.food - 0.003).max(0.0);
+                let take = |p: &mut PlayerState, f: fn(Matter) -> bool| {
+                    let i = p.inventory.stacks().iter().position(|s| f(s.matter))?;
+                    p.inventory.take(i)
+                };
+                let made = match work {
+                    Work::ShapeDish => {
+                        let Matter::Clay { source } = held else {
+                            return None;
+                        };
+                        for _ in 0..CLAY_PER_DISH {
+                            p.inventory.take(slot);
+                        }
+                        let dish = Matter::RawDish { source };
+                        let _ = p.inventory.add(dish);
+                        dish
+                    }
+                    Work::Knap => {
+                        let Matter::Pebble { dark } = held else {
+                            return None;
+                        };
+                        p.inventory.take(slot);
+                        let chance = if dark {
+                            FLAKE_CHANCE_DARK
+                        } else {
+                            FLAKE_CHANCE_LIGHT
+                        };
+                        let made = if roll < chance {
+                            Matter::Flake
+                        } else {
+                            Matter::Chips
+                        };
+                        let _ = p.inventory.add(made);
+                        made
+                    }
+                    Work::PullSticks => {
+                        p.inventory.take(slot);
+                        for _ in 0..STICKS_PER_BUNDLE {
+                            let _ = p.inventory.add(Matter::Stick);
+                        }
+                        Matter::Stick
+                    }
+                    Work::Haft => {
+                        p.inventory.take(slot);
+                        take(p, |m| m == Matter::Stick)?;
+                        take(p, |m| m.properties().flexibility >= 0.8)?;
+                        let knife = Matter::Knife {
+                            uses: crate::items::KNIFE_USES,
+                        };
+                        let _ = p.inventory.add(knife);
+                        knife
+                    }
+                };
+                Some(Event::Worked { player, work, made })
             }
             Command::Drink { player } => {
                 if !self.can_drink(world, player) {
@@ -726,6 +834,36 @@ impl GameState {
         }
     }
 
+    /// A cut wears the blade: a knife loses a use, and when its binding gives way, the flake
+    /// and the stick come apart; a bare flake may break.
+    fn wear_blade(&mut self, player: PlayerId) {
+        let roll = self.rng.next_f32();
+        let Some(p) = self.player_mut(player) else {
+            return;
+        };
+        let stacks = p.inventory.stacks();
+        if let Some(i) = stacks
+            .iter()
+            .position(|s| matches!(s.matter, Matter::Knife { .. }))
+        {
+            let Some(Matter::Knife { uses }) = p.inventory.take(i) else {
+                return;
+            };
+            if uses > 1 {
+                let _ = p.inventory.add(Matter::Knife { uses: uses - 1 });
+            } else {
+                let _ = p.inventory.add(Matter::Flake);
+                let _ = p.inventory.add(Matter::Stick);
+            }
+        } else if let Some(i) = stacks.iter().position(|s| s.matter == Matter::Flake) {
+            // Held in bare fingers, a flake often snaps.
+            if roll < 0.4 {
+                p.inventory.take(i);
+                let _ = p.inventory.add(Matter::Chips);
+            }
+        }
+    }
+
     /// Takes laid object `i` back into player's bag, unless too hot.
     fn take_back(&mut self, player: PlayerId, i: usize) -> Option<Event> {
         if !self.objects.handleable(i) {
@@ -765,6 +903,12 @@ impl GameState {
             Some(Harvest::Whole(_)) => {
                 self.removed[plant] = true;
                 self.obstacles.remove(plant);
+                Some(plant)
+            }
+            Some(Harvest::NeedsBlade(_)) => {
+                self.removed[plant] = true;
+                self.obstacles.remove(plant);
+                self.wear_blade(player);
                 Some(plant)
             }
             _ => {
@@ -1105,5 +1249,111 @@ mod tests {
                 .any(|(i, p)| p.matter == Matter::DeadTwigs && objects.body(i).burning);
         }
         assert!(twigs_burning, "the twigs never caught");
+    }
+
+    /// From stones and twigs to a knife that cuts bushes and wears out.
+    #[test]
+    fn knapping_hafting_and_cutting() {
+        let (world, mut state, id) = setup();
+        let slot_of = |state: &GameState, f: fn(Matter) -> bool| {
+            state
+                .player(id)
+                .unwrap()
+                .inventory
+                .stacks()
+                .iter()
+                .position(|s| f(s.matter))
+        };
+        let work = |state: &mut GameState, slot: usize| {
+            state.apply(&world, Command::Work { player: id, slot })
+        };
+        // Knap dark stones until a flake comes (fine-grained: most strikes do).
+        for _ in 0..6 {
+            state.give(id, Matter::Pebble { dark: true });
+        }
+        let mut flakes = 0;
+        for _ in 0..5 {
+            let slot = slot_of(&state, |m| matches!(m, Matter::Pebble { .. })).unwrap();
+            if let Some(Event::Worked {
+                made: Matter::Flake,
+                ..
+            }) = work(&mut state, slot)
+            {
+                flakes += 1;
+            }
+        }
+        assert!(
+            flakes >= 2,
+            "only {flakes} flakes in 5 strikes of dark stone"
+        );
+        // Sticks from a bundle, grass for the binding, then the knife.
+        state.give(id, Matter::DeadTwigs);
+        let slot = slot_of(&state, |m| m == Matter::DeadTwigs).unwrap();
+        work(&mut state, slot);
+        state.give(id, Matter::GrassFibre);
+        let slot = slot_of(&state, |m| m == Matter::Flake).unwrap();
+        assert_eq!(state.work_plan(id, slot), Some(Work::Haft));
+        assert!(matches!(
+            work(&mut state, slot),
+            Some(Event::Worked {
+                made: Matter::Knife { .. },
+                ..
+            })
+        ));
+        // A bush can now be cut; each cut wears the knife.
+        let (bush, p) = world
+            .plants()
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.plant == world::Plant::Bush)
+            .expect("no bush");
+        let (x, z) = position(p);
+        state.place(id, Vec3::new(x, p.base[1] as f32, z - 0.6));
+        let event = state.apply(
+            &world,
+            Command::PickAt {
+                player: id,
+                at: Vec2::new(x, z),
+            },
+        );
+        assert!(
+            matches!(event, Some(Event::Picked { matter: Matter::GreenWood, removed: Some(b), .. }) if b == bush),
+            "{event:?}"
+        );
+        assert!(
+            slot_of(&state, |m| m
+                == Matter::Knife {
+                    uses: crate::items::KNIFE_USES - 1
+                })
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn light_stone_mostly_crumbles() {
+        let (world, mut state, id) = setup();
+        let mut flakes = 0;
+        for _ in 0..20 {
+            state.give(id, Matter::Pebble { dark: false });
+            state.give(id, Matter::Pebble { dark: false });
+            let slot = state
+                .player(id)
+                .unwrap()
+                .inventory
+                .stacks()
+                .iter()
+                .position(|s| matches!(s.matter, Matter::Pebble { .. }))
+                .unwrap();
+            if let Some(Event::Worked {
+                made: Matter::Flake,
+                ..
+            }) = state.apply(&world, Command::Work { player: id, slot })
+            {
+                flakes += 1;
+            }
+            // Empty the bag between tries.
+            while state.players[0].inventory.take(0).is_some() {}
+        }
+        assert!(flakes <= 8, "{flakes} flakes out of 20 from coarse stone");
     }
 }

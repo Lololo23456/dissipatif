@@ -63,6 +63,18 @@ fn body(matter: Matter, base: Vec3, air: f32) -> Body {
         Matter::RawDish { .. } => (0.07, 0.32, 900.0, 0.08, None),
         Matter::FiredDish { .. } | Matter::Shards => (0.07, 0.35, 850.0, 0.0, None),
         Matter::Sand => (0.05, 0.5, 830.0, 0.0, None),
+        // A stick: a little dry wood, catches like twigs.
+        Matter::Stick => (
+            0.04,
+            0.005,
+            1700.0,
+            0.0,
+            Some(wood(0.055, 280.0, 0.05, 0.5)),
+        ),
+        Matter::Flake | Matter::Chips => (0.03, 0.06, 800.0, 0.0, None),
+        Matter::Knife { .. } => (0.05, 0.06, 900.0, 0.0, Some(wood(0.06, 290.0, 0.05, 0.5))),
+        // Green wood: full of sap (water), it must dry before it burns.
+        Matter::GreenWood => (0.07, 0.01, 1700.0, 0.12, Some(wood(0.18, 300.0, 0.05, 0.2))),
         Matter::Ash => (0.03, 0.05, 800.0, 0.0, None),
         Matter::Flower(_) | Matter::Mushroom { .. } => (0.03, 0.03, 3000.0, 0.02, None),
     };

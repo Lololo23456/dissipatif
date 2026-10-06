@@ -309,7 +309,7 @@ impl App {
             }
             Event::Ate { .. } => Some(GestureKind::Eat),
             Event::Drank { .. } => Some(GestureKind::Drink),
-            Event::Shaped { .. } => Some(GestureKind::Shape),
+            Event::Worked { .. } => Some(GestureKind::Shape),
             _ => None,
         };
         if let Some(kind) = gesture {
@@ -335,7 +335,16 @@ impl App {
             }
             Event::Laid { matter, .. } => format!("Vous posez : {}", matter.name()),
             Event::TookBack { matter, .. } => format!("Vous reprenez : {}", matter.name()),
-            Event::Shaped { matter, .. } => format!("Vous modelez : {}", matter.name()),
+            Event::Worked { work, made, .. } => match (work, made) {
+                (state::Work::Knap, Matter::Flake) => {
+                    "La pierre se fend net : un éclat tranchant.".to_owned()
+                }
+                (state::Work::Knap, _) => "La pierre s'effrite en débris.".to_owned(),
+                (state::Work::Haft, _) => {
+                    "L'éclat tient sur la baguette, ligaturé : un couteau.".to_owned()
+                }
+                _ => format!("Vous obtenez : {}", made.name()),
+            },
             Event::Ember { .. } => "À force de frotter, une braise tombe.".to_owned(),
             Event::Changed { from, to } => match (from, to) {
                 (Matter::RawDish { .. }, Matter::Shards) => {
@@ -355,7 +364,7 @@ impl App {
                 Failure::NoWater => "Pas d'eau à portée.",
                 Failure::TooHot => "Trop chaud pour le prendre à la main.",
                 Failure::CannotLay => "Impossible de poser ici.",
-                Failure::NothingToShape => "Il faut deux mottes d'argile pour modeler.",
+                Failure::NothingToWork => "Rien à travailler avec ce que vous tenez.",
                 Failure::TooWet => "Le bois est trop humide : la friction ne donne rien.",
             }
             .to_owned(),
@@ -433,10 +442,10 @@ impl App {
                 self.pending.push(Command::Pick { player: self.me });
             }
             KeyCode::KeyF if pressed && !event.repeat => {
-                // In the hands: shape what can be shaped, eat what can be eaten.
+                // In the hands: work what can be worked, eat what can be eaten.
                 let (player, slot) = (self.me, self.selected);
-                let command = if self.state.can_shape(player, slot) {
-                    Command::Shape { player, slot }
+                let command = if self.state.work_plan(player, slot).is_some() {
+                    Command::Work { player, slot }
                 } else {
                     Command::Eat { player, slot }
                 };

@@ -24,6 +24,8 @@ Un jeu de terrain où le joueur comprend un monde fragile en reproduisant ses st
 
 Les animaux (puis les plantes, les arbres, les rivières) ont parfois des **comportements anormaux**, autour de certaines choses ou à certains moments. Le joueur qui les **observe assez longtemps** gagne un **sort** lié à cette anomalie de comportement. Observer est le seul moyen d'en obtenir : la patience du naturaliste est récompensée.
 
+**Le ton** : ce sont les êtres vivants qui pratiquent la magie, le joueur ne fait que l'apprendre en les observant. Exemple : une harde de cerfs qui, les soirs de pleine lune, se rassemble en cercle dans une plaine pour une incantation ; qui l'a vue assez longtemps, sans la troubler, en garde le sort. Ces rituels sont rares, liés à un lieu, une heure, une saison ou une phase de lune, et le joueur doit d'abord les remarquer, puis revenir. Prérequis : une faune plus riche (cerfs…) et les phases de la lune.
+
 À trancher : la nature des sorts, et s'ils obéissent eux aussi à la grammaire des flux (un sort qui déplace de la chaleur, de l'eau, de la lumière, et donc a un coût et des conséquences écologiques) pour rester cohérents avec le reste du monde.
 
 ## Piliers

@@ -108,6 +108,32 @@ fn model(matter: Matter) -> Grid {
             g
         }
         Matter::Sand => lump(Material::Sand, 4, 1),
+        Matter::Stick => {
+            let mut g = Grid::new(9, 1, 1);
+            g.fill([0, 9], [0, 1], [0, 1], Material::DeadWood);
+            g
+        }
+        Matter::Flake => lump(Material::Rock, 2, 1),
+        Matter::Chips => {
+            let mut g = Grid::new(4, 1, 4);
+            g.fill([0, 1], [0, 1], [0, 1], Material::Rock);
+            g.fill([2, 3], [0, 1], [1, 2], Material::Rock);
+            g.fill([1, 2], [0, 1], [3, 4], Material::Rock);
+            g
+        }
+        Matter::Knife { .. } => {
+            let mut g = Grid::new(10, 1, 2);
+            g.fill([0, 7], [0, 1], [0, 1], Material::DeadWood);
+            g.fill([5, 7], [0, 1], [0, 2], Material::DryGrass);
+            g.fill([7, 10], [0, 1], [0, 2], Material::Rock);
+            g
+        }
+        Matter::GreenWood => {
+            let mut g = Grid::new(8, 2, 3);
+            g.fill([0, 8], [0, 1], [1, 2], Material::Wood);
+            g.fill([3, 6], [1, 2], [0, 3], Material::Leaves);
+            g
+        }
         Matter::Ash => lump(Material::Snow, 4, 1),
         Matter::Flower(f) => lump(
             match f {
@@ -133,6 +159,10 @@ fn all_matters() -> Vec<Matter> {
         Matter::Frond,
         Matter::Shards,
         Matter::Sand,
+        Matter::Stick,
+        Matter::Flake,
+        Matter::Chips,
+        Matter::GreenWood,
         Matter::Ash,
         Matter::Mushroom { spotted: false },
         Matter::Mushroom { spotted: true },
@@ -141,6 +171,9 @@ fn all_matters() -> Vec<Matter> {
         all.push(Matter::Clay { source });
         all.push(Matter::RawDish { source });
         all.push(Matter::FiredDish { source });
+    }
+    for uses in 0..=crate::items::KNIFE_USES {
+        all.push(Matter::Knife { uses });
     }
     for f in [
         Flower::Daisy,
