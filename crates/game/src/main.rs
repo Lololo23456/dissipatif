@@ -12,6 +12,7 @@
 mod ambient;
 mod audio;
 mod clock;
+mod ecology;
 mod fauna;
 mod hud;
 mod items;
@@ -145,7 +146,7 @@ impl App {
         let config = WorldConfig::standard(seed);
         let world = World::generate(config);
         let generated = start.elapsed();
-        let data = SceneData::build(&world);
+        let mut data = SceneData::build(&world);
         println!(
             "Monde {seed} : généré en {:.0} ms, préparé en {:.0} ms ({} faces, {} faces d'eau, \
              {} plantes, {} éléments au sol, {} faces de modèles)",
@@ -162,6 +163,10 @@ impl App {
         let spawn = player::spawn_point(&world);
         let me = state.join(spawn);
         let camera = OrbitCamera::framing(spawn + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
+        // Plants drawn at the size they have.
+        for i in 0..state.plants().len() {
+            data.resize_plant(i, state.plant_size(i));
+        }
         let trample = Trample::new(data.pliable());
         Self {
             graphics: None,
@@ -259,6 +264,7 @@ impl App {
                     self.on_event(event);
                 }
             }
+            self.state.time_scale = if self.clock.fast { 60.0 } else { 1.0 };
             self.state.step(&self.world, hour, rain);
         }
         // What the physics did meanwhile (an ember, a dish fired or burst…).
@@ -327,6 +333,20 @@ impl App {
             Event::Dig { at } => {
                 if let Some(dug) = self.world.dig(at.x, at.y) {
                     self.dug_cells.push((dug.cell, dug.flooded));
+                }
+                return;
+            }
+            Event::Plant(change) => {
+                match change {
+                    ecology::Change::Sprouted(i) => {
+                        let plant = self.state.plants()[i];
+                        let size = self.state.plant_size(i);
+                        self.data.add_plant(&self.world, &plant, size);
+                    }
+                    ecology::Change::Resized(i) => {
+                        self.data.resize_plant(i, self.state.plant_size(i));
+                    }
+                    ecology::Change::Died(i) => self.data.hide(i),
                 }
                 return;
             }
@@ -1089,6 +1109,8 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     if std::env::args().any(|a| a == "--test") {
         sandbox(&mut app);
     }
+    // `--fast`: the day (and the plants) run 60 times faster during `--time`.
+    app.clock.fast = std::env::args().any(|a| a == "--fast");
     // Built first, so the fire has `time` to catch.
     if options.demo_fire {
         demo_fire(&mut app);

@@ -82,6 +82,17 @@ fn water(world: &World) -> (Field3, MeshData) {
     (depth, mesh)
 }
 
+/// Index of a plant model's group: kind × VARIANTS + variant.
+fn model_index(plant: Plant, variant: u32) -> usize {
+    let kind = Plant::ALL.iter().position(|&p| p == plant).unwrap_or(0);
+    kind * VARIANTS as usize + variant as usize
+}
+
+/// Drawn scale of a plant of relative size `size`: a seedling is small, a grown plant full.
+fn drawn_size(size: f32) -> f32 {
+    0.3 + 0.7 * size.clamp(0.0, 1.0)
+}
+
 /// Seed offset of the per-voxel brightness variation.
 const VARIATION_SEED: u64 = 0x5eed;
 
@@ -106,8 +117,10 @@ pub struct SceneData {
     plant_models: Vec<(MeshData, Vec<ModelInstance>)>,
     /// Plants that bend when walked through, with where their instance is.
     pliable: Vec<Pliable>,
-    /// Where each plant (index in `World::plants`) is drawn: model group, index in it.
+    /// Where each plant (index in the plant list) is drawn: model group, index in it.
     slots: Vec<(usize, usize)>,
+    /// Each plant's full-grown scale (its drawn scale follows its size as it grows).
+    base_scales: Vec<f32>,
     /// Ids of the plant models in the renderer, once installed.
     model_ids: Vec<ModelId>,
     /// Model groups whose instances changed since the last upload.
@@ -137,10 +150,7 @@ impl SceneData {
         // Plants: one mesh per model, a quarter of a cell per micro-voxel, its origin where the
         // plant stands (centre of the bottom of its base cell).
         // Instances grouped by model in one pass: index = kind × VARIANTS + variant.
-        let model_index = |plant: Plant, variant: u32| {
-            let kind = Plant::ALL.iter().position(|&p| p == plant).unwrap_or(0);
-            kind * VARIANTS as usize + variant as usize
-        };
+
         let mut grouped = vec![Vec::new(); Plant::ALL.len() * VARIANTS as usize];
         let mut pliable = Vec::new();
         let mut slots = Vec::with_capacity(world.plants().len());
@@ -196,6 +206,7 @@ impl SceneData {
             solid_id: None,
             plant_models,
             pliable,
+            base_scales: world.plants().iter().map(|p| p.scale).collect(),
             slots,
             model_ids: Vec::new(),
             dirty: vec![false; groups],
@@ -325,6 +336,43 @@ impl SceneData {
         if let Some(instance) = self.plant_models[plant.group].1.get_mut(plant.index) {
             instance.set_bend(bend.to_array());
             self.dirty[plant.group] = true;
+        }
+    }
+
+    /// A new plant (sprouted): drawn from now on, at the size it has (see `resize_plant`).
+    pub fn add_plant(&mut self, world: &World, plant: &world::PlantInstance, size: f32) {
+        let [x, y, z] = plant.base;
+        let group = model_index(plant.plant, plant.variant);
+        let seed = world.config.seed ^ VARIATION_SEED;
+        let biome = world.biome(x.min(world.dims().nx - 1), z.min(world.dims().nz - 1));
+        let position = [
+            x as f32 + 0.5 + plant.offset[0],
+            y as f32,
+            z as f32 + 0.5 + plant.offset[1],
+        ];
+        let instances = &mut self.plant_models[group].1;
+        self.slots.push((group, instances.len()));
+        self.base_scales.push(plant.scale);
+        instances.push(ModelInstance::new(
+            position,
+            plant.rotation,
+            plant.mirrored,
+            plant.scale * drawn_size(size),
+            foliage_tint(plant.plant, biome, plant.base, plant.offset, seed),
+            flexibility(plant.plant),
+        ));
+        self.dirty[group] = true;
+    }
+
+    /// Plant `plant` is now `size` of a grown one: drawn that big.
+    pub fn resize_plant(&mut self, plant: usize, size: f32) {
+        if let (Some(&(group, index)), Some(&scale)) =
+            (self.slots.get(plant), self.base_scales.get(plant))
+            && let Some(instance) = self.plant_models[group].1.get_mut(index)
+            && instance.scale_mirror[0] > 0.0
+        {
+            instance.scale_mirror[0] = scale * drawn_size(size);
+            self.dirty[group] = true;
         }
     }
 

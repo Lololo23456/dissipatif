@@ -16,6 +16,7 @@ use glam::{Vec2, Vec3};
 use sim::thermal::KELVIN;
 use world::{Material, World};
 
+use crate::ecology::{Change, Ecology};
 use crate::items::{ClaySource, Harvest, Inventory, Matter, Refusal, harvest};
 use crate::needs::{self, Exposure, Needs};
 use crate::objects::Objects;
@@ -160,10 +161,12 @@ pub enum Event {
     Ember {
         player: PlayerId,
     },
-    /// A plant cleared away from where something was laid (index in `World::plants`).
+    /// A plant cleared away (laid on, dug up, burnt): index in the plant list.
     Cleared {
         plant: usize,
     },
+    /// A plant sprouted, grew or shrank, or died of itself (`ecology::Change`).
+    Plant(Change),
     /// A handful of ground was taken at `at`: the world must dig a micro-voxel out there
     /// (`World::dig`) and redraw the ground.
     Dig {
@@ -182,8 +185,17 @@ pub enum Event {
 
 pub struct GameState {
     players: Vec<PlayerState>,
-    /// Plants taken away, by index in `World::plants`.
+    /// The plants of the world, living (they grow, spread and die: see `ecology`); the first
+    /// ones are `World::plants`, sprouted ones follow.
+    plants: Vec<world::PlantInstance>,
+    /// Plants gone (taken, dead), by index in `plants`.
     removed: Vec<bool>,
+    /// How the plants live: growth, seeds, death.
+    ecology: Ecology,
+    /// How much faster than real time the day runs (fast-forward): the plants follow.
+    pub time_scale: f32,
+    /// Scratch list of the ecology's changes (reused).
+    plant_changes: Vec<Change>,
     pebbles_taken: HashMap<usize, u32>,
     obstacles: Obstacles,
     /// Things that can be picked, by column (x, z).
@@ -204,7 +216,8 @@ pub struct GameState {
 impl GameState {
     pub fn new(world: &World) -> Self {
         let mut pickables: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        for (i, p) in world.plants().iter().enumerate() {
+        let plants: Vec<world::PlantInstance> = world.plants().to_vec();
+        for (i, p) in plants.iter().enumerate() {
             if harvest(p).is_some() {
                 let (x, z) = position(p);
                 pickables
@@ -215,7 +228,11 @@ impl GameState {
         }
         Self {
             players: Vec::new(),
-            removed: vec![false; world.plants().len()],
+            removed: vec![false; plants.len()],
+            ecology: Ecology::new(world, &plants, world.config.seed ^ 0xec0),
+            time_scale: 1.0,
+            plant_changes: Vec::new(),
+            plants,
             pebbles_taken: HashMap::new(),
             obstacles: Obstacles::from_world(world),
             pickables,
@@ -343,7 +360,7 @@ impl GameState {
     }
 
     /// The plant to gather nearest to `at` (within half a cell), if any.
-    pub fn plant_at(&self, world: &World, id: PlayerId, at: Vec2) -> Option<(usize, Matter)> {
+    pub fn plant_at(&self, id: PlayerId, at: Vec2) -> Option<(usize, Matter)> {
         let blade = self.has_blade(id);
         let (cx, cz) = (at.x.floor() as i64, at.y.floor() as i64);
         let mut best: Option<(f32, usize, Matter)> = None;
@@ -353,7 +370,7 @@ impl GameState {
                     if self.removed[i] {
                         continue;
                     }
-                    let plant = &world.plants()[i];
+                    let plant = &self.plants[i];
                     let Some(matter) = self.available(i, plant, blade) else {
                         continue;
                     };
@@ -524,7 +541,7 @@ impl GameState {
 
     /// The thing player `id` would pick up now: the nearest within reach, those in front
     /// first. Its index in `World::plants` and what it would give.
-    pub fn target(&self, world: &World, id: PlayerId) -> Option<(usize, Matter)> {
+    pub fn target(&self, id: PlayerId) -> Option<(usize, Matter)> {
         let blade = self.has_blade(id);
         let p = self.player(id)?;
         let feet = p.body.position;
@@ -541,7 +558,7 @@ impl GameState {
                     if self.removed[i] {
                         continue;
                     }
-                    let plant = &world.plants()[i];
+                    let plant = &self.plants[i];
                     let Some(matter) = self.available(i, plant, blade) else {
                         continue;
                     };
@@ -608,7 +625,7 @@ impl GameState {
                 if let Some(i) = self.object_in_reach(player) {
                     return self.take_back(player, i);
                 }
-                let Some((plant, matter)) = self.target(world, player) else {
+                let Some((plant, matter)) = self.target(player) else {
                     // Nothing to gather: a handful of the ground, if worth taking.
                     let Some(matter) = self.ground_sample(world, player) else {
                         return Some(Event::Failed {
@@ -631,7 +648,7 @@ impl GameState {
                         removed: None,
                     });
                 };
-                self.gather(world, player, plant, matter)
+                self.gather(player, plant, matter)
             }
             Command::Eat { player, slot } => {
                 let p = self.player_mut(player)?;
@@ -667,8 +684,8 @@ impl GameState {
                 if let Some(i) = self.object_at(at) {
                     return self.take_back(player, i);
                 }
-                if let Some((plant, matter)) = self.plant_at(world, player, at) {
-                    return self.gather(world, player, plant, matter);
+                if let Some((plant, matter)) = self.plant_at(player, at) {
+                    return self.gather(player, plant, matter);
                 }
                 if let Some(matter) = self.ground_sample_at(world, at) {
                     let p = self.player_mut(player)?;
@@ -798,7 +815,7 @@ impl GameState {
                     continue;
                 };
                 for &plant in list {
-                    let p = &world.plants()[plant];
+                    let p = &self.plants[plant];
                     let (px, pz) = position(p);
                     let close = Vec2::new(px - at.x, pz - at.z).length() < 0.45;
                     if close
@@ -806,6 +823,8 @@ impl GameState {
                         && matches!(harvest(p), Some(Harvest::Whole(_)))
                     {
                         self.removed[plant] = true;
+                        self.ecology.remove(plant, &self.plants);
+                        self.ecology.remove(plant, &self.plants);
                         self.events.push(Event::Cleared { plant });
                     }
                 }
@@ -817,6 +836,28 @@ impl GameState {
     /// Digs a handful at `at`: the world takes a micro-voxel out there (event `Dig`).
     fn dig(&mut self, at: Vec2) {
         self.events.push(Event::Dig { at });
+        // What grew there is dug up with the soil.
+        self.clear_plants(at, 0.4);
+    }
+
+    /// Living plants within `radius` of `at` are gone (dug up, burnt).
+    fn clear_plants(&mut self, at: Vec2, radius: f32) {
+        for plant in self.ecology.near(at, radius, &self.plants) {
+            if !self.removed[plant] {
+                self.removed[plant] = true;
+                self.ecology.remove(plant, &self.plants);
+                self.events.push(Event::Cleared { plant });
+            }
+        }
+    }
+
+    /// Plants and the life of each (size 1 for what does not grow).
+    pub fn plants(&self) -> &[world::PlantInstance] {
+        &self.plants
+    }
+
+    pub fn plant_size(&self, plant: usize) -> f32 {
+        self.ecology.size(plant)
     }
 
     /// A cut wears the blade: a knife loses a use, and when its binding gives way, the flake
@@ -870,13 +911,7 @@ impl GameState {
     }
 
     /// Gathers `matter` from plant `plant` into player's bag.
-    fn gather(
-        &mut self,
-        world: &World,
-        player: PlayerId,
-        plant: usize,
-        matter: Matter,
-    ) -> Option<Event> {
+    fn gather(&mut self, player: PlayerId, plant: usize, matter: Matter) -> Option<Event> {
         let p = self.player_mut(player)?;
         if let Err(refusal) = p.inventory.add(matter) {
             return Some(Event::Failed {
@@ -884,14 +919,16 @@ impl GameState {
                 failure: Failure::Bag(refusal),
             });
         }
-        let removed = match harvest(&world.plants()[plant]) {
+        let removed = match harvest(&self.plants[plant]) {
             Some(Harvest::Whole(_)) => {
                 self.removed[plant] = true;
+                self.ecology.remove(plant, &self.plants);
                 self.obstacles.remove(plant);
                 Some(plant)
             }
             Some(Harvest::NeedsBlade(_)) => {
                 self.removed[plant] = true;
+                self.ecology.remove(plant, &self.plants);
                 self.obstacles.remove(plant);
                 self.wear_blade(player);
                 Some(plant)
@@ -928,6 +965,54 @@ impl GameState {
         }
         self.changes.clear();
         self.objects.step(STEP, air, &mut self.changes);
+        // Fire kills the plants it touches.
+        let burning: Vec<Vec2> = (0..self.objects.placed().len())
+            .filter(|&i| self.objects.body(i).burning)
+            .map(|i| {
+                let b = self.objects.placed()[i].base;
+                Vec2::new(b.x, b.z)
+            })
+            .collect();
+        for at in burning {
+            self.clear_plants(at, 0.45);
+        }
+        // Plants live: growth, seeds, death.
+        self.plant_changes.clear();
+        let objects = &self.objects;
+        let free = |p: Vec2| {
+            objects
+                .placed()
+                .iter()
+                .all(|o| Vec2::new(o.base.x, o.base.z).distance(p) > 0.3)
+        };
+        self.ecology.update(
+            STEP * self.time_scale,
+            world,
+            &mut self.plants,
+            free,
+            &mut self.plant_changes,
+        );
+        for &change in &self.plant_changes {
+            match change {
+                Change::Sprouted(i) => {
+                    self.removed.push(false);
+                    let p = &self.plants[i];
+                    if harvest(p).is_some() {
+                        let (x, z) = position(p);
+                        self.pickables
+                            .entry((x.floor() as i64, z.floor() as i64))
+                            .or_default()
+                            .push(i);
+                    }
+                }
+                Change::Died(i) => {
+                    self.removed[i] = true;
+                    self.obstacles.remove(i);
+                }
+                Change::Resized(_) => {}
+            }
+            self.events.push(Event::Plant(change));
+        }
         for &(_, from, to) in &self.changes {
             self.events.push(Event::Changed { from, to });
         }

@@ -175,7 +175,7 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
         } else {
             actions.push(format!("{} : trop chaud", matter.name()));
         }
-    } else if let Some((_, matter)) = input.state.target(input.world, input.me) {
+    } else if let Some((_, matter)) = input.state.target(input.me) {
         actions.push(format!("E  Ramasser : {}", matter.name()));
     } else if let Some(matter) = input.state.ground_sample(input.world, input.me) {
         actions.push(format!("E  Prélever : {}", matter.name()));
