@@ -1,0 +1,286 @@
+//! What the naturalist can carry. No item types with recipes: an item is a matter (stone,
+//! dead wood, grass fibre, a flower, a mushroom…) and what it can do follows from its
+//! properties (hardness, sharpness, nutrition, toxicity…), computed from the matter. The
+//! player learns them by trying and observing, not from a menu.
+
+use world::plants::mushroom_is_spotted;
+use world::{Material, Plant, PlantInstance};
+
+/// Wild flowers, by model variant (see `world::plants::flower`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Flower {
+    Daisy,
+    Poppy,
+    Lavender,
+    Buttercup,
+}
+
+/// What an item is made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Matter {
+    /// A pebble; `dark`: a dense dark rock that splits into sharp flakes.
+    Pebble {
+        dark: bool,
+    },
+    /// Bare dead twigs.
+    DeadTwigs,
+    /// A tuft of grass blades.
+    GrassFibre,
+    /// A fern frond.
+    Frond,
+    Flower(Flower),
+    /// `spotted`: the white spots of a fly agaric (poisonous; the player has to learn it).
+    Mushroom {
+        spotted: bool,
+    },
+}
+
+/// What a matter can do, each in [0, 1] unless stated.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Properties {
+    /// Mass of one, in kilograms.
+    pub mass: f32,
+    pub hardness: f32,
+    pub sharpness: f32,
+    /// Bends without breaking (fibres, green wood).
+    pub flexibility: f32,
+    /// Breaks easily.
+    pub fragility: f32,
+    pub flammability: f32,
+    /// Share of a day's food in one.
+    pub nutrition: f32,
+    /// How bad it is to eat (0 harmless).
+    pub toxicity: f32,
+}
+
+impl Matter {
+    pub fn properties(self) -> Properties {
+        let base = Properties::default();
+        match self {
+            Matter::Pebble { dark } => Properties {
+                mass: 0.3,
+                hardness: if dark { 0.9 } else { 0.75 },
+                sharpness: if dark { 0.4 } else { 0.1 },
+                fragility: if dark { 0.3 } else { 0.1 },
+                ..base
+            },
+            Matter::DeadTwigs => Properties {
+                mass: 0.25,
+                hardness: 0.3,
+                flexibility: 0.1,
+                fragility: 0.7,
+                flammability: 0.9,
+                ..base
+            },
+            Matter::GrassFibre => Properties {
+                mass: 0.03,
+                flexibility: 0.9,
+                fragility: 0.2,
+                flammability: 0.6,
+                ..base
+            },
+            Matter::Frond => Properties {
+                mass: 0.05,
+                flexibility: 0.8,
+                fragility: 0.3,
+                flammability: 0.2,
+                ..base
+            },
+            Matter::Flower(flower) => Properties {
+                mass: 0.02,
+                fragility: 0.9,
+                flammability: 0.3,
+                // Daisies can be eaten; poppies are mildly toxic; buttercups are poisonous
+                // (protoanemonin), as in real meadows.
+                nutrition: if flower == Flower::Daisy { 0.02 } else { 0.01 },
+                toxicity: match flower {
+                    Flower::Buttercup => 0.5,
+                    Flower::Poppy => 0.2,
+                    _ => 0.0,
+                },
+                ..base
+            },
+            Matter::Mushroom { spotted } => Properties {
+                mass: 0.06,
+                fragility: 0.8,
+                nutrition: 0.08,
+                toxicity: if spotted { 0.9 } else { 0.0 },
+                ..base
+            },
+        }
+    }
+
+    /// Name shown to the player: what it looks like, never what it does.
+    pub fn name(self) -> &'static str {
+        match self {
+            Matter::Pebble { dark: false } => "Caillou",
+            Matter::Pebble { dark: true } => "Caillou sombre",
+            Matter::DeadTwigs => "Brindilles mortes",
+            Matter::GrassFibre => "Brins d'herbe",
+            Matter::Frond => "Fronde de fougère",
+            Matter::Flower(Flower::Daisy) => "Marguerite",
+            Matter::Flower(Flower::Poppy) => "Coquelicot",
+            Matter::Flower(Flower::Lavender) => "Lavande",
+            Matter::Flower(Flower::Buttercup) => "Bouton d'or",
+            Matter::Mushroom { spotted: false } => "Champignon",
+            Matter::Mushroom { spotted: true } => "Champignon tacheté",
+        }
+    }
+
+    /// The material whose colour stands for it (icons).
+    pub fn material(self) -> Material {
+        match self {
+            Matter::Pebble { dark: false } => Material::Stone,
+            Matter::Pebble { dark: true } => Material::Rock,
+            Matter::DeadTwigs => Material::DeadWood,
+            Matter::GrassFibre => Material::TallGrass,
+            Matter::Frond => Material::Fern,
+            Matter::Flower(Flower::Daisy) => Material::FlowerWhite,
+            Matter::Flower(Flower::Poppy) => Material::FlowerRed,
+            Matter::Flower(Flower::Lavender) => Material::FlowerViolet,
+            Matter::Flower(Flower::Buttercup) => Material::FlowerYellow,
+            Matter::Mushroom { .. } => Material::MushroomCap,
+        }
+    }
+
+    pub fn edible(self) -> bool {
+        let p = self.properties();
+        p.nutrition > 0.0
+    }
+}
+
+/// What picking up a plant of the ground gives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Harvest {
+    /// The whole thing comes away: the plant disappears from the world.
+    Whole(Matter),
+    /// A part of it (a pebble at the foot of a boulder): the plant stays.
+    Part(Matter),
+}
+
+/// What can be picked from this plant, if anything. Trees and bushes cannot.
+pub fn harvest(plant: &PlantInstance) -> Option<Harvest> {
+    let flowers = [
+        Flower::Daisy,
+        Flower::Poppy,
+        Flower::Lavender,
+        Flower::Buttercup,
+    ];
+    match plant.plant {
+        // Boulders weigh tens of kilograms: one cannot lift them, but pebbles lie at their foot.
+        Plant::Stone => Some(Harvest::Part(Matter::Pebble {
+            dark: plant.variant.is_multiple_of(3),
+        })),
+        Plant::DryShrub => Some(Harvest::Whole(Matter::DeadTwigs)),
+        Plant::Grass => Some(Harvest::Whole(Matter::GrassFibre)),
+        Plant::Fern => Some(Harvest::Whole(Matter::Frond)),
+        Plant::Flower => Some(Harvest::Whole(Matter::Flower(
+            flowers[plant.variant as usize % 4],
+        ))),
+        Plant::Mushroom => Some(Harvest::Whole(Matter::Mushroom {
+            spotted: mushroom_is_spotted(plant.variant),
+        })),
+        _ => None,
+    }
+}
+
+/// Several of the same matter, carried together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stack {
+    pub matter: Matter,
+    pub count: u32,
+}
+
+/// The naturalist's bag: a few kinds of things, a bounded weight.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Inventory {
+    stacks: Vec<Stack>,
+}
+
+/// Kinds of things the bag holds at once, and the weight it carries, in kilograms.
+pub const SLOTS: usize = 8;
+pub const MAX_MASS: f32 = 6.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    TooHeavy,
+    Full,
+}
+
+impl Inventory {
+    pub fn stacks(&self) -> &[Stack] {
+        &self.stacks
+    }
+
+    pub fn mass(&self) -> f32 {
+        self.stacks
+            .iter()
+            .map(|s| s.matter.properties().mass * s.count as f32)
+            .sum()
+    }
+
+    /// Adds one, if the bag has room and can bear the weight.
+    pub fn add(&mut self, matter: Matter) -> Result<(), Refusal> {
+        if self.mass() + matter.properties().mass > MAX_MASS + 1e-4 {
+            return Err(Refusal::TooHeavy);
+        }
+        if let Some(stack) = self.stacks.iter_mut().find(|s| s.matter == matter) {
+            stack.count += 1;
+            return Ok(());
+        }
+        if self.stacks.len() >= SLOTS {
+            return Err(Refusal::Full);
+        }
+        self.stacks.push(Stack { matter, count: 1 });
+        Ok(())
+    }
+
+    /// Takes one out of slot `slot`.
+    pub fn take(&mut self, slot: usize) -> Option<Matter> {
+        let stack = self.stacks.get_mut(slot)?;
+        let matter = stack.matter;
+        stack.count -= 1;
+        if stack.count == 0 {
+            self.stacks.remove(slot);
+        }
+        Some(matter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_things_stack_and_the_bag_has_limits() {
+        let mut bag = Inventory::default();
+        for _ in 0..3 {
+            bag.add(Matter::GrassFibre).unwrap();
+        }
+        assert_eq!(bag.stacks().len(), 1);
+        assert_eq!(bag.stacks()[0].count, 3);
+        // Pebbles until too heavy.
+        let mut pebbles = 0;
+        while bag.add(Matter::Pebble { dark: false }).is_ok() {
+            pebbles += 1;
+        }
+        assert_eq!(pebbles, 19);
+        assert_eq!(
+            bag.add(Matter::Pebble { dark: false }),
+            Err(Refusal::TooHeavy)
+        );
+        // Taking empties the stack.
+        for _ in 0..3 {
+            assert_eq!(bag.take(0), Some(Matter::GrassFibre));
+        }
+        assert_eq!(bag.stacks().len(), 1);
+    }
+
+    #[test]
+    fn names_never_tell_what_is_poisonous() {
+        let poisonous = Matter::Mushroom { spotted: true };
+        assert!(poisonous.properties().toxicity > 0.5);
+        assert!(!poisonous.name().to_lowercase().contains("poison"));
+        assert!(!poisonous.name().to_lowercase().contains("toxique"));
+    }
+}

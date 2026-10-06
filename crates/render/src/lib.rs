@@ -15,6 +15,7 @@ pub mod png;
 pub mod post;
 pub mod renderer;
 pub mod sky;
+pub mod ui;
 pub mod volume;
 pub mod water_mesher;
 

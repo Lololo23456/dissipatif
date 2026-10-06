@@ -57,6 +57,12 @@ impl Model {
 }
 
 /// Builds variant `variant` of `plant`. Deterministic in (plant, variant, seed).
+/// Whether this mushroom variant carries the white spots of a fly agaric: such mushrooms are
+/// poisonous. Decided by the variant alone, so the game can tell without the model.
+pub const fn mushroom_is_spotted(variant: u32) -> bool {
+    variant % 5 < 2
+}
+
 pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
     let seed = hash(seed, &[plant as i64, variant as i64, 0x91a]);
     let mut b = match plant {
@@ -89,7 +95,7 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::Grass => grass(&mut b),
         Plant::Flower => flower(&mut b, variant),
         Plant::Fern => fern(&mut b),
-        Plant::Mushroom => mushrooms(&mut b),
+        Plant::Mushroom => mushrooms(&mut b, variant),
         Plant::Stone => stones(&mut b, variant),
         Plant::DryShrub => dry_shrub(&mut b),
     }
@@ -835,8 +841,8 @@ fn fern(b: &mut Builder) {
 
 /// One to three mushrooms (fine resolution): a pale stem under a domed cap; some variants carry
 /// the white spots of a fly agaric.
-fn mushrooms(b: &mut Builder) {
-    let spotted = b.rand() < 0.4;
+fn mushrooms(b: &mut Builder, variant: u32) {
+    let spotted = mushroom_is_spotted(variant);
     let count = 1 + (b.rand() * 3.0) as usize;
     for k in 0..count {
         let (x, z) = if k == 0 {

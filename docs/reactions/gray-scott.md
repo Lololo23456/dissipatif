@@ -66,3 +66,19 @@ Mesure : pourcentage de cellules avec v > 0,18, relevé tous les 1000 pas.
 | 0,0545 | 0,062 | germes figés, aucune croissance (~1 %) |
 
 Ces résultats viennent d'un test rapide et d'une seule graine : à confirmer avec la skill `balayage-parametres`.
+
+## En 2D : le tapis (une seule couche, ny = 1)
+
+Avec `Boundary::NoFlux` et ny = 1, les voisines en y sont la cellule elle-même : le laplacien 7 points devient le laplacien 5 points du plan. Mesures sur 48 × 1 × 48, 6 germes, pourcentage de cellules avec v > 0,18 tous les 1000 pas :
+
+| F | k | 1000 → 6000 pas | Allure |
+|---|---|---|---|
+| 0,0367 | 0,0649 | 15 % → 24 % | cellules qui se divisent |
+| 0,029 | 0,057 | 45 % → 46 % | labyrinthe, stable |
+| 0,030 | 0,062 | 21 % → 25 % | bulles |
+| 0,046 | 0,063 | 32 % → 44 % | croissance continue |
+| 0,039 | 0,058 | 83 % → 80 % | presque tout envahi |
+| 0,022 | 0,051 | 46 % → 54 %, irrégulier | agitation, ne se fige pas |
+| 0,025 | 0,060 | 18 % → 27 %, irrégulier | idem |
+
+Contrairement à la 3D, la taille des germes (5, 8 ou 12) change peu le résultat sur cette grille : tout prend. Les deux dernières lignes oscillent d'une mesure à l'autre : ces régimes ne se figent pas, ils restent agités.

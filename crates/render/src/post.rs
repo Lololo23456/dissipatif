@@ -26,7 +26,8 @@ pub struct PostUniform {
     pub shadow_tint: [f32; 4],
     /// …tint of the lights (rgb) and exposure (w).
     pub light_tint: [f32; 4],
-    /// x: darkness of the night, in [0, 1] (dims the foreground dust). yzw unused.
+    /// x: darkness of the night, in [0, 1] (dims the foreground dust). y: weariness of the
+    /// naturalist, in [0, 1] (darker edges, duller colours). zw unused.
     pub night: [f32; 4],
 }
 
@@ -41,6 +42,7 @@ pub struct Post {
     bind_group: wgpu::BindGroup,
     grade: Grade,
     night: f32,
+    weariness: f32,
 }
 
 impl Post {
@@ -141,6 +143,7 @@ impl Post {
             bind_group,
             grade: crate::sky::sky(17.0).grade,
             night: 0.0,
+            weariness: 0.0,
         }
     }
 
@@ -158,6 +161,10 @@ impl Post {
     pub fn set_grade(&mut self, grade: &Grade, night: f32) {
         self.grade = *grade;
         self.night = night;
+    }
+
+    pub fn set_weariness(&mut self, weariness: f32) {
+        self.weariness = weariness;
     }
 
     /// Where the main pass draws the scene.
@@ -186,7 +193,7 @@ impl Post {
             time: [time, right, up, camera.distance],
             shadow_tint: [sr, sg, sb, g.saturation],
             light_tint: [lr, lg, lb, g.exposure],
-            night: [self.night, 0.0, 0.0, 0.0],
+            night: [self.night, self.weariness, 0.0, 0.0],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

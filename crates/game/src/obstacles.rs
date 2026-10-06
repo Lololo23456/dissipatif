@@ -26,15 +26,21 @@ impl Aabb {
 
 #[derive(Default)]
 pub struct Obstacles {
-    /// Boxes by column (x, z) they cover.
-    by_column: HashMap<(i64, i64), Vec<Aabb>>,
+    /// Boxes by column (x, z) they cover, each with the plant it belongs to (its index in
+    /// `World::plants`), so that taking the stone removes its box.
+    by_column: HashMap<(i64, i64), Vec<(usize, Aabb)>>,
 }
 
 impl Obstacles {
     /// The stones of the world.
     pub fn from_world(world: &World) -> Self {
         let mut obstacles = Self::default();
-        for p in world.plants().iter().filter(|p| p.plant == Plant::Stone) {
+        for (index, p) in world
+            .plants()
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.plant == Plant::Stone)
+        {
             let model = world.model(p.plant, p.variant);
             let k = p.scale / model.resolution as f32;
             let [ax, ay, az] = model.anchor.map(|a| a as f32);
@@ -62,19 +68,32 @@ impl Obstacles {
             );
             // Slightly smaller than the voxels' extent: stones are rounded.
             let shrink = 0.8;
-            obstacles.add(Aabb {
-                min: centre + Vec3::new(x0 * k * shrink, 0.0, z0 * k * shrink),
-                max: centre + Vec3::new(x1 * k * shrink, height, z1 * k * shrink),
-            });
+            obstacles.add(
+                index,
+                Aabb {
+                    min: centre + Vec3::new(x0 * k * shrink, 0.0, z0 * k * shrink),
+                    max: centre + Vec3::new(x1 * k * shrink, height, z1 * k * shrink),
+                },
+            );
         }
         obstacles
     }
 
-    pub fn add(&mut self, aabb: Aabb) {
+    pub fn add(&mut self, owner: usize, aabb: Aabb) {
         for z in aabb.min.z.floor() as i64..=aabb.max.z.floor() as i64 {
             for x in aabb.min.x.floor() as i64..=aabb.max.x.floor() as i64 {
-                self.by_column.entry((x, z)).or_default().push(aabb);
+                self.by_column
+                    .entry((x, z))
+                    .or_default()
+                    .push((owner, aabb));
             }
+        }
+    }
+
+    /// Removes the boxes of plant `owner` (taken away).
+    pub fn remove(&mut self, owner: usize) {
+        for boxes in self.by_column.values_mut() {
+            boxes.retain(|(o, _)| *o != owner);
         }
     }
 
@@ -83,7 +102,7 @@ impl Obstacles {
         for z in aabb.min.z.floor() as i64..=aabb.max.z.floor() as i64 {
             for x in aabb.min.x.floor() as i64..=aabb.max.x.floor() as i64 {
                 if let Some(boxes) = self.by_column.get(&(x, z))
-                    && boxes.iter().any(|b| b.overlaps(aabb))
+                    && boxes.iter().any(|(_, b)| b.overlaps(aabb))
                 {
                     return true;
                 }
@@ -104,7 +123,7 @@ mod tests {
             min: Vec3::new(4.6, 2.0, 7.2),
             max: Vec3::new(5.4, 2.6, 8.3),
         };
-        o.add(stone);
+        o.add(3, stone);
         let probe = |x: f32, z: f32| Aabb {
             min: Vec3::new(x - 0.1, 2.1, z - 0.1),
             max: Vec3::new(x + 0.1, 2.3, z + 0.1),
@@ -118,5 +137,7 @@ mod tests {
             max: Vec3::new(5.1, 4.0, 8.1),
         };
         assert!(!o.hits(&above));
+        o.remove(3);
+        assert!(!o.hits(&probe(5.0, 8.0)));
     }
 }

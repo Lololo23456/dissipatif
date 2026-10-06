@@ -19,6 +19,7 @@ use crate::palette::{self, AtmosphereUniform, MaterialsUniform};
 use crate::particles::{CubeVertex, ParticleInstance, unit_cube};
 use crate::post::{Post, SCENE_FORMAT};
 use crate::sky::Sky;
+use crate::ui::{UiPass, UiVertex};
 use crate::volume::{Volume, VolumeStyle};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -83,6 +84,8 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     /// The scene image and the last pass that turns it into the final image.
     post: Post,
+    /// The interface, drawn over the final image.
+    ui: UiPass,
 }
 
 impl Renderer {
@@ -336,6 +339,7 @@ impl Renderer {
         let (width, height) = gpu.size();
         let depth_view = create_depth_view(device, width, height);
         let post = Post::new(device, gpu.surface_format(), width, height);
+        let ui = UiPass::new(device, gpu.surface_format());
 
         Self {
             gpu,
@@ -368,6 +372,7 @@ impl Renderer {
             volumes: Vec::new(),
             depth_view,
             post,
+            ui,
         }
     }
 
@@ -391,6 +396,22 @@ impl Renderer {
         let [r, g, b] = atmosphere.fog_color.map(f64::from);
         self.clear_color = wgpu::Color { r, g, b, a: 1.0 };
         self.post.set_grade(&sky.grade, sky.night);
+    }
+
+    /// How weary the naturalist is, in [0, 1]: the image darkens at its edges and dulls.
+    pub fn set_weariness(&mut self, weariness: f32) {
+        self.post.set_weariness(weariness);
+    }
+
+    /// The interface to draw over the next frames (see `ui::Ui`).
+    pub fn set_ui(&mut self, vertices: &[UiVertex]) {
+        let (device, queue) = (self.gpu.device(), self.gpu.queue());
+        self.ui.upload(device, queue, vertices);
+    }
+
+    /// Size of the images drawn, in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        self.gpu.size()
     }
 
     /// Ripples on the water and footprints in the sand (see `marks`).
@@ -619,6 +640,7 @@ impl Renderer {
         }
         self.post
             .draw(self.gpu.queue(), &mut encoder, &frame.view, time, camera);
+        self.ui.draw(&mut encoder, &frame.view);
         self.gpu.queue().submit([encoder.finish()]);
         self.gpu.present(frame);
     }

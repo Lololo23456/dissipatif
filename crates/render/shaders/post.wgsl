@@ -9,7 +9,7 @@ struct Post {
                       // on the ground (cells), w = camera distance (cells)
     shadow_tint: vec4<f32>,  // offset 16: tint of the darks, w = saturation
     light_tint: vec4<f32>,   // offset 32: tint of the lights, w = exposure
-    night: vec4<f32>,        // offset 48: x = darkness of the night (0 to 1)
+    night: vec4<f32>,        // offset 48: x = darkness of the night, y = weariness (0 to 1)
 }
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -191,7 +191,10 @@ fn fs_post(in: FullScreen) -> @location(0) vec4<f32> {
 
     // Vignette: darker towards the corners (aspect corrected), guiding the eye to the centre.
     let centred = (uv - 0.5) * vec2<f32>(size.x / size.y, 1.0);
-    color *= 1.0 - VIGNETTE * smoothstep(0.35, 1.0, length(centred) * 1.2);
+    // A weary naturalist sees the world dimmer at the edges and duller.
+    let weary = post.night.y;
+    color *= 1.0 - (VIGNETTE + 0.4 * weary) * smoothstep(0.35 - 0.2 * weary, 1.0, length(centred) * 1.2);
+    color = mix(vec3<f32>(luminance(color)), color, 1.0 - 0.45 * weary);
 
     // Grain: fine noise changing 24 times a second; it also hides banding in the haze.
     let frame = u32(post.time.x * 24.0);

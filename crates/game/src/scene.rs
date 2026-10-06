@@ -31,6 +31,8 @@ pub struct SceneData {
     plant_models: Vec<(MeshData, Vec<ModelInstance>)>,
     /// Plants that bend when walked through, with where their instance is.
     pliable: Vec<Pliable>,
+    /// Where each plant (index in `World::plants`) is drawn: model group, index in it.
+    slots: Vec<(usize, usize)>,
     /// Ids of the plant models in the renderer, once installed.
     model_ids: Vec<ModelId>,
     /// Model groups whose instances changed since the last upload.
@@ -87,6 +89,7 @@ impl SceneData {
         };
         let mut grouped = vec![Vec::new(); Plant::ALL.len() * VARIANTS as usize];
         let mut pliable = Vec::new();
+        let mut slots = Vec::with_capacity(world.plants().len());
         for p in world.plants() {
             let [x, y, z] = p.base;
             let biome = world.biome(x, z);
@@ -105,6 +108,7 @@ impl SceneData {
                     index: grouped[group].len(),
                 });
             }
+            slots.push((group, grouped[group].len()));
             grouped[group].push(ModelInstance::new(
                 position,
                 p.rotation,
@@ -137,6 +141,7 @@ impl SceneData {
             dims,
             plant_models,
             pliable,
+            slots,
             model_ids: Vec::new(),
             dirty: vec![false; groups],
             no_overlay_solid: Field3::filled(dims, 0.0),
@@ -211,6 +216,16 @@ impl SceneData {
         if let Some(instance) = self.plant_models[plant.group].1.get_mut(plant.index) {
             instance.set_bend(bend.to_array());
             self.dirty[plant.group] = true;
+        }
+    }
+
+    /// Stops drawing plant `plant` (picked up): its instance shrinks to nothing.
+    pub fn hide(&mut self, plant: usize) {
+        if let Some(&(group, index)) = self.slots.get(plant)
+            && let Some(instance) = self.plant_models[group].1.get_mut(index)
+        {
+            instance.scale_mirror[0] = 0.0;
+            self.dirty[group] = true;
         }
     }
 

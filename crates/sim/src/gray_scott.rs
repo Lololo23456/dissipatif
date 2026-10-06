@@ -87,6 +87,13 @@ pub struct GrayScott {
     y_plus: Vec<usize>,
     z_minus: Vec<usize>,
     z_plus: Vec<usize>,
+    /// Alimentation F de chaque cellule : remplie avec `params.feed_rate` à la création, puis
+    /// libre de varier dans l'espace (près d'une source, l'alimentation est plus forte).
+    /// EXERCICE : `step` ne la lit pas encore (il utilise `params.feed_rate` partout).
+    feed: Field3,
+    /// Cellules inertes (un caillou posé) : rien n'y réagit, rien ne les traverse.
+    /// EXERCICE : `step` ne les connaît pas encore.
+    solid: Vec<bool>,
 }
 
 impl GrayScott {
@@ -124,7 +131,29 @@ impl GrayScott {
             y_plus,
             z_minus,
             z_plus,
+            feed: Field3::filled(dims, params.feed_rate),
+            solid: vec![false; dims.len()],
         }
+    }
+
+    /// Alimentation F de chaque cellule.
+    pub fn feed(&self) -> &Field3 {
+        &self.feed
+    }
+
+    /// Fixe l'alimentation F de la cellule (x, y, z).
+    pub fn set_feed(&mut self, x: usize, y: usize, z: usize, rate: f32) {
+        self.feed.set(x, y, z, rate);
+    }
+
+    /// Rend la cellule (x, y, z) inerte (`true`, un caillou) ou de nouveau vivante (`false`).
+    pub fn set_solid(&mut self, x: usize, y: usize, z: usize, solid: bool) {
+        let i = self.dims().index(x, y, z);
+        self.solid[i] = solid;
+    }
+
+    pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
+        self.solid[self.dims().index(x, y, z)]
     }
 
     pub fn dims(&self) -> Dims {
@@ -448,5 +477,91 @@ mod tests {
         }
         let per_step = start.elapsed().as_secs_f64() * 1000.0 / steps as f64;
         eprintln!("Gray-Scott 48³ : {per_step:.3} ms par pas");
+    }
+
+    // ---------- Exercices : alimentation variable et cellules inertes ----------
+    // Ces tests décrivent ce que `step` doit faire une fois étendu. Ils échouent tant que ce
+    // n'est pas écrit : `cargo test -p sim -- --ignored` pour les lancer, puis retirer
+    // `#[ignore]` quand ils passent.
+
+    /// Moitié gauche nourrie, moitié droite affamée (F = 0) : le motif ne survit qu'à gauche.
+    #[test]
+    #[ignore = "exercice : step doit lire l'alimentation de chaque cellule"]
+    fn feed_varies_in_space() {
+        // Un tapis (une seule couche) dans le régime « labyrinthe », qui envahit tout l'espace
+        // qu'on lui laisse : en 2D comme en 3D, il occupe ~47 % des cellules.
+        let dims = Dims {
+            nx: 48,
+            ny: 1,
+            nz: 24,
+        };
+        let params = GrayScottParams {
+            feed_rate: 0.029,
+            kill_rate: 0.057,
+            ..GrayScottParams::reference()
+        };
+        let mut sim = GrayScott::new(dims, params, Boundary::NoFlux);
+        sim.reset_with_seeds(16, 5, 3);
+        for z in 0..dims.nz {
+            for x in dims.nx / 2..dims.nx {
+                sim.set_feed(x, 0, z, 0.0);
+            }
+        }
+        for _ in 0..4000 {
+            sim.step();
+        }
+        let column_max = |x0: usize, x1: usize| {
+            (x0..x1)
+                .flat_map(|x| (0..dims.nz).map(move |z| (x, z)))
+                .map(|(x, z)| sim.v().get(x, 0, z))
+                .fold(0.0f32, f32::max)
+        };
+        assert!(column_max(0, 16) > 0.18, "le côté nourri s'est éteint");
+        // Loin de la frontière (la diffusion la franchit un peu), le côté affamé est mort.
+        assert!(column_max(36, 48) < 0.01, "le côté affamé vit encore");
+    }
+
+    /// Un mur de cellules inertes : la diffusion ne le traverse pas, la masse est conservée,
+    /// et les cellules du mur ne changent pas.
+    #[test]
+    #[ignore = "exercice : step doit traiter les cellules inertes comme des parois"]
+    fn solid_cells_are_walls() {
+        let params = GrayScottParams {
+            feed_rate: 0.0,
+            kill_rate: 0.0,
+            ..GrayScottParams::reference()
+        };
+        let dims = Dims {
+            nx: 20,
+            ny: 1,
+            nz: 6,
+        };
+        let mut sim = GrayScott::new(dims, params, Boundary::NoFlux);
+        sim.u.data.fill(0.0);
+        let wall = 10;
+        for z in 0..dims.nz {
+            sim.set_solid(wall, 0, z, true);
+        }
+        for z in 0..dims.nz {
+            sim.v.data[dims.index(4, 0, z)] = 1.0;
+        }
+        let mass_before: f32 = sim.v().data.iter().sum();
+        for _ in 0..2000 {
+            sim.step();
+        }
+        for z in 0..dims.nz {
+            for x in wall..dims.nx {
+                assert_eq!(
+                    sim.v().get(x, 0, z),
+                    0.0,
+                    "V a traversé le mur en ({x}, {z})"
+                );
+            }
+        }
+        let mass_after: f32 = sim.v().data.iter().sum();
+        assert!(
+            (mass_after - mass_before).abs() < 1e-3,
+            "{mass_before} → {mass_after}"
+        );
     }
 }

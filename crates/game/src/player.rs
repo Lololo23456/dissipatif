@@ -43,7 +43,7 @@ const STRIDE_PER_CELL: f32 = std::f32::consts::TAU / 1.6;
 const MAX_STEP: f32 = 1.0 / 120.0;
 
 /// What the player asks for this frame.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Controls {
     pub forward: bool,
     pub back: bool,
@@ -56,6 +56,8 @@ pub struct Controls {
 pub struct Player {
     /// Feet (centre of the bottom of the body box), in world cells.
     pub position: Vec3,
+    /// Speed factor from the body's state: 1 fine, less when hungry, cold or sick.
+    pub pace: f32,
     velocity: Vec3,
     facing: f32,
     on_ground: bool,
@@ -77,6 +79,7 @@ impl Player {
     pub fn new(position: Vec3) -> Self {
         Self {
             position,
+            pace: 1.0,
             velocity: Vec3::ZERO,
             facing: 0.0,
             on_ground: false,
@@ -91,6 +94,11 @@ impl Player {
             next_glance: 2.0,
             rng: SplitMix64::new(0x10c),
         }
+    }
+
+    /// Direction the body faces, radians around the vertical (0 = +z).
+    pub fn facing(&self) -> f32 {
+        self.facing
     }
 
     pub fn in_water(&self) -> bool {
@@ -163,7 +171,7 @@ impl Player {
             self.swimming = false;
         }
         let swimming = self.swimming;
-        let mut speed = if c.run { RUN_SPEED } else { WALK_SPEED };
+        let mut speed = if c.run { RUN_SPEED } else { WALK_SPEED } * self.pace;
         if self.in_water {
             speed *= WADING;
         }

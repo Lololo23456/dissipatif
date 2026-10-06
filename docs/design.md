@@ -4,7 +4,13 @@ Version de travail. Les choix encore ouverts sont marqués « à trancher » et 
 
 ## Vision
 
-Un jeu d'exploration contemplative dans un monde procédural très vivant. Le joueur est un naturaliste : il arrive dans un monde inconnu, l'observe, et cherche à comprendre ce qui l'entoure. La faune et la flore ont des comportements crédibles, et même les plantes semblent vivantes. À côté d'elles existe une **autre forme de vie**, les anomalies : des êtres qui ne sont pas faits comme les nôtres, et qui n'existent que parce qu'un flux d'énergie et de matière les traverse.
+Un jeu d'exploration contemplative dans un monde procédural très vivant. Le joueur est un naturaliste : il arrive dans un monde inconnu, l'observe, et cherche à comprendre ce qui l'entoure. La faune et la flore ont des comportements crédibles, et même les plantes semblent vivantes.
+
+Le cœur du jeu est un **va-et-vient entre le monde et le laboratoire** : on prélève dehors, on fait réagir dans la verrerie, on voit naître des structures dissipatives (spirales de Belooussov-Jabotinski, anneaux de Liesegang, cristaux, bandes de Turing dans un gel), on comprend, et on retourne dehors avec une hypothèse.
+
+## Critère d'authenticité
+
+**Tout ce que le joueur voit existe vraiment dans la réalité.** Pas de créature inventée ni de phénomène imaginaire : les structures étranges sont de vraies structures dissipatives, observables dans un laboratoire ou dans la nature (anneaux de Liesegang dans les grès, cristaux, motifs de végétation). L'étrangeté vient du réel bien filmé, pas de la fiction. Toute nouvelle idée passe ce filtre.
 
 Le jeu mise d'abord sur l'**ambiance** : une lumière soignée qui change au fil de la journée, un ciel étoilé la nuit, un monde qui bouge et qui respire.
 
@@ -64,7 +70,20 @@ On ne combine pas « 3 bois + 2 pierres = hache » : on assemble des matières, 
 
 ## Boucle centrale
 
-Explorer → observer (un animal, une plante, une anomalie, le ciel) → noter et relier dans le carnet → comprendre un comportement ou une règle → débloquer un instrument ou une action → explorer plus loin, voir ce qui était caché.
+**Prélever dans le monde → analyser au labo → comprendre → retourner dehors avec une hypothèse.**
+
+- **Prélever** : eaux, sels, minéraux, cendres, plantes, terres. Les matières varient selon le lieu (une source ferrugineuse, une saumure, un grès rubané), ce qui pousse à explorer.
+- **Analyser** : dans la verrerie, les échantillons réagissent. La réaction-diffusion (Gray-Scott et les autres règles de `docs/reactions/`) est le moteur qui anime les récipients.
+- **Comprendre** : les réactions sont sensibles à la température, aux concentrations, aux impuretés. Le carnet consigne les essais, les conditions et ce qui en sort.
+- **Retourner dehors** : une hypothèse (« les anneaux de ce grès viennent du fer de cette source ») mène à un autre lieu, un autre prélèvement.
+
+Ce qui existe déjà y sert : la survie, le sac et le ramassage servent à rapporter des échantillons.
+
+## Le laboratoire
+
+- **Une petite île de contrôle** dans un monde plus fort que le joueur : on y règle ce qu'on peut, mais les réactions restent sensibles et capricieuses, et les matières premières viennent du dehors.
+- **La progression, c'est le labo** : verre, creuset, filtre, balance, source de chaleur… chaque instrument ouvre de nouvelles expériences, jamais de la puissance.
+- Les phénomènes visés, tous réels : réaction de Belooussov-Jabotinski (ondes en spirale), anneaux de Liesegang (précipitation périodique dans un gel), cristallisation, motifs de Turing dans un gel.
 
 ## Le monde
 
@@ -96,7 +115,9 @@ Des plantes qui semblent vivantes :
 
 L'effet recherché : on n'est jamais tout à fait sûr de ce qui est animé, ce qui brouille la frontière avec les anomalies.
 
-### Les anomalies : une autre forme de vie
+### Les anomalies (version précédente, remplacée)
+**Remplacée** par le critère d'authenticité et le laboratoire : les structures dissipatives reviennent dans la verrerie et dans les phénomènes naturels réels, pas sous forme d'êtres inventés. Le texte ci-dessous est gardé pour mémoire.
+
 Ni animaux ni plantes : des structures dissipatives vivantes. Pas de cellules ni d'ADN, mais des motifs qui se nourrissent de gradients (chaleur, humidité, lumière, minéraux, eau qui coule) et qui s'éteignent quand le flux s'arrête. C'est la thèse de Prigogine prise au pied de la lettre : la vie comme ordre maintenu loin de l'équilibre.
 
 - Elles naissent là où il y a un flux : source chaude, bord de rivière, versant ensoleillé.
