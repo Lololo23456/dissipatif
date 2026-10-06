@@ -88,9 +88,15 @@ fn model_index(plant: Plant, variant: u32) -> usize {
     kind * VARIANTS as usize + variant as usize
 }
 
-/// Drawn scale of a plant of relative size `size`: a seedling is small, a grown plant full.
-fn drawn_size(size: f32) -> f32 {
-    0.3 + 0.7 * size.clamp(0.0, 1.0)
+/// Drawn scale of a plant of relative size `size`: a seedling is small, a grown plant full; a
+/// tree seedling is tiny next to its grown height.
+fn drawn_size(plant: Plant, size: f32) -> f32 {
+    let size = size.clamp(0.0, 1.0);
+    if crate::ecology::is_tree(plant) {
+        0.06 + 0.94 * size
+    } else {
+        0.3 + 0.7 * size
+    }
 }
 
 /// Seed offset of the per-voxel brightness variation.
@@ -119,8 +125,9 @@ pub struct SceneData {
     pliable: Vec<Pliable>,
     /// Where each plant (index in the plant list) is drawn: model group, index in it.
     slots: Vec<(usize, usize)>,
-    /// Each plant's full-grown scale (its drawn scale follows its size as it grows).
+    /// Each plant's full-grown scale (its drawn scale follows its size as it grows), and kind.
     base_scales: Vec<f32>,
+    kinds: Vec<Plant>,
     /// Ids of the plant models in the renderer, once installed.
     model_ids: Vec<ModelId>,
     /// Model groups whose instances changed since the last upload.
@@ -207,6 +214,7 @@ impl SceneData {
             plant_models,
             pliable,
             base_scales: world.plants().iter().map(|p| p.scale).collect(),
+            kinds: world.plants().iter().map(|p| p.plant).collect(),
             slots,
             model_ids: Vec::new(),
             dirty: vec![false; groups],
@@ -340,7 +348,13 @@ impl SceneData {
     }
 
     /// A new plant (sprouted): drawn from now on, at the size it has (see `resize_plant`).
-    pub fn add_plant(&mut self, world: &World, plant: &world::PlantInstance, size: f32) {
+    /// Returns how it bends when walked through, if it does.
+    pub fn add_plant(
+        &mut self,
+        world: &World,
+        plant: &world::PlantInstance,
+        size: f32,
+    ) -> Option<Pliable> {
         let [x, y, z] = plant.base;
         let group = model_index(plant.plant, plant.variant);
         let seed = world.config.seed ^ VARIATION_SEED;
@@ -351,17 +365,26 @@ impl SceneData {
             z as f32 + 0.5 + plant.offset[1],
         ];
         let instances = &mut self.plant_models[group].1;
-        self.slots.push((group, instances.len()));
+        let index = instances.len();
+        self.slots.push((group, index));
         self.base_scales.push(plant.scale);
+        self.kinds.push(plant.plant);
         instances.push(ModelInstance::new(
             position,
             plant.rotation,
             plant.mirrored,
-            plant.scale * drawn_size(size),
+            plant.scale * drawn_size(plant.plant, size),
             foliage_tint(plant.plant, biome, plant.base, plant.offset, seed),
             flexibility(plant.plant),
         ));
         self.dirty[group] = true;
+        let yielding = yielding(plant.plant);
+        (yielding > 0.0).then(|| Pliable {
+            base: Vec3::from(position),
+            yielding,
+            group,
+            index,
+        })
     }
 
     /// Plant `plant` is now `size` of a grown one: drawn that big.
@@ -371,7 +394,7 @@ impl SceneData {
             && let Some(instance) = self.plant_models[group].1.get_mut(index)
             && instance.scale_mirror[0] > 0.0
         {
-            instance.scale_mirror[0] = scale * drawn_size(size);
+            instance.scale_mirror[0] = scale * drawn_size(self.kinds[plant], size);
             self.dirty[group] = true;
         }
     }

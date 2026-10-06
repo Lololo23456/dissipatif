@@ -58,6 +58,16 @@ impl Trample {
         }
     }
 
+    /// A plant that sprouted: it bends too.
+    pub fn add(&mut self, plant: Pliable) {
+        let key = (plant.base.x.floor() as i64, plant.base.z.floor() as i64);
+        self.by_column
+            .entry(key)
+            .or_default()
+            .push(self.plants.len());
+        self.plants.push(plant);
+    }
+
     /// Advances by `dt` seconds with the player's feet at `feet` moving at `velocity`.
     /// Calls `apply(plant, bend)` for every plant whose bend changed.
     pub fn update(

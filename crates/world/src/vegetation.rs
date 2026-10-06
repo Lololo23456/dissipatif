@@ -190,7 +190,9 @@ pub fn rotate(dx: f32, dz: f32, rotation: u32) -> (f32, f32) {
 
 /// Writes the coarse copy of a plant into the world grid (only into air cells): each world cell
 /// takes the plant material most present among its micro-cells, if there are enough of them.
-pub fn stamp(blocks: &mut [u8], dims: Dims, plant: &PlantInstance, model: &Model) {
+/// The world cells a plant fills in the coarse grid, and with what: a cell counts when enough
+/// of its micro-cells are of the plant (`COARSE_SHARE`), with the material most of them have.
+pub fn footprint(dims: Dims, plant: &PlantInstance, model: &Model) -> Vec<([usize; 3], Material)> {
     let m = model.resolution as f32;
     let needed = (COARSE_SHARE * m * m * m) as usize;
     // Micro-cells per world cell and material.
@@ -220,23 +222,35 @@ pub fn stamp(blocks: &mut [u8], dims: Dims, plant: &PlantInstance, model: &Model
             }
         }
     }
-    for ((x, y, z), count) in counts {
-        let in_world = x >= 0
-            && y >= 0
-            && z >= 0
-            && (x as usize) < dims.nx
-            && (y as usize) < dims.ny
-            && (z as usize) < dims.nz;
-        let (best, &n) = count
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, n)| **n)
-            .unwrap_or((0, &0));
-        if in_world && n >= needed {
-            let i = dims.index(x as usize, y as usize, z as usize);
-            if blocks[i] == Material::Air.id() {
-                blocks[i] = best as u8;
-            }
+    let mut cells: Vec<([usize; 3], Material)> = counts
+        .into_iter()
+        .filter_map(|((x, y, z), count)| {
+            let in_world = x >= 0
+                && y >= 0
+                && z >= 0
+                && (x as usize) < dims.nx
+                && (y as usize) < dims.ny
+                && (z as usize) < dims.nz;
+            let (best, &n) = count.iter().enumerate().max_by_key(|(_, n)| **n)?;
+            (in_world && n >= needed).then(|| {
+                (
+                    [x as usize, y as usize, z as usize],
+                    Material::from_id(best as u8).unwrap_or(Material::Air),
+                )
+            })
+        })
+        .collect();
+    // Same order on every run (the map's order is not).
+    cells.sort_by_key(|(c, _)| (c[2], c[1], c[0]));
+    cells
+}
+
+/// Writes a plant's coarse copy into the grid (empty cells only).
+pub fn stamp(blocks: &mut [u8], dims: Dims, plant: &PlantInstance, model: &Model) {
+    for ([x, y, z], material) in footprint(dims, plant, model) {
+        let i = dims.index(x, y, z);
+        if blocks[i] == Material::Air.id() {
+            blocks[i] = material.id();
         }
     }
 }

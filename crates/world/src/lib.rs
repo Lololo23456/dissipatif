@@ -209,6 +209,27 @@ impl World {
         })
     }
 
+    /// Writes a plant's coarse copy into the grid (a tree that has grown: its trunk is solid,
+    /// its crown shades).
+    pub fn stamp_plant(&mut self, plant: &PlantInstance) {
+        let model = &self.models[model_index(plant.plant, plant.variant)];
+        let dims = self.dims();
+        vegetation::stamp(&mut self.blocks, dims, plant, model);
+    }
+
+    /// Erases a plant's coarse copy from the grid (a tree that died, burnt or fell): its cells
+    /// holding plant matter become air again.
+    pub fn unstamp_plant(&mut self, plant: &PlantInstance) {
+        let model = &self.models[model_index(plant.plant, plant.variant)];
+        let dims = self.dims();
+        for ([x, y, z], _) in vegetation::footprint(dims, plant, model) {
+            let i = dims.index(x, y, z);
+            if Material::from_id(self.blocks[i]).is_some_and(Material::is_plant) {
+                self.blocks[i] = Material::Air.id();
+            }
+        }
+    }
+
     /// Height of the ground surface at (x, z), micro-voxels included.
     pub fn surface_height(&self, x: f32, z: f32) -> f32 {
         let d = self.dims();

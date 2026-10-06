@@ -1,19 +1,31 @@
-//! Living plants: the ground cover and the bushes grow, spread their seeds and die, each
-//! species after its own way, in a habitat made of water, light and soil. Nothing is
-//! scripted: a meadow, an undergrowth, a bare patch slowly recolonised (succession) all come
-//! from the same few rules, and from what the player does (picking, digging, fire).
+//! Living plants: herbs, shrubs and trees grow, compete, spread their seeds, burn and die,
+//! each species after its own way, in a habitat made of water, light and soil. Nothing is
+//! scripted: a meadow, an undergrowth, a clearing slowly closing again (succession), a grass
+//! fire running before the wind all come from the same rules, and from what the player does.
 //!
-//! Model, per plant i of species S (a time step dt in game days):
-//! - **habitat** H ∈ [0, 1] at its place: how well S suits the biome, the moisture (near
-//!   water, the climate), the light (the shade of tree crowns) and the soil;
-//! - **crowding** c = Σ over neighbours j within `CROWD_RADIUS` of size_j × (1 − d_ij / R);
-//! - **carrying size** K = H / (1 + α c): what the place allows it, minus what the
-//!   neighbours take (competition for water and light);
-//! - **growth**, logistic: ds/dt = r s (1 − s / K). Where K drops below s (crowded, shaded,
-//!   dry), the plant shrinks; below `DEATH_SIZE` it dies. It also dies of old age;
-//! - **seeds**: a grown plant (s > `MATURE`) scatters seeds at a species rate, each landing
-//!   at a distance drawn from its dispersal kernel; a seed germinates with probability H
-//!   where nothing grows yet.
+//! **Habitat** H ∈ [0, 1] of species S at a place: how well S suits the biome, the moisture
+//! (the climate, the distance to water), the light and the soil. Light is not fixed: it is
+//! the shade of the living trees' crowns, so a tree that grows darkens the ground under it,
+//! and one that dies lets the light back in.
+//!
+//! **Competition** (Lotka-Volterra for several species): for plant i,
+//! ```text
+//! ds_i/dt = r_S s_i (1 − (s_i + Σ_j α_ij w_ij s_j) / H_i)
+//! ```
+//! where w_ij = 1 − d_ij / R_i weighs the neighbours within the competition radius R_i of i's
+//! layer (herb, shrub, tree), and α_ij how much j takes of what i needs: 1 within a species,
+//! less between species (another niche: other roots, another season), 0 for a tree on the
+//! herbs (trees act on them by their shade). Since every species hinders its own kind more
+//! than the others (α_ij < 1), several species coexist instead of one taking all.
+//!
+//! **Life cycle**: below `DEATH_SIZE` a plant dies (crowded, shaded, too dry: self-thinning),
+//! and of old age. A grown plant (s > `MATURE`) scatters seeds at its species' rate, landing
+//! at a distance drawn from its dispersal kernel; a seed germinates with probability H where
+//! its layer has room.
+//!
+//! **Fire**: a burning plant ignites its neighbours with a probability per second that grows
+//! with their flammability and their dryness, and with the wind behind it; rain damps it.
+//! A plant that burnt out dies. Fire is updated every frame, life every `STEP_SECONDS`.
 //!
 //! Deterministic: every chance comes from a seeded generator.
 
@@ -23,24 +35,62 @@ use glam::Vec2;
 use sim::rng::SplitMix64;
 use world::{Biome, Material, Plant, PlantInstance, World};
 
-/// Real seconds between two ecology steps, and real seconds in a game day (`clock`).
+/// Real seconds between two life steps, and real seconds in a game day (`clock`).
 pub const STEP_SECONDS: f32 = 2.0;
 const DAY_SECONDS: f32 = 20.0 * 60.0;
-/// Neighbours closer than this compete (cells), and how strongly.
-const CROWD_RADIUS: f32 = 0.9;
-const CROWDING: f32 = 1.2;
 /// Size below which a plant dies, above which it seeds; size of a seedling.
 const DEATH_SIZE: f32 = 0.08;
 const MATURE: f32 = 0.6;
 const SEEDLING: f32 = 0.12;
-/// A seed does not germinate closer than this to another plant (cells).
-const ROOM: f32 = 0.32;
+/// A sapling this big has a trunk and a crown solid in the world grid.
+pub const TREE_STANDS: f32 = 0.85;
 /// Living plants at most, as a multiple of the initial ones (keeps the cost bounded).
 const MAX_GROWTH: f32 = 2.0;
+/// Wind direction (as for the plants bending, the particles): fire runs before it.
+const WIND: Vec2 = Vec2::new(0.89, 0.45);
+
+/// Storey of a plant: who competes with whom, and over what distance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layer {
+    Herb,
+    Shrub,
+    Tree,
+}
+
+impl Layer {
+    /// Distance over which plants of this layer compete (cells).
+    fn reach(self) -> f32 {
+        match self {
+            Layer::Herb => 0.9,
+            Layer::Shrub => 1.5,
+            Layer::Tree => 3.0,
+        }
+    }
+
+    /// No seed of this layer germinates closer than this to a plant of the same layer.
+    fn room(self) -> f32 {
+        match self {
+            Layer::Herb => 0.32,
+            Layer::Shrub => 0.7,
+            Layer::Tree => 1.6,
+        }
+    }
+
+    /// How far fire jumps from a burning plant of this layer (cells): a tuft stands for a
+    /// patch of meadow, so fire reaches the next tuft through the grass between them.
+    fn spread(self) -> f32 {
+        match self {
+            Layer::Herb => 1.7,
+            Layer::Shrub => 2.2,
+            Layer::Tree => 3.2,
+        }
+    }
+}
 
 /// How a species lives.
 #[derive(Clone, Copy, Debug)]
 pub struct Species {
+    pub layer: Layer,
     /// Logistic growth rate (per game day).
     pub growth: f32,
     /// Typical lifespan (game days).
@@ -52,39 +102,86 @@ pub struct Species {
     /// Best moisture, and how far from it the species still copes.
     pub moisture: f32,
     pub tolerance: f32,
-    /// Light: 1 loves full sun (shade hurts), −1 needs shade, 0 indifferent.
+    /// Light: 1 needs full sun (shade hurts), −1 needs shade, 0 indifferent.
     pub sun: f32,
+    /// How readily it burns when dry, in [0, 1], and for how long (real seconds).
+    pub flammability: f32,
+    pub burn_seconds: f32,
+    /// Radius of a grown crown (cells): the shade it casts. 0 for what casts none.
+    pub crown: f32,
 }
 
-/// The species that live and spread (stones do not; trees are left out for now).
+/// The species that live (stones and dead trees do not).
 pub fn species(plant: Plant) -> Option<Species> {
-    let s = |growth, lifespan, seeds, dispersal, moisture, tolerance, sun| Species {
-        growth,
-        lifespan,
-        seeds,
-        dispersal,
-        moisture,
-        tolerance,
-        sun,
+    use Layer::*;
+    // (layer, growth, lifespan, seeds, dispersal, moisture, tolerance, sun, flammability,
+    // burn seconds, crown)
+    let s = |v: (Layer, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)| Species {
+        layer: v.0,
+        growth: v.1,
+        lifespan: v.2,
+        seeds: v.3,
+        dispersal: v.4,
+        moisture: v.5,
+        tolerance: v.6,
+        sun: v.7,
+        flammability: v.8,
+        burn_seconds: v.9,
+        crown: v.10,
     };
-    Some(match plant {
-        // Grass: fast, many seeds near by, sun-loving, copes with most moisture: the pioneer.
-        Plant::Grass => s(3.0, 20.0, 1.6, 1.6, 0.5, 0.45, 0.8),
+    Some(s(match plant {
+        // Grass: fast, many seeds near by, sun-loving: the pioneer. Burns fast when dry.
+        Plant::Grass => (Herb, 3.0, 20.0, 1.6, 1.6, 0.5, 0.45, 0.8, 0.9, 5.0, 0.0),
         // Wild flowers: shorter lives, seeds carried farther.
-        Plant::Flower => s(2.0, 6.0, 1.0, 3.5, 0.5, 0.3, 0.9),
+        Plant::Flower => (Herb, 2.0, 8.0, 1.4, 3.5, 0.5, 0.35, 0.9, 0.5, 4.0, 0.0),
         // Ferns: slow, spores carried far, moist shade.
-        Plant::Fern => s(1.0, 30.0, 0.4, 6.0, 0.75, 0.25, -0.6),
+        Plant::Fern => (Herb, 1.0, 30.0, 0.4, 6.0, 0.75, 0.25, -0.6, 0.3, 6.0, 0.0),
         // Mushrooms: fruiting bodies of a hidden mycelium, brief, in damp shade only.
-        Plant::Mushroom => s(6.0, 2.0, 1.5, 2.0, 0.8, 0.2, -1.0),
-        // Dry shrubs: slow and hardy, the drylands.
-        Plant::DryShrub => s(0.6, 25.0, 0.2, 2.5, 0.15, 0.25, 0.6),
+        Plant::Mushroom => (Herb, 6.0, 2.0, 1.5, 2.0, 0.8, 0.2, -1.0, 0.0, 2.0, 0.0),
+        // Dry shrubs: slow and hardy, the drylands; tinder.
+        Plant::DryShrub => (Shrub, 0.6, 25.0, 0.2, 2.5, 0.15, 0.25, 0.6, 1.0, 10.0, 0.0),
         // Bushes: slow, few seeds, long-lived.
-        Plant::Bush => s(0.4, 60.0, 0.08, 3.0, 0.6, 0.3, 0.3),
+        Plant::Bush => (Shrub, 0.4, 60.0, 0.08, 3.0, 0.6, 0.3, 0.3, 0.6, 18.0, 0.8),
+        // Trees: slow growth, long lives, a few seeds carried more or less far. Pioneers
+        // (birch, pine) need light; the broadleaf grows up in shade.
+        Plant::Broadleaf => (
+            Tree, 0.05, 300.0, 0.05, 5.0, 0.65, 0.3, -0.1, 0.4, 60.0, 2.6,
+        ),
+        Plant::Birch => (Tree, 0.09, 120.0, 0.08, 9.0, 0.6, 0.3, 0.9, 0.5, 45.0, 1.6),
+        Plant::Pine => (Tree, 0.06, 250.0, 0.06, 7.0, 0.5, 0.3, 0.6, 0.8, 60.0, 2.4),
+        Plant::Willow => (Tree, 0.08, 150.0, 0.05, 4.0, 0.9, 0.2, 0.5, 0.3, 50.0, 2.8),
+        Plant::Acacia => (Tree, 0.05, 200.0, 0.04, 6.0, 0.25, 0.2, 0.9, 0.6, 50.0, 3.0),
+        Plant::Palm => (
+            Tree, 0.06, 150.0, 0.04, 4.0, 0.45, 0.25, 0.9, 0.5, 40.0, 2.2,
+        ),
+        Plant::Cactus => (
+            Shrub, 0.08, 200.0, 0.03, 3.0, 0.05, 0.15, 1.0, 0.0, 1.0, 0.0,
+        ),
         _ => return None,
-    })
+    }))
 }
 
-/// What a column offers: moisture and shade, both in [0, 1].
+/// How much species `a` is held back by a plant of species `b` growing near it.
+fn competition(a: Plant, b: Plant) -> f32 {
+    if a == b {
+        return 1.0;
+    }
+    let (Some(sa), Some(sb)) = (species(a), species(b)) else {
+        return 0.0;
+    };
+    match (sa.layer, sb.layer) {
+        (Layer::Herb, Layer::Herb) => 0.4,
+        (Layer::Herb, Layer::Shrub) | (Layer::Shrub, Layer::Herb) => 0.25,
+        (Layer::Shrub, Layer::Shrub) => 0.5,
+        (Layer::Tree, Layer::Tree) => 0.7,
+        // Trees act on what grows under them by their shade (see `Habitat`).
+        (Layer::Herb | Layer::Shrub, Layer::Tree) => 0.0,
+        // Saplings struggle in the grass.
+        (Layer::Tree, Layer::Herb | Layer::Shrub) => 0.15,
+    }
+}
+
+/// What a column offers: moisture (fixed) and shade (from the living trees), in [0, 1].
 pub struct Habitat {
     nx: usize,
     nz: usize,
@@ -125,7 +222,6 @@ impl Habitat {
             }
         }
         let mut moisture = vec![0.0; nx * nz];
-        let mut shade = vec![0.0; nx * nz];
         for z in 0..nz {
             for x in 0..nx {
                 let i = x + nx * z;
@@ -142,35 +238,65 @@ impl Habitat {
                 };
                 let near = (1.0 - distance[i].min(10) as f32 / 8.0).max(0.0);
                 moisture[i] = (climate + 0.45 * near).min(1.0);
-                let top = world.ground_top(x, z);
-                let crown = (top + 3..(top + 18).min(d.ny)).any(|y| {
-                    let m = world.block(x, y, z);
-                    m.is_canopy() || m == Material::PineNeedles
-                });
-                shade[i] = if crown { 0.75 } else { 0.0 };
             }
         }
         Self {
             nx,
             nz,
             moisture,
-            shade,
+            shade: vec![0.0; nx * nz],
         }
     }
 
-    /// How well `plant` suits the place (x, z), in [0, 1].
-    pub fn suitability(&self, world: &World, plant: Plant, x: f32, z: f32) -> f32 {
+    fn column(&self, x: f32, z: f32) -> Option<usize> {
+        (x >= 0.0 && z >= 0.0 && x < self.nx as f32 && z < self.nz as f32)
+            .then(|| x as usize + self.nx * z as usize)
+    }
+
+    pub fn moisture(&self, x: f32, z: f32) -> f32 {
+        self.column(x, z).map_or(0.0, |i| self.moisture[i])
+    }
+
+    #[cfg(test)]
+    pub fn shade(&self, x: f32, z: f32) -> f32 {
+        self.column(x, z).map_or(0.0, |i| self.shade[i])
+    }
+
+    /// Recomputes the shade from the crowns: a crown of radius R and relative size s darkens
+    /// the columns under it by 0.8 s (1 − d / R), added up, at most 0.9.
+    fn cast_shade(&mut self, crowns: &[(Vec2, f32, f32)]) {
+        self.shade.iter_mut().for_each(|s| *s = 0.0);
+        for &(at, radius, size) in crowns {
+            let r = radius.ceil() as i64;
+            let (cx, cz) = (at.x.floor() as i64, at.y.floor() as i64);
+            for z in cz - r..=cz + r {
+                for x in cx - r..=cx + r {
+                    if x < 0 || z < 0 || x as usize >= self.nx || z as usize >= self.nz {
+                        continue;
+                    }
+                    let d = Vec2::new(x as f32 + 0.5, z as f32 + 0.5).distance(at);
+                    if d < radius {
+                        let i = x as usize + self.nx * z as usize;
+                        self.shade[i] = (self.shade[i] + 0.8 * size * (1.0 - d / radius)).min(0.9);
+                    }
+                }
+            }
+        }
+    }
+
+    /// How well `plant` suits the place (x, z), in [0, 1]. `own_shade`: the shade the plant
+    /// itself casts there (a tree is not shaded by its own crown).
+    pub fn suitability(&self, world: &World, plant: Plant, x: f32, z: f32, own_shade: f32) -> f32 {
         let Some(sp) = species(plant) else {
             return 0.0;
         };
-        if x < 0.0 || z < 0.0 || x >= self.nx as f32 || z >= self.nz as f32 {
+        let Some(i) = self.column(x, z) else {
             return 0.0;
-        }
+        };
         let (cx, cz) = (x as usize, z as usize);
         if world.water_level(cx, cz).is_some() {
             return 0.0;
         }
-        let i = cx + self.nx * cz;
         let top = world.ground_top(cx, cz);
         if top == 0 {
             return 0.0;
@@ -180,7 +306,7 @@ impl Habitat {
             Material::Grass | Material::ForestFloor | Material::Dirt => 1.0,
             Material::DryGrass | Material::Clay => 0.8,
             Material::Sand | Material::DesertSand => match plant {
-                Plant::DryShrub => 1.0,
+                Plant::DryShrub | Plant::Cactus | Plant::Palm => 1.0,
                 Plant::Grass => 0.3,
                 _ => 0.05,
             },
@@ -195,9 +321,9 @@ impl Habitat {
         let affinity = if native { 1.0 } else { 0.3 };
         let off = (self.moisture[i] - sp.moisture).abs() / sp.tolerance;
         let wet = (-off * off).exp();
-        let shade = self.shade[i];
+        let shade = (self.shade[i] - own_shade).max(0.0);
         let light = if sp.sun >= 0.0 {
-            1.0 - sp.sun * 0.8 * shade
+            1.0 - sp.sun * 0.9 * shade
         } else {
             (1.0 + sp.sun) + (-sp.sun) * shade
         };
@@ -214,29 +340,41 @@ pub struct Life {
     pub age: f32,
     /// Its own lifespan (the species' one, varied).
     pub lifespan: f32,
+    /// Real seconds of burning left (0: not burning).
+    pub burning: f32,
 }
 
-/// What happened to the plants in a step.
+/// What happened to the plants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Change {
     /// A new plant (index in the plant list).
     Sprouted(usize),
     /// A plant's size changed noticeably.
     Resized(usize),
-    Died(usize),
+    /// A sapling grew into a tree: its trunk and crown now stand in the world grid.
+    Stood(usize),
+    /// A plant caught fire.
+    Ignited(usize),
+    /// A plant died (of age, of want, or burnt out). If it `stood` in the world grid, it
+    /// must be erased from it.
+    Died { plant: usize, stood: bool },
 }
 
 pub struct Ecology {
     habitat: Habitat,
     /// Life of each plant (index as in the plant list); `None` for what does not live
-    /// (stones) or is gone.
+    /// (stones, dead trees) or is gone.
     life: Vec<Option<Life>>,
     /// Size last reported for each plant (a `Resized` is sent when it moves enough).
     shown: Vec<f32>,
+    /// Whether each plant stands in the world grid (the initial trees, and saplings grown).
+    stood: Vec<bool>,
     /// Living plants by column.
     grid: HashMap<(i64, i64), Vec<usize>>,
+    /// Plants burning now.
+    burning: Vec<usize>,
     rng: SplitMix64,
-    /// Real seconds until the next step.
+    /// Real seconds until the next life step.
     timer: f32,
     max_plants: usize,
 }
@@ -245,11 +383,15 @@ fn column(p: Vec2) -> (i64, i64) {
     (p.x.floor() as i64, p.y.floor() as i64)
 }
 
-fn place(p: &PlantInstance) -> Vec2 {
+pub fn place(p: &PlantInstance) -> Vec2 {
     Vec2::new(
         p.base[0] as f32 + 0.5 + p.offset[0],
         p.base[2] as f32 + 0.5 + p.offset[1],
     )
+}
+
+pub fn is_tree(plant: Plant) -> bool {
+    species(plant).is_some_and(|s| s.layer == Layer::Tree)
 }
 
 impl Ecology {
@@ -261,9 +403,14 @@ impl Ecology {
             let entry = species(p.plant).map(|sp| {
                 let lifespan = sp.lifespan * (0.7 + 0.6 * rng.next_f32());
                 Life {
-                    size: 0.6 + 0.4 * rng.next_f32(),
+                    size: if sp.layer == Layer::Tree {
+                        0.8 + 0.2 * rng.next_f32()
+                    } else {
+                        0.6 + 0.4 * rng.next_f32()
+                    },
                     age: lifespan * rng.next_f32() * 0.8,
                     lifespan,
+                    burning: 0.0,
                 }
             });
             if entry.is_some() {
@@ -273,15 +420,20 @@ impl Ecology {
         }
         let living = life.iter().filter(|l| l.is_some()).count();
         let shown = life.iter().map(|l| l.map_or(1.0, |l| l.size)).collect();
-        Self {
+        let stood = plants.iter().map(|p| !p.plant.is_ground_cover()).collect();
+        let mut ecology = Self {
             habitat: Habitat::new(world),
             life,
             shown,
+            stood,
             grid,
+            burning: Vec::new(),
             rng,
             timer: STEP_SECONDS,
             max_plants: (living as f32 * MAX_GROWTH) as usize,
-        }
+        };
+        ecology.cast_shade(plants);
+        ecology
     }
 
     #[cfg(test)]
@@ -298,35 +450,157 @@ impl Ecology {
         self.life.iter().filter(|l| l.is_some()).count()
     }
 
-    /// A plant is gone (taken, burnt, dug up): it stops living.
-    pub fn remove(&mut self, i: usize, plants: &[PlantInstance]) {
+    /// Plants burning now, with how fiercely (0 to 1).
+    pub fn burning<'a>(
+        &'a self,
+        plants: &'a [PlantInstance],
+    ) -> impl Iterator<Item = (usize, f32)> + 'a {
+        self.burning.iter().map(move |&i| {
+            let strength = match species(plants[i].plant).map(|s| s.layer) {
+                Some(Layer::Tree) => 1.0,
+                Some(Layer::Shrub) => 0.6,
+                _ => 0.35,
+            };
+            (i, strength * self.size(i).max(0.3))
+        })
+    }
+
+    /// A plant is gone (taken, dug up): it stops living. Returns whether it stood in the
+    /// world grid (to erase it from there).
+    pub fn remove(&mut self, i: usize, plants: &[PlantInstance]) -> bool {
         if let Some(slot) = self.life.get_mut(i)
             && slot.take().is_some()
             && let Some(list) = self.grid.get_mut(&column(place(&plants[i])))
         {
             list.retain(|&j| j != i);
         }
+        self.burning.retain(|&j| j != i);
+        self.stood.get_mut(i).is_some_and(std::mem::take)
     }
 
     /// Living plants within `radius` of `at`.
     pub fn near(&self, at: Vec2, radius: f32, plants: &[PlantInstance]) -> Vec<usize> {
+        let mut found = Vec::new();
+        self.for_near(at, radius, plants, |j| found.push(j));
+        found
+    }
+
+    fn for_near(&self, at: Vec2, radius: f32, plants: &[PlantInstance], mut f: impl FnMut(usize)) {
         let (cx, cz) = column(at);
         let r = radius.ceil() as i64;
-        let mut found = Vec::new();
         for z in cz - r..=cz + r {
             for x in cx - r..=cx + r {
                 for &j in self.grid.get(&(x, z)).into_iter().flatten() {
                     if place(&plants[j]).distance(at) <= radius {
-                        found.push(j);
+                        f(j);
                     }
                 }
             }
         }
-        found
     }
 
-    /// Advances by `dt` real seconds (`speed` × faster when the day is fast-forwarded). New
-    /// plants are pushed onto `plants`; `free` says whether a seed may land at a point
+    /// The crowns of the living trees and bushes cast their shade.
+    fn cast_shade(&mut self, plants: &[PlantInstance]) {
+        let crowns: Vec<(Vec2, f32, f32)> = self
+            .life
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                let l = (*l)?;
+                let sp = species(plants[i].plant)?;
+                (sp.crown > 0.0).then(|| {
+                    let radius = sp.crown * plants[i].scale * l.size.sqrt();
+                    (place(&plants[i]), radius.max(0.5), l.size)
+                })
+            })
+            .collect();
+        self.habitat.cast_shade(&crowns);
+    }
+
+    /// Fire reaches the plants within `radius` of `at` (something burning there): each catches
+    /// with a chance that grows with its flammability and its dryness.
+    pub fn ignite(
+        &mut self,
+        at: Vec2,
+        radius: f32,
+        plants: &[PlantInstance],
+        changes: &mut Vec<Change>,
+    ) {
+        for i in self.near(at, radius, plants) {
+            self.try_ignite(i, plants, 1.0, changes);
+        }
+    }
+
+    fn try_ignite(
+        &mut self,
+        i: usize,
+        plants: &[PlantInstance],
+        chance: f32,
+        changes: &mut Vec<Change>,
+    ) {
+        let Some(mut l) = self.life[i] else {
+            return;
+        };
+        let Some(sp) = species(plants[i].plant) else {
+            return;
+        };
+        if l.burning > 0.0 || sp.flammability <= 0.0 {
+            return;
+        }
+        let at = place(&plants[i]);
+        let dryness = (1.15 - self.habitat.moisture(at.x, at.y)).clamp(0.0, 1.0);
+        if self.rng.next_f32() < chance * sp.flammability * dryness {
+            l.burning = sp.burn_seconds * (0.6 + 0.4 * l.size);
+            self.life[i] = Some(l);
+            self.burning.push(i);
+            changes.push(Change::Ignited(i));
+        }
+    }
+
+    /// Fire runs through the plants for `dt` real seconds; `rain` in [0, 1] damps it.
+    pub fn update_fire(
+        &mut self,
+        dt: f32,
+        rain: f32,
+        plants: &[PlantInstance],
+        changes: &mut Vec<Change>,
+    ) {
+        if self.burning.is_empty() {
+            return;
+        }
+        let burning = self.burning.clone();
+        for i in burning {
+            let Some(mut l) = self.life[i] else {
+                continue;
+            };
+            let p = plants[i];
+            let layer = species(p.plant).map_or(Layer::Herb, |s| s.layer);
+            let at = place(&p);
+            // Spread: each neighbour in reach may catch this second.
+            let reach = layer.spread();
+            for j in self.near(at, reach, plants) {
+                if j == i {
+                    continue;
+                }
+                let offset = place(&plants[j]) - at;
+                let towards = offset.normalize_or_zero();
+                let wind = 1.0 + 0.8 * towards.dot(WIND);
+                let near = 1.0 - offset.length() / reach;
+                let rate = 1.5 * near * wind * (1.0 - 0.9 * rain);
+                self.try_ignite(j, plants, 1.0 - (-rate * dt).exp(), changes);
+            }
+            l.burning -= dt * (1.0 + 3.0 * rain);
+            if l.burning <= 0.0 {
+                let stood = self.remove(i, plants);
+                changes.push(Change::Died { plant: i, stood });
+            } else {
+                self.life[i] = Some(l);
+            }
+        }
+    }
+
+    /// Advances life by `dt` real seconds (already sped up when the day is fast-forwarded).
+    /// New plants are pushed onto `plants`; `free` says whether a seed may land at a point
     /// (nothing laid there). Changes go onto `changes`.
     pub fn update(
         &mut self,
@@ -343,7 +617,7 @@ impl Ecology {
         }
     }
 
-    /// One step of `days` game days.
+    /// One life step of `days` game days.
     pub fn step(
         &mut self,
         days: f32,
@@ -352,6 +626,7 @@ impl Ecology {
         free: &impl Fn(Vec2) -> bool,
         changes: &mut Vec<Change>,
     ) {
+        self.cast_shade(plants);
         let count = self.life.len();
         let mut seeds: Vec<(Plant, Vec2)> = Vec::new();
         for i in 0..count {
@@ -363,68 +638,92 @@ impl Ecology {
                 continue;
             };
             let at = place(&p);
-            let h = self.habitat.suitability(world, p.plant, at.x, at.y);
+            let own_shade = if sp.crown > 0.0 { 0.8 * l.size } else { 0.0 };
+            let habitat = self
+                .habitat
+                .suitability(world, p.plant, at.x, at.y, own_shade);
+            // Lotka-Volterra: what the neighbours take, weighed by distance and niche.
+            let reach = sp.layer.reach();
             let mut crowd = 0.0;
-            for j in self.near(at, CROWD_RADIUS, plants) {
+            self.for_near(at, reach, plants, |j| {
                 if j != i {
-                    let d = place(&plants[j]).distance(at);
-                    crowd += self.size(j) * (1.0 - d / CROWD_RADIUS);
+                    let w = 1.0 - place(&plants[j]).distance(at) / reach;
+                    crowd += competition(p.plant, plants[j].plant) * w * self.size(j);
                 }
-            }
-            let carrying = h / (1.0 + CROWDING * crowd);
-            l.size += sp.growth * l.size * (1.0 - l.size / carrying.max(1e-3)) * days;
-            l.size = l.size.min(1.0);
+            });
+            let room = 1.0 - (l.size + crowd) / habitat.max(1e-3);
+            l.size = (l.size + sp.growth * l.size * room * days).min(1.0);
             l.age += days;
             if l.size < DEATH_SIZE || l.age > l.lifespan {
-                self.remove(i, plants);
-                changes.push(Change::Died(i));
+                let stood = self.remove(i, plants);
+                changes.push(Change::Died { plant: i, stood });
                 continue;
             }
             self.life[i] = Some(l);
-            if (l.size - self.shown[i]).abs() > 0.08 {
+            if (l.size - self.shown[i]).abs() > 0.06 {
                 self.shown[i] = l.size;
                 changes.push(Change::Resized(i));
+            }
+            if sp.layer == Layer::Tree && !self.stood[i] && l.size >= TREE_STANDS {
+                self.stood[i] = true;
+                changes.push(Change::Stood(i));
             }
             // Seeds of a grown plant: a Poisson trial per step.
             if l.size > MATURE && self.rng.next_f32() < sp.seeds * l.size * days {
                 let angle = std::f32::consts::TAU * self.rng.next_f32();
                 let distance = sp.dispersal * self.rng.next_f32().sqrt();
-                let target = at + Vec2::new(angle.cos(), angle.sin()) * distance;
-                seeds.push((p.plant, target));
+                seeds.push((p.plant, at + Vec2::new(angle.cos(), angle.sin()) * distance));
             }
         }
         for (plant, target) in seeds {
             if self.living() >= self.max_plants {
                 break;
             }
-            let h = self.habitat.suitability(world, plant, target.x, target.y);
+            let Some(sp) = species(plant) else {
+                continue;
+            };
+            let h = self
+                .habitat
+                .suitability(world, plant, target.x, target.y, 0.0);
             if self.rng.next_f32() >= h || !free(target) {
                 continue;
             }
-            if !self.near(target, ROOM, plants).is_empty() {
+            // Room in its own layer (and never on a trunk).
+            let mut crowded = false;
+            self.for_near(target, sp.layer.room().max(0.6), plants, |j| {
+                let other = species(plants[j].plant).map(|s| s.layer);
+                let d = place(&plants[j]).distance(target);
+                if (other == Some(sp.layer) && d < sp.layer.room())
+                    || (other == Some(Layer::Tree) && d < 0.6)
+                {
+                    crowded = true;
+                }
+            });
+            if crowded {
                 continue;
             }
             let (x, z) = (target.x.floor() as usize, target.y.floor() as usize);
-            let variant = (self.rng.next_f32() * world::plants::VARIANTS as f32) as u32;
+            let variants = world::plants::VARIANTS;
             let new = PlantInstance {
                 plant,
-                variant: variant.min(world::plants::VARIANTS - 1),
+                variant: ((self.rng.next_f32() * variants as f32) as u32).min(variants - 1),
                 rotation: (self.rng.next_f32() * 4.0) as u32 % 4,
                 mirrored: self.rng.next_f32() < 0.5,
                 scale: 0.85 + 0.3 * self.rng.next_f32(),
                 base: [x, world.ground_top(x, z), z],
                 offset: [target.x - x as f32 - 0.5, target.y - z as f32 - 0.5],
             };
-            let lifespan =
-                species(plant).map_or(10.0, |sp| sp.lifespan) * (0.7 + 0.6 * self.rng.next_f32());
+            let lifespan = sp.lifespan * (0.7 + 0.6 * self.rng.next_f32());
             let index = plants.len();
             plants.push(new);
             self.life.push(Some(Life {
                 size: SEEDLING,
                 age: 0.0,
                 lifespan,
+                burning: 0.0,
             }));
             self.shown.push(SEEDLING);
+            self.stood.push(false);
             self.grid.entry(column(target)).or_default().push(index);
             changes.push(Change::Sprouted(index));
         }
@@ -443,8 +742,22 @@ mod tests {
         (world, plants, ecology)
     }
 
+    fn run(
+        eco: &mut Ecology,
+        world: &World,
+        plants: &mut Vec<PlantInstance>,
+        days: usize,
+    ) -> Vec<Change> {
+        // 60 steps a game day: r dt ≤ 0.1 for every species, stable for Euler.
+        let mut changes = Vec::new();
+        for _ in 0..days * 60 {
+            eco.step(1.0 / 60.0, world, plants, &|_| true, &mut changes);
+        }
+        changes
+    }
+
     #[test]
-    fn grass_suits_a_meadow_mushrooms_need_damp_shade_nothing_grows_in_water() {
+    fn grass_suits_a_meadow_mushrooms_need_damp_shade() {
         let (world, _, eco) = setup();
         let h = eco.habitat();
         let d = world.dims();
@@ -453,12 +766,12 @@ mod tests {
         for z in (2..d.nz - 2).step_by(3) {
             for x in (2..d.nx - 2).step_by(3) {
                 let (fx, fz) = (x as f32 + 0.5, z as f32 + 0.5);
-                if world.biome(x, z) == Biome::Plains && h.shade[x + h.nx * z] == 0.0 {
+                let soil = world.block(x, world.ground_top(x, z).saturating_sub(1), z);
+                if world.biome(x, z) == Biome::Plains && h.shade(fx, fz) == 0.0 {
                     meadow.get_or_insert((fx, fz));
                 }
-                let soil = world.block(x, world.ground_top(x, z).saturating_sub(1), z);
-                if h.shade[x + h.nx * z] > 0.5
-                    && h.moisture[x + h.nx * z] > 0.6
+                if h.shade(fx, fz) > 0.5
+                    && h.moisture(fx, fz) > 0.6
                     && soil == Material::ForestFloor
                     && world.water_level(x, z).is_none()
                 {
@@ -467,38 +780,51 @@ mod tests {
             }
         }
         let (mx, mz) = meadow.expect("no meadow");
-        assert!(h.suitability(&world, Plant::Grass, mx, mz) > 0.5);
-        assert!(h.suitability(&world, Plant::Mushroom, mx, mz) < 0.1);
-        if let Some((sx, sz)) = shaded {
-            assert!(
-                h.suitability(&world, Plant::Mushroom, sx, sz)
-                    > h.suitability(&world, Plant::Mushroom, mx, mz)
-            );
-        }
+        assert!(h.suitability(&world, Plant::Grass, mx, mz, 0.0) > 0.5);
+        assert!(h.suitability(&world, Plant::Mushroom, mx, mz, 0.0) < 0.1);
+        let (sx, sz) = shaded.expect("no damp shade");
+        assert!(
+            h.suitability(&world, Plant::Mushroom, sx, sz, 0.0)
+                > h.suitability(&world, Plant::Mushroom, mx, mz, 0.0)
+        );
+        assert!(
+            h.suitability(&world, Plant::Grass, sx, sz, 0.0)
+                < h.suitability(&world, Plant::Grass, mx, mz, 0.0)
+        );
     }
 
-    /// Plants grow, spread and die; the population stays bounded and the run is the same
-    /// every time.
+    /// Plants grow, spread and die; the population stays bounded; the run is the same every
+    /// time; and the species coexist (flowers are not wiped out by grass).
     #[test]
-    fn a_meadow_lives_stays_bounded_and_is_deterministic() {
-        let run = || {
+    fn a_landscape_lives_its_species_coexist_and_it_is_deterministic() {
+        let census = || {
             let (world, mut plants, mut eco) = setup();
+            let count = |eco: &Ecology, plants: &[PlantInstance], kind: Plant| {
+                (0..plants.len())
+                    .filter(|&i| plants[i].plant == kind && eco.life[i].is_some())
+                    .count()
+            };
+            let flowers0 = count(&eco, &plants, Plant::Flower);
             let start = eco.living();
-            let mut changes = Vec::new();
-            for _ in 0..600 * 3 {
-                eco.step(1.0 / 600.0, &world, &mut plants, &|_| true, &mut changes);
-            }
+            let changes = run(&mut eco, &world, &mut plants, 6);
             let sprouted = changes
                 .iter()
                 .filter(|c| matches!(c, Change::Sprouted(_)))
                 .count();
             let died = changes
                 .iter()
-                .filter(|c| matches!(c, Change::Died(_)))
+                .filter(|c| matches!(c, Change::Died { .. }))
                 .count();
-            (start, eco.living(), sprouted, died)
+            (
+                start,
+                eco.living(),
+                sprouted,
+                died,
+                flowers0,
+                count(&eco, &plants, Plant::Flower),
+            )
         };
-        let (start, end, sprouted, died) = run();
+        let (start, end, sprouted, died, flowers0, flowers) = census();
         assert!(
             sprouted > 100 && died > 100,
             "sprouted {sprouted}, died {died}"
@@ -507,14 +833,14 @@ mod tests {
             end > start / 2 && end <= (start as f32 * MAX_GROWTH) as usize + 1,
             "{start} → {end}"
         );
-        assert_eq!(run(), (start, end, sprouted, died));
+        assert!(flowers * 2 > flowers0, "flowers {flowers0} → {flowers}");
+        assert_eq!(census(), (start, end, sprouted, died, flowers0, flowers));
     }
 
     /// A patch cleared of every plant is recolonised, grass first.
     #[test]
     fn a_cleared_patch_is_recolonised_by_grass_first() {
         let (world, mut plants, mut eco) = setup();
-        // The densest grassy place: clear a 4-cell radius around it.
         let centre = (0..plants.len())
             .filter(|&i| plants[i].plant == Plant::Grass)
             .map(|i| place(&plants[i]))
@@ -523,11 +849,7 @@ mod tests {
         for i in eco.near(centre, 4.0, &plants) {
             eco.remove(i, &plants);
         }
-        assert!(eco.near(centre, 4.0, &plants).is_empty());
-        let mut changes = Vec::new();
-        for _ in 0..600 * 2 {
-            eco.step(1.0 / 600.0, &world, &mut plants, &|_| true, &mut changes);
-        }
+        run(&mut eco, &world, &mut plants, 2);
         let back = eco.near(centre, 4.0, &plants);
         assert!(back.len() > 5, "only {} plants came back", back.len());
         let grass = back
@@ -539,5 +861,84 @@ mod tests {
             "{grass} grass out of {}",
             back.len()
         );
+    }
+
+    /// A tree that dies lets the light back in: the shade under it goes.
+    #[test]
+    fn a_dead_tree_lets_the_light_in() {
+        let (_, plants, mut eco) = setup();
+        let tree = (0..plants.len())
+            .find(|&i| plants[i].plant == Plant::Broadleaf)
+            .unwrap();
+        let at = place(&plants[tree]);
+        let before = eco.habitat.shade(at.x, at.y);
+        assert!(before > 0.3);
+        let stood = eco.remove(tree, &plants);
+        assert!(stood, "an initial tree stands in the world grid");
+        eco.cast_shade(&plants);
+        assert!(eco.habitat.shade(at.x, at.y) < before - 0.3);
+    }
+
+    /// Trees scatter seeds: saplings appear.
+    #[test]
+    fn trees_seed_saplings() {
+        let (world, mut plants, mut eco) = setup();
+        let changes = run(&mut eco, &world, &mut plants, 20);
+        let saplings = changes
+            .iter()
+            .filter(|c| matches!(c, Change::Sprouted(i) if is_tree(plants[*i].plant)))
+            .count();
+        assert!(saplings > 0, "no tree seedling in 20 days");
+    }
+
+    /// Fire runs through dry grass, and rain damps it.
+    #[test]
+    fn fire_spreads_in_dry_grass_and_rain_damps_it() {
+        let burnt = |rain: f32| {
+            let (_, plants, mut eco) = setup();
+            // The driest place with plenty of grass.
+            let start = (0..plants.len())
+                .filter(|&i| plants[i].plant == Plant::Grass)
+                .map(|i| place(&plants[i]))
+                .filter(|&p| eco.near(p, 2.0, &plants).len() > 6)
+                .min_by(|a, b| {
+                    eco.habitat
+                        .moisture(a.x, a.y)
+                        .total_cmp(&eco.habitat.moisture(b.x, b.y))
+                })
+                .unwrap();
+            let mut changes = Vec::new();
+            for _ in 0..5 {
+                eco.ignite(start, 0.6, &plants, &mut changes);
+            }
+            for _ in 0..60 * 60 {
+                eco.update_fire(1.0 / 60.0, rain, &plants, &mut changes);
+            }
+            changes
+                .iter()
+                .filter(|c| matches!(c, Change::Died { .. }))
+                .count()
+        };
+        let (dry, wet) = (burnt(0.0), burnt(1.0));
+        assert!(dry > 10, "only {dry} plants burnt");
+        assert!(wet < dry / 2, "rain: {wet} vs {dry}");
+    }
+}
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use world::WorldConfig;
+    #[test]
+    #[ignore = "mesure : cargo test --release -p game timing -- --ignored --nocapture"]
+    fn step_cost() {
+        let world = World::generate(WorldConfig::standard(1));
+        let mut plants = world.plants().to_vec();
+        let mut eco = Ecology::new(&world, &plants, 1);
+        let mut changes = Vec::new();
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            eco.step(1.0 / 600.0, &world, &mut plants, &|_| true, &mut changes);
+        }
+        println!("{} plantes vivantes, un pas : {:?}", eco.living(), start.elapsed() / 100);
     }
 }

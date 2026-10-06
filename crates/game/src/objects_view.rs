@@ -411,6 +411,19 @@ fn flames(
     }
 }
 
+/// Flames of a plant on fire, `strength` 0 (a tuft) to 1 (a tree).
+pub fn plant_fire(at: Vec3, strength: f32, time: f32, seed: f32, out: &mut Vec<ParticleInstance>) {
+    let lifted = at + Vec3::Y * (1.5 * strength * strength);
+    flames(
+        lifted,
+        0.12 + 0.6 * strength,
+        15_000.0 + 40_000.0 * strength,
+        time,
+        seed,
+        out,
+    );
+}
+
 /// Thin grey wisps rising from smouldering fuel.
 fn wisps(at: Vec3, strength: f32, time: f32, seed: f32, out: &mut Vec<ParticleInstance>) {
     let grey = srgb_hex(0xb8b4ae);

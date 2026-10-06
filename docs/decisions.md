@@ -235,3 +235,12 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - L'état du jeu possède sa liste de plantes (celles du monde, puis les pousses) ; la scène ajoute et redimensionne les instances. Population bornée à 2 × l'initiale.
 - Observé sur 6 jours : la prairie se densifie, les touffes posées sur la roche meurent, les fleurs reculent face à l'herbe. À régler : les fleurs disparaissent peut-être trop ; arbres pas encore vivants ; nouvelles pousses non couchées au passage ; le feu ne se propage pas encore à l'herbe sèche (elle meurt sans brûler).
 - Capture : `--fast` (temps × 60 pendant `--time`).
+
+## 2026-10-06 — Écologie : Lotka-Volterra, arbres vivants, incendies
+- Compétition de Lotka-Volterra à plusieurs espèces : ds_i/dt = r s_i (1 − (s_i + Σ α_ij w_ij s_j)/H_i), α = 1 dans une espèce, moins entre espèces (herbes 0,4 ; herbe–arbuste 0,25 ; arbres 0,7 ; arbres sur herbes 0, ils agissent par l'ombre ; herbes sur jeunes arbres 0,15). Comme chaque espèce se gêne plus elle-même que les autres, elles coexistent (testé : les fleurs ne sont plus éliminées par l'herbe).
+- Trois strates (herbe, arbuste, arbre), chacune avec sa portée de compétition, sa place minimale, sa portée de feu.
+- Les arbres vivent : graines, jeunes plants (dessinés minuscules), croissance lente, mort. L'ombre n'est plus figée : elle est recalculée à chaque pas depuis les houppiers vivants, donc un arbre qui pousse assombrit le sol et un arbre mort rend la lumière (testé). Pionniers héliophiles (bouleau, pin) contre feuillu tolérant à l'ombre : succession. Un jeune arbre assez grand s'inscrit dans la grille du monde (tronc solide) ; un arbre mort en est effacé (`World::stamp_plant` / `unstamp_plant`, empreinte commune `vegetation::footprint`).
+- Incendies : un feu posé par le joueur allume les plantes qui le touchent ; une plante en feu allume ses voisines avec une probabilité par seconde selon leur inflammabilité, leur sécheresse, la distance et le vent ; la pluie l'étouffe ; une plante consumée meurt. Une touffe représente une portion de prairie : le feu passe à la suivante (1,7 case pour les herbes). Mis à jour à chaque image.
+- Les nouvelles pousses se couchent au passage.
+- Coût mesuré : un pas de vie ≈ 3,3 ms pour 8 000 plantes, toutes les 2 s réelles (30 pas/s en accéléré).
+- À peaufiner (prévu) : paramètres des espèces, saisons, banque de graines, herbivores, cendres qui enrichissent le sol, arbres qui tombent.

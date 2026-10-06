@@ -235,6 +235,10 @@ impl App {
         self.particles.extend_from_slice(self.fauna.particles());
         self.particles.extend_from_slice(self.traces.instances());
         self.particles.extend_from_slice(self.weather.particles());
+        // Plants on fire.
+        for (k, (at, strength)) in self.state.burning_plants().into_iter().enumerate() {
+            objects_view::plant_fire(at, strength, time, k as f32, &mut self.particles);
+        }
         self.update_sound(dt, time);
         // Plants pushed aside by the body, springing back once free.
         let data = &mut self.data;
@@ -341,12 +345,25 @@ impl App {
                     ecology::Change::Sprouted(i) => {
                         let plant = self.state.plants()[i];
                         let size = self.state.plant_size(i);
-                        self.data.add_plant(&self.world, &plant, size);
+                        if let Some(pliable) = self.data.add_plant(&self.world, &plant, size) {
+                            self.trample.add(pliable);
+                        }
                     }
                     ecology::Change::Resized(i) => {
                         self.data.resize_plant(i, self.state.plant_size(i));
                     }
-                    ecology::Change::Died(i) => self.data.hide(i),
+                    ecology::Change::Stood(i) => {
+                        let plant = self.state.plants()[i];
+                        self.world.stamp_plant(&plant);
+                    }
+                    ecology::Change::Ignited(_) => {}
+                    ecology::Change::Died { plant, stood } => {
+                        self.data.hide(plant);
+                        if stood {
+                            let instance = self.state.plants()[plant];
+                            self.world.unstamp_plant(&instance);
+                        }
+                    }
                 }
                 return;
             }

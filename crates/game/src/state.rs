@@ -840,15 +840,32 @@ impl GameState {
         self.clear_plants(at, 0.4);
     }
 
-    /// Living plants within `radius` of `at` are gone (dug up, burnt).
+    /// Living plants within `radius` of `at` are gone (dug up with the soil).
     fn clear_plants(&mut self, at: Vec2, radius: f32) {
         for plant in self.ecology.near(at, radius, &self.plants) {
             if !self.removed[plant] {
                 self.removed[plant] = true;
-                self.ecology.remove(plant, &self.plants);
-                self.events.push(Event::Cleared { plant });
+                self.obstacles.remove(plant);
+                let stood = self.ecology.remove(plant, &self.plants);
+                self.events
+                    .push(Event::Plant(Change::Died { plant, stood }));
             }
         }
+    }
+
+    /// Plants on fire now: where, and how fiercely (0 to 1).
+    pub fn burning_plants(&self) -> Vec<(glam::Vec3, f32)> {
+        self.ecology
+            .burning(&self.plants)
+            .map(|(i, strength)| {
+                let p = &self.plants[i];
+                let at = crate::ecology::place(p);
+                (
+                    glam::Vec3::new(at.x, p.base[1] as f32 + 0.2, at.y),
+                    strength,
+                )
+            })
+            .collect()
     }
 
     /// Plants and the life of each (size 1 for what does not grow).
@@ -965,7 +982,8 @@ impl GameState {
         }
         self.changes.clear();
         self.objects.step(STEP, air, &mut self.changes);
-        // Fire kills the plants it touches.
+        // A fire lit by the player reaches the plants it touches; fire runs through them.
+        self.plant_changes.clear();
         let burning: Vec<Vec2> = (0..self.objects.placed().len())
             .filter(|&i| self.objects.body(i).burning)
             .map(|i| {
@@ -974,10 +992,15 @@ impl GameState {
             })
             .collect();
         for at in burning {
-            self.clear_plants(at, 0.45);
+            // A chance per step, not a certainty: about one try a second.
+            if self.rng.next_f32() < STEP {
+                self.ecology
+                    .ignite(at, 0.45, &self.plants, &mut self.plant_changes);
+            }
         }
+        self.ecology
+            .update_fire(STEP, rain, &self.plants, &mut self.plant_changes);
         // Plants live: growth, seeds, death.
-        self.plant_changes.clear();
         let objects = &self.objects;
         let free = |p: Vec2| {
             objects
@@ -1005,11 +1028,11 @@ impl GameState {
                             .push(i);
                     }
                 }
-                Change::Died(i) => {
-                    self.removed[i] = true;
-                    self.obstacles.remove(i);
+                Change::Died { plant, .. } => {
+                    self.removed[plant] = true;
+                    self.obstacles.remove(plant);
                 }
-                Change::Resized(_) => {}
+                Change::Resized(_) | Change::Stood(_) | Change::Ignited(_) => {}
             }
             self.events.push(Event::Plant(change));
         }
