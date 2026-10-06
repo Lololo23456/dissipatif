@@ -126,6 +126,10 @@ struct App {
     right_down: Option<PhysicalPosition<f64>>,
     /// The ground point under the cursor, updated each frame.
     hover: Option<Vec3>,
+    /// The bag is open (Tab or I).
+    bag_open: bool,
+    /// Shift is held.
+    shift: bool,
     /// A one-off gesture being played (laying, eating…) and when it began.
     gesture: Option<(GestureKind, f32)>,
     /// Seconds since start, as of the last frame.
@@ -186,6 +190,8 @@ impl App {
             last_cursor: None,
             right_down: None,
             hover: None,
+            bag_open: false,
+            shift: false,
             gesture: None,
             now: 0.0,
         }
@@ -432,7 +438,29 @@ impl App {
             KeyCode::KeyS | KeyCode::ArrowDown => self.controls.back = pressed,
             KeyCode::KeyA | KeyCode::ArrowLeft => self.controls.left = pressed,
             KeyCode::KeyD | KeyCode::ArrowRight => self.controls.right = pressed,
-            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.controls.run = pressed,
+            KeyCode::ShiftLeft | KeyCode::ShiftRight => {
+                self.controls.run = pressed;
+                self.shift = pressed;
+            }
+            KeyCode::Tab | KeyCode::KeyI if pressed && !event.repeat => {
+                self.bag_open = !self.bag_open;
+            }
+            KeyCode::Escape if pressed => self.bag_open = false,
+            // X: throw one of the selected thing on the ground in front; Shift+X: all of them.
+            KeyCode::KeyX if pressed && !event.repeat => {
+                let count = self
+                    .state
+                    .player(self.me)
+                    .and_then(|p| p.inventory.stacks().get(self.selected).map(|s| s.count))
+                    .unwrap_or(0);
+                let times = if self.shift { count } else { count.min(1) };
+                for _ in 0..times {
+                    self.pending.push(Command::Lay {
+                        player: self.me,
+                        slot: self.selected,
+                    });
+                }
+            }
             KeyCode::Space if pressed && !event.repeat => self.controls.jump = true,
             // Hold T to fast-forward the day.
             KeyCode::KeyT => self.clock.fast = pressed,
@@ -546,6 +574,7 @@ impl ApplicationHandler for App {
                         self.selected,
                         self.clock.hour(),
                         &self.message,
+                        self.bag_open,
                         renderer,
                     );
                     let (ripples, prints) = self.traces.marks();
@@ -592,13 +621,23 @@ impl ApplicationHandler for App {
                     graphics.renderer.resize(size.width, size.height);
                 }
             }
-            // Left click: lay what is in hand where the cursor points.
+            // Left click: in the open bag, choose a thing; otherwise lay what is in hand
+            // where the cursor points.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some(at) = self.hover {
+                if self.bag_open {
+                    if let (Some(c), Some(graphics)) = (self.last_cursor, &self.graphics) {
+                        let (w, h) = graphics.renderer.size();
+                        if let Some(k) =
+                            hud::bag_slot_at(w as f32, h as f32, c.x as f32, c.y as f32)
+                        {
+                            self.selected = k;
+                        }
+                    }
+                } else if let Some(at) = self.hover {
                     self.pending.push(Command::LayAt {
                         player: self.me,
                         slot: self.selected,
@@ -839,6 +878,7 @@ fn demo_fire(app: &mut App) {
 
 /// The interface over the image, and the weariness of the local player. A free function
 /// (not a method of `App`) so that the renderer, held by `App`, can be borrowed beside it.
+#[allow(clippy::too_many_arguments)]
 fn draw_hud(
     state: &GameState,
     world: &World,
@@ -846,6 +886,7 @@ fn draw_hud(
     selected: usize,
     hour: f32,
     message: &Option<(String, f32)>,
+    bag_open: bool,
     renderer: &mut Renderer,
 ) {
     let (width, height) = renderer.size();
@@ -859,6 +900,7 @@ fn draw_hud(
             selected,
             hour,
             message: message.as_ref().map(|(text, left)| (text.as_str(), *left)),
+            bag_open,
         },
     );
     renderer.set_ui(ui.vertices());
@@ -947,6 +989,8 @@ struct CaptureOptions {
     /// Makes a small fire in front of the naturalist, the way a player would (see
     /// `demo_fire`): to look at fire and objects.
     demo_fire: bool,
+    /// Shows the bag open.
+    bag: bool,
     /// Holds the naturalist in a gesture (`--pose rub|blow|reach|eat|drink|shape`).
     pose: Option<GestureKind>,
 }
@@ -999,6 +1043,7 @@ impl Options {
                     start: pair("--start", ',')?,
                     pick: number("--pick")?.unwrap_or(0.0) as u32,
                     demo_fire: args.iter().any(|a| a == "--demo-fire"),
+                    bag: args.iter().any(|a| a == "--bag"),
                     pose: match value("--pose") {
                         None => None,
                         Some("rub") => Some(GestureKind::Rub),
@@ -1096,6 +1141,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.selected,
         app.clock.hour(),
         &app.message,
+        app.bag_open || options.bag,
         &mut renderer,
     );
     let (ripples, prints) = app.traces.marks();

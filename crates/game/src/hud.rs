@@ -2,11 +2,12 @@
 //! just above it, three thin gauges (hunger, thirst, warmth) in a corner, the hour, and a
 //! short message now and then. Rebuilt every frame from the game state.
 
-use render::palette::{materials, srgb_hex};
+use render::palette::srgb_hex;
 use render::ui::{LINE, Ui};
 
-use crate::items::{MAX_MASS, SLOTS};
+use crate::items::{MAX_MASS, Matter, SLOTS};
 use crate::needs::Needs;
+use crate::objects_view::icon;
 use crate::state::{GameState, PlayerId};
 use world::World;
 
@@ -19,6 +20,96 @@ pub struct HudInput<'a> {
     pub hour: f32,
     /// The current message and the seconds it still stays.
     pub message: Option<(&'a str, f32)>,
+    /// The bag is open.
+    pub bag_open: bool,
+}
+
+/// Scale of the interface: one font pixel per 400 screen lines, crisp, never tiny.
+fn scale(height: f32) -> f32 {
+    (height / 400.0).round().max(1.0)
+}
+
+/// Cases of the open bag: (x, y, side), left to right, top to bottom.
+fn bag_cells(width: f32, height: f32) -> Vec<(f32, f32, f32)> {
+    let s = scale(height);
+    let side = 34.0 * s;
+    let gap = 6.0 * s;
+    let columns = 4;
+    let total = columns as f32 * side + (columns - 1) as f32 * gap;
+    let x0 = (width - total) / 2.0;
+    let y0 = height * 0.22 + 24.0 * s;
+    (0..SLOTS)
+        .map(|k| {
+            let (c, r) = (k % columns, k / columns);
+            (
+                x0 + c as f32 * (side + gap),
+                y0 + r as f32 * (side + gap),
+                side,
+            )
+        })
+        .collect()
+}
+
+/// The case of the open bag under the screen point (x, y), if any.
+pub fn bag_slot_at(width: f32, height: f32, x: f32, y: f32) -> Option<usize> {
+    bag_cells(width, height)
+        .iter()
+        .position(|&(cx, cy, side)| (cx..cx + side).contains(&x) && (cy..cy + side).contains(&y))
+}
+
+/// Draws the icon of `matter` centred in the square (x, y, side), whole pixels only.
+fn draw_icon(ui: &mut Ui, matter: Matter, x: f32, y: f32, side: f32) {
+    let icon = icon(matter);
+    let fit = (side * 0.8 / icon.width.max(icon.height) as f32)
+        .floor()
+        .max(1.0);
+    let (w, h) = (icon.width as f32 * fit, icon.height as f32 * fit);
+    let (ox, oy) = (x + (side - w) / 2.0, y + (side - h) / 2.0);
+    for row in 0..icon.height {
+        for column in 0..icon.width {
+            if let Some([r, g, b]) = icon.pixels[row * icon.width + column] {
+                ui.rect(
+                    ox + column as f32 * fit,
+                    oy + row as f32 * fit,
+                    fit,
+                    fit,
+                    [r, g, b, 1.0],
+                );
+            }
+        }
+    }
+}
+
+/// What a matter is like, in words, from its properties (what the naturalist can tell by
+/// handling it).
+fn describe(matter: Matter) -> Vec<String> {
+    let p = matter.properties();
+    let mut lines = vec![format!("{:.2} kg", p.mass).replace('.', ",")];
+    let mut says = |value: f32, words: [&str; 3]| {
+        let word = if value >= 0.75 {
+            words[2]
+        } else if value >= 0.4 {
+            words[1]
+        } else if value > 0.05 {
+            words[0]
+        } else {
+            return;
+        };
+        lines.push(word.to_owned());
+    };
+    says(p.hardness, ["tendre", "assez dur", "très dur"]);
+    says(p.sharpness, ["un peu coupant", "coupant", "tranchant"]);
+    says(p.flexibility, ["un peu souple", "souple", "très souple"]);
+    says(p.fragility, ["un peu fragile", "fragile", "très fragile"]);
+    says(p.flammability, ["brûle mal", "brûle", "brûle très bien"]);
+    says(
+        p.plasticity,
+        ["se modèle un peu", "se modèle", "se modèle bien"],
+    );
+    if let Matter::Knife { uses } = matter {
+        lines.push(format!("ligature : encore {uses} coupes"));
+    }
+    lines
 }
 
 fn rgba(hex: u32, alpha: f32) -> [f32; 4] {
@@ -28,8 +119,7 @@ fn rgba(hex: u32, alpha: f32) -> [f32; 4] {
 
 pub fn build(ui: &mut Ui, input: &HudInput) {
     let (width, height) = ui.size();
-    // One font pixel per 400 screen lines: crisp, never tiny.
-    let s = (height / 400.0).round().max(1.0);
+    let s = scale(height);
     let ink = rgba(0xf4ead8, 0.92);
     let faint = rgba(0xf4ead8, 0.55);
     let panel = [0.02, 0.02, 0.03, 0.38];
@@ -43,21 +133,12 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     let total = SLOTS as f32 * slot + (SLOTS - 1) as f32 * gap;
     let x0 = (width - total) / 2.0;
     let y0 = height - slot - 10.0 * s;
-    let colors = materials();
     let stacks = me.inventory.stacks();
     for k in 0..SLOTS {
         let x = x0 + k as f32 * (slot + gap);
         ui.rect(x, y0, slot, slot, panel);
         if let Some(stack) = stacks.get(k) {
-            let [r, g, b] = colors[stack.matter.material().id() as usize];
-            let inset = 4.0 * s;
-            ui.rect(
-                x + inset,
-                y0 + inset,
-                slot - 2.0 * inset,
-                slot - 2.0 * inset,
-                [r, g, b, 1.0],
-            );
+            draw_icon(ui, stack.matter, x, y0, slot);
             if stack.count > 1 {
                 let count = stack.count.to_string();
                 let w = Ui::text_width(&count, s);
@@ -134,6 +215,55 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
         let (x, y) = ((width - w) / 2.0, height * 0.62);
         ui.rect(x, y, w, h, [0.0, 0.0, 0.0, 0.4]);
         ui.rect(x, y, w * share, h, rgba(0xf2a35a, 0.9));
+    }
+
+    // ---- Open bag ----
+    if input.bag_open {
+        let cells = bag_cells(width, height);
+        let (first, last) = (cells[0], cells[SLOTS - 1]);
+        let detail_w = 110.0 * s;
+        let (px, py) = (first.0 - 10.0 * s, first.1 - 22.0 * s);
+        let help = "clic : choisir   X : jeter   Maj+X : tout jeter   Tab : fermer";
+        let pw = (last.0 + last.2 - first.0 + 20.0 * s + detail_w)
+            .max(Ui::text_width(help, s) + 20.0 * s);
+        let ph = last.1 + last.2 + 14.0 * s - py + 28.0 * s;
+        ui.rect(px, py, pw, ph, [0.03, 0.03, 0.04, 0.82]);
+        ui.text_shadowed(px + 10.0 * s, py + 7.0 * s, "Sac", s, ink);
+        let weight = format!(
+            "{:.1} / {:.0} kg",
+            me.inventory.mass().max(0.0) + 0.0,
+            MAX_MASS
+        )
+        .replace('.', ",");
+        let ww = Ui::text_width(&weight, s);
+        ui.text_shadowed(px + pw - ww - 10.0 * s, py + 7.0 * s, &weight, s, faint);
+        for (k, &(x, y, side)) in cells.iter().enumerate() {
+            ui.rect(x, y, side, side, [0.12, 0.12, 0.13, 0.9]);
+            if let Some(stack) = stacks.get(k) {
+                draw_icon(ui, stack.matter, x, y, side);
+                if stack.count > 1 {
+                    let count = stack.count.to_string();
+                    let w = Ui::text_width(&count, s);
+                    ui.text_shadowed(x + side - w - 2.0 * s, y + side - 9.0 * s, &count, s, ink);
+                }
+            }
+            if k == input.selected {
+                ui.frame(x - s, y - s, side + 2.0 * s, side + 2.0 * s, s, ink);
+            }
+        }
+        // What the selected thing is like.
+        let dx = last.0 + last.2 + 14.0 * s;
+        let mut dy = first.1;
+        if let Some(stack) = stacks.get(input.selected) {
+            ui.text_shadowed(dx, dy, stack.matter.name(), s, ink);
+            dy += LINE * s + 2.0 * s;
+            for line in describe(stack.matter) {
+                ui.text_shadowed(dx, dy, &line, s, faint);
+                dy += LINE * s;
+            }
+        }
+        let hw = Ui::text_width(help, s);
+        ui.text_shadowed(px + (pw - hw) / 2.0, py + ph - 12.0 * s, help, s, faint);
     }
 
     // ---- Needs ----

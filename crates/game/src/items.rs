@@ -4,7 +4,7 @@
 //! player learns them by trying and observing, not from a menu.
 
 use world::plants::mushroom_is_spotted;
-use world::{Material, Plant, PlantInstance};
+use world::{Plant, PlantInstance};
 
 /// Wild flowers, by model variant (see `world::plants::flower`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -107,7 +107,7 @@ impl Matter {
             Matter::Pebble { dark } => Properties {
                 mass: 0.3,
                 hardness: if dark { 0.9 } else { 0.75 },
-                sharpness: if dark { 0.4 } else { 0.1 },
+                sharpness: if dark { 0.3 } else { 0.1 },
                 fragility: if dark { 0.3 } else { 0.1 },
                 heat_resistance: 0.8,
                 ..base
@@ -274,38 +274,6 @@ impl Matter {
             Matter::Chips => "Débris de pierre",
             Matter::Knife { .. } => "Couteau emmanché",
             Matter::GreenWood => "Bois vert",
-        }
-    }
-
-    /// The material whose colour stands for it (icons).
-    pub fn material(self) -> Material {
-        match self {
-            Matter::Pebble { dark: false } => Material::Stone,
-            Matter::Pebble { dark: true } => Material::Rock,
-            Matter::DeadTwigs => Material::DeadWood,
-            Matter::GrassFibre => Material::TallGrass,
-            Matter::Frond => Material::Fern,
-            Matter::Flower(Flower::Daisy) => Material::FlowerWhite,
-            Matter::Flower(Flower::Poppy) => Material::FlowerRed,
-            Matter::Flower(Flower::Lavender) => Material::FlowerViolet,
-            Matter::Flower(Flower::Buttercup) => Material::FlowerYellow,
-            Matter::Mushroom { .. } => Material::MushroomCap,
-            Matter::Clay {
-                source: ClaySource::Bank,
-            }
-            | Matter::RawDish {
-                source: ClaySource::Bank,
-            } => Material::Gravel,
-            Matter::Clay { .. } | Matter::RawDish { .. } => Material::Clay,
-            Matter::Sand => Material::Sand,
-            Matter::Ash => Material::Snow,
-            Matter::FiredDish {
-                source: ClaySource::Bank,
-            } => Material::DesertSand,
-            Matter::FiredDish { .. } | Matter::Shards => Material::Sandstone,
-            Matter::Stick | Matter::Knife { .. } => Material::DeadWood,
-            Matter::Flake | Matter::Chips => Material::Rock,
-            Matter::GreenWood => Material::Wood,
         }
     }
 

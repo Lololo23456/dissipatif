@@ -149,6 +149,65 @@ fn model(matter: Matter) -> Grid {
     }
 }
 
+/// A small picture of a matter for the interface, drawn from its model: seen from the side
+/// that shows the most of it (above for flat things, the front for tall ones), the nearest
+/// voxel's colour in each pixel, tops a little lighter. `pixels` row by row from the top,
+/// `None` where it is empty.
+pub struct Icon {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<Option<[f32; 3]>>,
+}
+
+pub fn icon(matter: Matter) -> Icon {
+    let g = model(matter);
+    let d = g.dims;
+    let colors = render::palette::materials();
+    let at = |x: usize, y: usize, z: usize| g.voxels[d.index(x, y, z)];
+    let color = |id: u8, light: f32| {
+        let [r, g, b] = colors[id as usize];
+        Some([r * light, g * light, b * light])
+    };
+    // From above: (x, z), the topmost voxel; from the front: (x, y), the nearest along z.
+    let mut top = vec![None; d.nx * d.nz];
+    for z in 0..d.nz {
+        for x in 0..d.nx {
+            if let Some(y) = (0..d.ny).rev().find(|&y| at(x, y, z) != Material::Air.id()) {
+                let light = 0.85 + 0.3 * (y as f32 + 1.0) / d.ny as f32;
+                top[z * d.nx + x] = color(at(x, y, z), light);
+            }
+        }
+    }
+    let mut front = vec![None; d.nx * d.ny];
+    for y in 0..d.ny {
+        for x in 0..d.nx {
+            if let Some(z) = (0..d.nz).rev().find(|&z| at(x, y, z) != Material::Air.id()) {
+                // Rows from the top of the picture: y upside down.
+                let light = if y + 1 == d.ny || at(x, y + 1, z) == Material::Air.id() {
+                    1.1
+                } else {
+                    0.85
+                };
+                front[(d.ny - 1 - y) * d.nx + x] = color(at(x, y, z), light);
+            }
+        }
+    }
+    let filled = |p: &[Option<[f32; 3]>]| p.iter().filter(|c| c.is_some()).count();
+    if filled(&front) > filled(&top) {
+        Icon {
+            width: d.nx,
+            height: d.ny,
+            pixels: front,
+        }
+    } else {
+        Icon {
+            width: d.nx,
+            height: d.nz,
+            pixels: top,
+        }
+    }
+}
+
 /// Every matter that can be laid (one model each).
 fn all_matters() -> Vec<Matter> {
     let mut all = vec![
