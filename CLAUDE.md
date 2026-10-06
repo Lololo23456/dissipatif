@@ -25,6 +25,7 @@ Les décisions passées et les choix encore provisoires sont dans `docs/decision
 - Vérifier : `cargo check --workspace`
 - Tests : `cargo test --workspace` ; un seul crate : `cargo test -p sim`
 - Lancer le jeu : `cargo run --release -p game` (`-- --seed N` pour un autre monde)
+- Mode test : `cargo run --release -p game -- --test` pose des matériaux (cailloux, fagots, herbe, argile, baguettes) devant le naturaliste au départ
 - Capture sans fenêtre : `cargo run --release -p game -- --capture vue.png [--seed N] [--at X,Z] [--zoom F] [--yaw DEG] [--pitch DEG] [--size LxH] [--hour H] [--weather rain] [--time S] [--walk S] [--start X,Z] [--pick N] [--demo-fire]`. À utiliser pour vérifier un rendu : l'image se lit avec l'outil Read.
 - Expériences : `cargo run --release -p lab -- <sous-commande>`
 - Lint : `cargo clippy --workspace --all-targets -- -D warnings`

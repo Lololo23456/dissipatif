@@ -667,10 +667,10 @@ impl ApplicationHandler for App {
 /// A small fire made the way a player would, in front of the naturalist on level ground: a
 /// ring of pebbles, dry grass in the middle, twigs around it, a raw dish set a little aside to
 /// dry in the heat; then the fire drill until an ember falls on the grass. For captures.
-fn demo_fire(app: &mut App) {
-    let me = app.me;
-    // The nearest level, dry ground (5 × 5 cells).
-    let start = app.state.body(me).position;
+/// The nearest level, dry ground (5 × 5 cells) to the naturalist: the centre of its middle
+/// cell, on the ground.
+fn level_spot(app: &App) -> Option<Vec3> {
+    let start = app.state.body(app.me).position;
     let world = &app.world;
     let dims = world.dims();
     let level = |x: usize, z: usize| {
@@ -680,22 +680,92 @@ fn demo_fire(app: &mut App) {
             world.ground_top(cx, cz) == top && world.water_level(cx, cz).is_none()
         })
     };
-    let spot = (3..dims.nz - 3)
+    let (x, z) = (3..dims.nz - 3)
         .flat_map(|z| (3..dims.nx - 3).map(move |x| (x, z)))
         .filter(|&(x, z)| level(x, z))
         .min_by(|a, b| {
             let d =
                 |p: (usize, usize)| (p.0 as f32 - start.x).powi(2) + (p.1 as f32 - start.z).powi(2);
             d(*a).total_cmp(&d(*b))
-        });
-    let Some((x, z)) = spot else {
-        return;
-    };
-    let centre = Vec3::new(
+        })?;
+    Some(Vec3::new(
         x as f32 + 0.5,
         world.ground_top(x, z) as f32,
         z as f32 + 0.5,
-    );
+    ))
+}
+
+/// Test mode (`--test`): a stock of materials laid on level ground in front of the
+/// naturalist, ready to pick up: dark and light pebbles, bundles of twigs, dry grass, clay,
+/// sticks. Laid through the game's commands, like a player would.
+fn sandbox(app: &mut App) {
+    let me = app.me;
+    let Some(centre) = level_spot(app) else {
+        return;
+    };
+    let rows: [(Matter, usize); 7] = [
+        (Matter::Pebble { dark: true }, 6),
+        (Matter::Pebble { dark: false }, 4),
+        (Matter::DeadTwigs, 5),
+        (Matter::GrassFibre, 5),
+        (Matter::Stick, 3),
+        (
+            Matter::Clay {
+                source: items::ClaySource::Bank,
+            },
+            4,
+        ),
+        (
+            Matter::Clay {
+                source: items::ClaySource::RedEarth,
+            },
+            2,
+        ),
+    ];
+    for (row, &(matter, count)) in rows.iter().enumerate() {
+        for k in 0..count {
+            // Rows across, 35 cm apart, starting a cell in front of the naturalist.
+            let at = centre
+                + Vec3::new(
+                    (k as f32 - (count as f32 - 1.0) / 2.0) * 0.35,
+                    0.0,
+                    0.4 + row as f32 * 0.32,
+                );
+            // Stand right behind the point to lay it (the body faces +z at first).
+            app.state.place(me, at - Vec3::new(0.0, 0.0, 0.8));
+            app.state.give(me, matter);
+            let slot = app.state.player(me).map_or(0, |p| {
+                p.inventory
+                    .stacks()
+                    .iter()
+                    .position(|s| s.matter == matter)
+                    .unwrap_or(0)
+            });
+            let at = glam::Vec2::new(at.x, at.z);
+            app.state.apply(
+                &app.world,
+                Command::LayAt {
+                    player: me,
+                    slot,
+                    at,
+                },
+            );
+        }
+    }
+    // Facing the stock, a step back.
+    app.state.place(me, centre - Vec3::new(0.0, 0.0, 0.6));
+    app.camera.target = centre + Vec3::Y * LOOK_HEIGHT;
+    app.message = Some((
+        "Mode test : des matériaux sont posés devant vous.".to_owned(),
+        5.0,
+    ));
+}
+
+fn demo_fire(app: &mut App) {
+    let me = app.me;
+    let Some(centre) = level_spot(app) else {
+        return;
+    };
     app.camera.target = centre + Vec3::Y * LOOK_HEIGHT;
     // Laying at a point: stand 0.8 behind it (the body faces +z at first).
     let lay_at = |app: &mut App, at: Vec3, matter: items::Matter| {
@@ -972,6 +1042,9 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.camera.orbit(0.0, pitch.to_radians() - app.camera.pitch);
     }
     app.camera.zoom(options.zoom);
+    if std::env::args().any(|a| a == "--test") {
+        sandbox(&mut app);
+    }
     // Built first, so the fire has `time` to catch.
     if options.demo_fire {
         demo_fire(&mut app);
@@ -1068,6 +1141,9 @@ fn main() {
     }
     let event_loop = EventLoop::new().expect("création de la boucle d'événements");
     let mut app = App::new(options.seed);
+    if args.iter().any(|a| a == "--test") {
+        sandbox(&mut app);
+    }
     event_loop
         .run_app(&mut app)
         .expect("exécution de la boucle d'événements");
