@@ -268,3 +268,10 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Le rituel dure une minute de jeu** (22 h à 23 h 12, après un rassemblement dès 21 h 20) et devient une chorégraphie d'incantation : immobiles face au centre, saluts synchronisés et coup de sabot qui fait le tour du cercle ; procession ; têtes levées vers la lune (fils de lumière vers le centre, colonne vers le ciel) ; éclat final. Le sort s'apprend à ce sommet, après au moins 20 s d'observation sans être repéré.
 - **Cerfs articulés** : pattes en deux segments (genou, jarret), allures réelles (pas à quatre temps, trot diagonal, bonds au galop avec le dos qui ondule), cou et tête séparés, queue qui se relève à l'alarme. La Forme du cerf est un cerf mâle à bois.
 - Correction : un cerf qui arrive sur sa place ne tourne plus en orbite autour (il ralentit, et tourne avant d'avancer).
+
+## 2026-10-06 — L'écosystème comme lieu des bifurcations ; la faune dedans
+- **Sol** (`game/soil.rs`) : variables lentes par parcelles de 8 × 8 cases, eau W et matière organique N, d'après Rietkerk (infiltration qui croît avec la couverture, seuil net en eau, suintement latéral par un laplacien en double tampon). Ce que le sol offre multiplie l'habitat des plantes, rapporté à l'état de départ (le monde généré est à l'équilibre). Testé : bistabilité et hystérésis (champ moyen) ; une tache nue se referme par ses bords, une grande étendue reste nue (avec les vraies plantes).
+- **Pâturage** : les cerfs mangent vraiment les plantes autour d'eux (Holling II, appétence par espèce, jeunes arbres compris). Ils ont des réserves, mettent bas (fécondité qui baisse avec la densité) et meurent de faim. La harde change de pâture quand la sienne est épuisée et revient au cercle pour le rituel. Mesuré sur 40 jours sans joueur : 7 à 8 cerfs, prairie broutée mais vivante.
+- Le carnet note un faon né et une biche morte de faim.
+- **Rituel raccourci** : rassemblement à 21 h 40, incantation de 22 h à 22 h 36 ; sort compris au sommet, après 10 s d'observation sans être vu.
+- Fiche : `docs/reactions/ecologie.md`.

@@ -1195,6 +1195,10 @@ impl GameState {
                 .iter()
                 .all(|o| Vec2::new(o.base.x, o.base.z).distance(p) > 0.3)
         };
+        // The deer graze the plants they stand among; what they eat feeds them.
+        if let Some(herd) = self.herd.as_mut() {
+            self.ecology.set_grazers(&herd.grazers());
+        }
         self.ecology.update(
             STEP * self.time_scale,
             world,
@@ -1202,6 +1206,10 @@ impl GameState {
             free,
             &mut self.plant_changes,
         );
+        if let Some(herd) = self.herd.as_mut() {
+            herd.feed(&self.ecology.take_eaten());
+            choose_pasture(world, &self.ecology, herd);
+        }
         for &change in &self.plant_changes {
             match change {
                 Change::Sprouted(i) => {
@@ -1326,6 +1334,8 @@ impl GameState {
                     entries.push(match event {
                         HerdEvent::Alarm { .. } => Entry::Alarm,
                         HerdEvent::Fled { cause } => Entry::Fled(cause),
+                        HerdEvent::Born => Entry::Calf,
+                        HerdEvent::Starved => Entry::Starved,
                     });
                 }
             }
@@ -1372,8 +1382,46 @@ impl GameState {
     }
 }
 
+/// Where the herd grazes: its meadow (round its circle), unless it is grazed out compared
+/// with the best grassland within 40 cells; back to it once it has grown again.
+fn choose_pasture(world: &World, ecology: &Ecology, herd: &mut Herd) {
+    let soil = ecology.soil();
+    let Some(home) = soil.patch(herd.ring) else {
+        return;
+    };
+    let grassland = |k: usize| {
+        let c = soil.centre(k);
+        let (x, z) = (c.x as usize, c.y as usize);
+        let dims = world.dims();
+        x < dims.nx
+            && z < dims.nz
+            && world.water_level(x, z).is_none()
+            && matches!(
+                world.biome(x, z),
+                world::Biome::Plains | world::Biome::Savanna
+            )
+    };
+    let best = (0..soil.patches())
+        .filter(|&k| soil.centre(k).distance(herd.ring) < 40.0 && grassland(k))
+        .max_by(|&a, &b| soil.forage(a).total_cmp(&soil.forage(b)));
+    let Some(best) = best else {
+        return;
+    };
+    // Home while it holds well enough; elsewhere, the best there is, until home has grown
+    // back (the gaps keep the herd from wavering).
+    let top = soil.forage(best);
+    let here = soil.forage(home);
+    let current = soil.patch(herd.pasture()).map_or(0.0, |k| soil.forage(k));
+    let away = herd.pasture().distance(herd.ring) > 1.0;
+    if here > 0.6 * top || (!away && here >= 0.3 * top) {
+        herd.set_pasture(herd.ring);
+    } else if !away || current < 0.3 * top {
+        herd.set_pasture(soil.centre(best));
+    }
+}
+
 /// Seconds of watching the full rite, unnoticed, to understand it.
-const RITE_UNDERSTOOD: f32 = 20.0;
+const RITE_UNDERSTOOD: f32 = 10.0;
 
 /// A player as the deer perceive them: moving or still, crouched, hidden by plants, on loud
 /// or soft ground, in their own shape or a deer's.
@@ -1840,6 +1888,52 @@ mod tests {
             assert!(
                 p.spells.contains(&Spell::DeerForm),
                 "fast {fast}: not learnt"
+            );
+        }
+    }
+
+    /// Several weeks of the meadow with its herd, sped up: herd size, the meadow's cover and
+    /// forage. A measurement, not a check (slow): `cargo test --release -p game meadow_and_herd
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure lente"]
+    fn meadow_and_herd_over_weeks() {
+        let mut world = World::generate(WorldConfig::standard(1));
+        let spawn = crate::player::spawn_point(&world);
+        let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
+        deer::wear_ring(&mut world, ring, 1);
+        let mut state = GameState::new(&world);
+        state.add_herd(Herd::new(ring, cover, &world, 7));
+        let mut clock = crate::clock::Clock::on_day(1, 12.0);
+        clock.fast = true;
+        state.time_scale = 60.0;
+        let patch = state.ecology.soil().patch(ring).expect("in the world");
+        for day in 1..=40 {
+            for _ in 0..20 * 60 {
+                clock.advance(STEP);
+                state.step(&world, &clock.conditions(0.0));
+            }
+            let herd = state.herd().expect("herd");
+            let energy: f32 =
+                herd.deer.iter().map(|d| d.energy).sum::<f32>() / herd.deer.len().max(1) as f32;
+            let soil = state.ecology.soil();
+            println!(
+                "jour {day:2} : {} cerfs, énergie {energy:.2}, prairie : couverture {:.2}, fourrage {:.1}, eau/humus {:?}, pâture {:?}",
+                herd.deer.len(),
+                soil.cover(patch),
+                soil.forage(patch),
+                soil.state(patch),
+                herd.pasture()
+            );
+            if day % 4 != 0 {
+                continue;
+            }
+            println!(
+                "   {:?}",
+                herd.deer
+                    .iter()
+                    .map(|d| (format!("{:.2}", d.size), format!("{:.2}", d.energy)))
+                    .collect::<Vec<_>>()
             );
         }
     }

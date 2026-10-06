@@ -23,6 +23,14 @@
 //! at a distance drawn from its dispersal kernel; a seed germinates with probability H where
 //! its layer has room.
 //!
+//! **Soil** (`soil.rs`): the slow variables, water and organic matter by patches of 8 × 8
+//! cells, follow the plant cover and decide what the plants can reach: H is multiplied by
+//! what the soil offers. Past a threshold a patch tips into a bare state and stays there.
+//!
+//! **Grazing**: grazers (deer) eat the palatable plants around them with a saturating intake
+//! (Holling type II), herbs and saplings first: they keep a meadow open, and too many of them
+//! strip it bare.
+//!
 //! **Fire**: a burning plant ignites its neighbours with a probability per second that grows
 //! with their flammability and their dryness, and with the wind behind it; rain damps it.
 //! A plant that burnt out dies. Fire is updated every frame, life every `STEP_SECONDS`.
@@ -33,6 +41,8 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 use sim::rng::SplitMix64;
+
+use crate::soil::Soil;
 use world::{Biome, Material, Plant, PlantInstance, World};
 
 /// Real seconds between two life steps, and real seconds in a game day (`clock`).
@@ -46,6 +56,15 @@ const SEEDLING: f32 = 0.12;
 pub const TREE_STANDS: f32 = 0.85;
 /// Living plants at most, as a multiple of the initial ones (keeps the cost bounded).
 const MAX_GROWTH: f32 = 2.0;
+/// Weighted plant matter of a fully covered soil patch (herbs count 1, shrubs 3, trees 10,
+/// times their size): about a meadow or a wood of the generated world.
+const COVER_FULL: f32 = 50.0;
+/// Grazing: most a grazer eats in a game day of grazing (biomass: a grown grass tuft is 1),
+/// and the forage within reach at which it eats half of that.
+const INTAKE: f32 = 30.0;
+const FORAGE_HALF: f32 = 1.0;
+/// Reach of a grazer's muzzle as it steps along, in cells.
+const GRAZE_REACH: f32 = 1.5;
 
 /// Storey of a plant: who competes with whom, and over what distance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +176,28 @@ pub fn species(plant: Plant) -> Option<Species> {
         ),
         _ => return None,
     }))
+}
+
+/// How readily grazers eat a plant of `size`: grass and flowers, and tree saplings (browsed:
+/// this is what keeps a meadow open); ferns are bitter, grown trees out of reach.
+fn palatability(plant: Plant, size: f32) -> f32 {
+    match plant {
+        Plant::Grass => 1.0,
+        Plant::Flower => 0.8,
+        Plant::Mushroom => 0.3,
+        Plant::Fern => 0.05,
+        Plant::DryShrub => 0.2,
+        Plant::Bush => 0.5,
+        Plant::Cactus => 0.0,
+        p if is_tree(p) => {
+            if size < 0.5 {
+                1.3
+            } else {
+                0.0
+            }
+        }
+        _ => 0.0,
+    }
 }
 
 /// How much species `a` is held back by a plant of species `b` growing near it.
@@ -375,6 +416,11 @@ pub struct Ecology {
     /// Real seconds until the next life step.
     timer: f32,
     max_plants: usize,
+    soil: Soil,
+    /// Where grazers are grazing now (set before each update), and what each has eaten since
+    /// it was last read.
+    grazers: Vec<Vec2>,
+    eaten: Vec<f32>,
 }
 
 fn column(p: Vec2) -> (i64, i64) {
@@ -419,8 +465,16 @@ impl Ecology {
         let living = life.iter().filter(|l| l.is_some()).count();
         let shown = life.iter().map(|l| l.map_or(1.0, |l| l.size)).collect();
         let stood = plants.iter().map(|p| !p.plant.is_ground_cover()).collect();
+        let habitat = Habitat::new(world);
+        let d = world.dims();
+        let soil = Soil::new(d.nx, d.nz, |x, z| {
+            habitat.moisture(x as f32 + 0.5, z as f32 + 0.5)
+        });
         let mut ecology = Self {
-            habitat: Habitat::new(world),
+            habitat,
+            soil,
+            grazers: Vec::new(),
+            eaten: Vec::new(),
             life,
             shown,
             stood,
@@ -431,7 +485,93 @@ impl Ecology {
             max_plants: (living as f32 * MAX_GROWTH) as usize,
         };
         ecology.cast_shade(plants);
+        ecology.measure_cover(plants);
+        ecology.soil.settle();
         ecology
+    }
+
+    /// The soil, the slow variables.
+    pub fn soil(&self) -> &Soil {
+        &self.soil
+    }
+
+    /// Where grazers graze now: they eat at the next life steps.
+    pub fn set_grazers(&mut self, at: &[Vec2]) {
+        self.grazers.clear();
+        self.grazers.extend_from_slice(at);
+        self.eaten.resize(at.len(), 0.0);
+    }
+
+    /// What each grazer ate since the last call (biomass), in the order they were set.
+    pub fn take_eaten(&mut self) -> Vec<f32> {
+        std::mem::replace(&mut self.eaten, vec![0.0; self.grazers.len()])
+    }
+
+    /// Plant cover and forage of each soil patch, from the living plants.
+    fn measure_cover(&mut self, plants: &[PlantInstance]) {
+        let n = self.soil.patches();
+        let (mut cover, mut forage) = (vec![0.0; n], vec![0.0; n]);
+        for (i, l) in self.life.iter().enumerate() {
+            let (Some(l), Some(sp)) = (l, species(plants[i].plant)) else {
+                continue;
+            };
+            let Some(k) = self.soil.patch(place(&plants[i])) else {
+                continue;
+            };
+            let weight = match sp.layer {
+                Layer::Herb => 1.0,
+                Layer::Shrub => 3.0,
+                Layer::Tree => 10.0,
+            };
+            cover[k] += weight * l.size / COVER_FULL;
+            forage[k] += palatability(plants[i].plant, l.size) * l.size;
+        }
+        self.soil.set_cover(&cover, &forage);
+    }
+
+    /// Grazer `g` at `at` eats for `days` of grazing: as much as it finds, up to its fill,
+    /// from the palatable plants within reach, in proportion to what each offers. A plant
+    /// grazed below the living size dies.
+    fn graze(
+        &mut self,
+        g: usize,
+        at: Vec2,
+        days: f32,
+        plants: &[PlantInstance],
+        changes: &mut Vec<Change>,
+    ) {
+        let mut offers = Vec::new();
+        self.for_near(at, GRAZE_REACH, plants, |j| {
+            let size = self.size(j);
+            let offer = palatability(plants[j].plant, size) * size;
+            if offer > 0.0 {
+                offers.push((j, offer));
+            }
+        });
+        let available: f32 = offers.iter().map(|&(_, o)| o).sum();
+        if available <= 0.0 {
+            return;
+        }
+        // Holling type II: the intake saturates when forage abounds.
+        let want = INTAKE * available / (available + FORAGE_HALF) * days;
+        let mut eaten = 0.0;
+        for (j, offer) in offers {
+            let Some(mut l) = self.life[j] else {
+                continue;
+            };
+            let bite = (want * offer / available).min(l.size);
+            l.size -= bite;
+            eaten += bite;
+            if l.size < DEATH_SIZE {
+                let stood = self.remove(j, plants);
+                changes.push(Change::Died { plant: j, stood });
+            } else {
+                self.life[j] = Some(l);
+            }
+        }
+        if let Some(e) = self.eaten.get_mut(g) {
+            *e += eaten;
+        }
     }
 
     #[cfg(test)]
@@ -592,6 +732,8 @@ impl Ecology {
             if l.burning <= 0.0 {
                 let stood = self.remove(i, plants);
                 changes.push(Change::Died { plant: i, stood });
+                // Ashes: organic matter back to the soil at once.
+                self.soil.ash(at, 0.02);
             } else {
                 self.life[i] = Some(l);
             }
@@ -626,6 +768,13 @@ impl Ecology {
         changes: &mut Vec<Change>,
     ) {
         self.cast_shade(plants);
+        // Grazing, then the soil follows the cover (slowly).
+        for g in 0..self.grazers.len() {
+            let at = self.grazers[g];
+            self.graze(g, at, days, plants, changes);
+        }
+        self.measure_cover(plants);
+        self.soil.step(days);
         let count = self.life.len();
         let mut seeds: Vec<(Plant, Vec2)> = Vec::new();
         for i in 0..count {
@@ -640,7 +789,8 @@ impl Ecology {
             let own_shade = if sp.crown > 0.0 { 0.8 * l.size } else { 0.0 };
             let habitat = self
                 .habitat
-                .suitability(world, p.plant, at.x, at.y, own_shade);
+                .suitability(world, p.plant, at.x, at.y, own_shade)
+                * self.soil.offer_at(at);
             // Lotka-Volterra: what the neighbours take, weighed by distance and niche.
             let reach = sp.layer.reach();
             let mut crowd = 0.0;
@@ -683,7 +833,8 @@ impl Ecology {
             };
             let h = self
                 .habitat
-                .suitability(world, plant, target.x, target.y, 0.0);
+                .suitability(world, plant, target.x, target.y, 0.0)
+                * self.soil.offer_at(target);
             if self.rng.next_f32() >= h || !free(target) {
                 continue;
             }
@@ -753,6 +904,49 @@ mod tests {
             eco.step(1.0 / 60.0, world, plants, &|_| true, &mut changes);
         }
         changes
+    }
+
+    /// A meadow patch grazed hard by many grazers, then left alone; and one grazed lightly.
+    /// Returns its cover before, right after grazing, and after resting `rest` days.
+    fn graze_then_rest(grazers: usize, spacing: f32, rest: usize) -> (f32, f32, f32) {
+        let (world, mut plants, mut eco) = setup();
+        let soil = eco.soil();
+        let k = (0..soil.patches())
+            .filter(|&k| {
+                let c = soil.centre(k);
+                world.biome(c.x as usize, c.y as usize) == Biome::Plains
+            })
+            .max_by(|&a, &b| soil.forage(a).total_cmp(&soil.forage(b)))
+            .expect("a meadow");
+        let centre = soil.centre(k);
+        let before = soil.cover(k);
+        let side = (grazers as f32).sqrt().ceil() as usize;
+        let at: Vec<Vec2> = (0..grazers)
+            .map(|g| {
+                let (a, b) = ((g % side) as f32, (g / side) as f32);
+                let half = (side - 1) as f32 / 2.0;
+                centre + Vec2::new(a - half, b - half) * spacing
+            })
+            .collect();
+        eco.set_grazers(&at);
+        run(&mut eco, &world, &mut plants, 8);
+        let grazed = eco.soil().cover(k);
+        eco.set_grazers(&[]);
+        run(&mut eco, &world, &mut plants, rest);
+        (before, grazed, eco.soil().cover(k))
+    }
+
+    /// The tipping point, with the real plants and soil: light grazing does no harm; a small
+    /// spot grazed bare closes again from the meadow around it; a wide land grazed bare stays
+    /// bare once the grazers are gone (the soil has lost its water and its humus).
+    #[test]
+    fn grazed_bare_a_wide_meadow_does_not_come_back_a_small_spot_does() {
+        let (before, _, light) = graze_then_rest(3, 2.0, 15);
+        assert!(light > 0.8 * before, "light grazing: {before} → {light}");
+        let (_, bare, spot) = graze_then_rest(16, 2.0, 15);
+        assert!(bare < 0.05 && spot > 0.3, "small spot: {bare} → {spot}");
+        let (_, bare, wide) = graze_then_rest(100, 2.5, 15);
+        assert!(bare < 0.1 && wide < 0.1, "wide land: {bare} → {wide}");
     }
 
     #[test]
@@ -838,7 +1032,7 @@ mod tests {
 
     /// A patch cleared of every plant is recolonised, grass first.
     #[test]
-    fn a_cleared_patch_is_recolonised_by_grass_first() {
+    fn a_cleared_patch_is_recolonised_by_pioneer_herbs_first() {
         let (world, mut plants, mut eco) = setup();
         let centre = (0..plants.len())
             .filter(|&i| plants[i].plant == Plant::Grass)
@@ -848,16 +1042,20 @@ mod tests {
         for i in eco.near(centre, 4.0, &plants) {
             eco.remove(i, &plants);
         }
-        run(&mut eco, &world, &mut plants, 2);
+        // A clearing loses some of its soil water (less cover, less infiltration): it takes
+        // longer than before the soil was simulated.
+        run(&mut eco, &world, &mut plants, 3);
         let back = eco.near(centre, 4.0, &plants);
         assert!(back.len() > 5, "only {} plants came back", back.len());
-        let grass = back
+        // Pioneers come back first: grass and flowers (wind carries the flowers' seeds
+        // farther), not shrubs or trees.
+        let herbs = back
             .iter()
-            .filter(|&&i| plants[i].plant == Plant::Grass)
+            .filter(|&&i| matches!(plants[i].plant, Plant::Grass | Plant::Flower))
             .count();
         assert!(
-            grass * 2 > back.len(),
-            "{grass} grass out of {}",
+            herbs * 4 > back.len() * 3,
+            "{herbs} herbs of {}",
             back.len()
         );
     }

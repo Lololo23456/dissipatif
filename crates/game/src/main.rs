@@ -28,6 +28,7 @@ mod obstacles;
 mod player;
 mod scene;
 mod sketch;
+mod soil;
 mod sound;
 mod state;
 mod traces;
@@ -653,7 +654,7 @@ impl App {
                 let centre = Vec3::new(ring.x, ground, ring.y);
                 if (0.12..0.45).contains(&u) {
                     // Each bow sends a wave of light out from the centre over the grass.
-                    let wave = (seconds / 4.0 + 0.5).fract();
+                    let wave = (seconds / 3.0 + 0.5).fract();
                     for k in 0..40 {
                         let a = k as f32 / 40.0 * tau;
                         let r = deer::RING_RADIUS * 1.15 * wave;

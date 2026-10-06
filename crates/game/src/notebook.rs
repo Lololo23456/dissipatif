@@ -40,6 +40,10 @@ pub enum Entry {
     Ring,
     /// A hind turning alone at night.
     Turning,
+    /// A new calf in the herd.
+    Calf,
+    /// A deer dead of hunger.
+    Starved,
     /// All of them walking the circle under the full moon.
     Rite,
     /// A spell understood.
@@ -62,6 +66,8 @@ impl Entry {
                 "dans le même sens.",
             ],
             Entry::Turning => &["Seule, en pleine nuit."],
+            Entry::Calf => &["Un faon de plus."],
+            Entry::Starved => &["Une biche morte.", "Les côtes saillantes."],
             Entry::Learnt(Spell::DeerForm) => &["Je sais marcher", "comme elles."],
         }
     }

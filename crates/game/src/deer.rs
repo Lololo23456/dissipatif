@@ -50,15 +50,15 @@ const FLEE: f32 = 1.0;
 const WARY_DAYS: f64 = 0.15;
 /// Radius of the circle they walk, in cells.
 pub const RING_RADIUS: f32 = 3.5;
-/// The rite, the night of the full moon: the herd gathers on its circle from 21 h 20; the
-/// incantation itself begins at 22 h and lasts 1.2 game hours (a minute of play).
-const GATHER_HOUR: f32 = 21.3;
+/// The rite, the night of the full moon: the herd gathers on its circle from 21 h 40; the
+/// incantation itself begins at 22 h and lasts 0.6 game hours (half a minute of play).
+const GATHER_HOUR: f32 = 21.66;
 pub const RITE_HOUR: f32 = 22.0;
-pub const RITE_HOURS: f32 = 1.2;
+pub const RITE_HOURS: f32 = 0.6;
 /// One turn of the circle, in seconds (the procession, and the lone hind's foretelling).
-const RING_TURN: f32 = 40.0;
+const RING_TURN: f32 = 20.0;
 /// Seconds for the light of the rite to gather once all stand in their places.
-const GATHERING: f32 = 8.0;
+const GATHERING: f32 = 4.0;
 /// The incantation's movements, as shares of it: gathered and still, bowing together (a stamp
 /// running round the circle), the procession, heads raised to the moon, the end.
 const BOWING: f32 = 0.12;
@@ -97,6 +97,10 @@ pub enum HerdEvent {
     Alarm { cause: Cause },
     /// The herd fled.
     Fled { cause: Cause },
+    /// A calf was born (the herd is well fed).
+    Born,
+    /// A deer starved.
+    Starved,
 }
 
 pub struct Deer {
@@ -123,6 +127,44 @@ pub struct Deer {
     timer: f32,
     /// Seconds left with the head up, scanning, while grazing.
     scanning: f32,
+    /// Reserves, 0 (starving) to 1 (well fed): grazing fills them, living spends them.
+    pub energy: f32,
+}
+
+/// Reserves a deer spends in a game day (a grown hind; a calf less), and what a unit of
+/// forage eaten gives back: about five grown grass tufts a day keep a hind.
+const METABOLISM: f32 = 1.0;
+const ENERGY_PER_BITE: f32 = 0.2;
+/// Births: chance per game day for each grown, well-fed hind (above `FED`), fewer as the herd
+/// nears `CROWDED` (fecundity falls with density, as in real deer), at most `MAX_HERD`.
+/// Calves grow to full size in about thirty days.
+const BIRTHS: f32 = 0.08;
+const CROWDED: f32 = 9.0;
+const FED: f32 = 0.75;
+const MAX_HERD: usize = 12;
+const CALF: f32 = 0.55;
+const GROWTH_PER_DAY: f32 = 0.015;
+
+impl Deer {
+    fn new(position: Vec3, size: f32, rng: &mut SplitMix64) -> Self {
+        Self {
+            position,
+            heading: rng.next_f32() * std::f32::consts::TAU,
+            activity: Activity::Lying,
+            head: 0.0,
+            lying: 1.0,
+            stride: 0.0,
+            speed: 0.0,
+            size,
+            stamp: 0.0,
+            suspicion: 0.0,
+            noticed: None,
+            goal: Vec2::new(position.x, position.z),
+            timer: rng.next_f32() * 3.0,
+            scanning: 0.0,
+            energy: 0.7,
+        }
+    }
 }
 
 /// The naturalist as deer perceive them.
@@ -168,6 +210,10 @@ pub struct Herd {
     pub glow: f32,
     /// How far into the incantation, while it lasts (0 to 1).
     pub rite: Option<f32>,
+    /// Where they graze: their meadow, or elsewhere when it is grazed out.
+    pasture: Vec2,
+    /// Which deer were grazing when the grazers were last asked for (see `grazers`).
+    grazing: Vec<usize>,
 }
 
 /// Lit share of the moon at a phase (0 new, 0.5 full).
@@ -196,8 +242,8 @@ fn incantation_head(u: f32, seconds: f32) -> f32 {
     if u < BOWING {
         0.4
     } else if u < PROCESSION {
-        // Bowing together, slowly, every four seconds.
-        let bow = 0.5 - 0.5 * (std::f32::consts::TAU * seconds / 4.0).cos();
+        // Bowing together, slowly, every three seconds.
+        let bow = 0.5 - 0.5 * (std::f32::consts::TAU * seconds / 3.0).cos();
         0.4 - 1.3 * bow
     } else if u < TO_THE_MOON {
         0.8
@@ -221,27 +267,13 @@ impl Herd {
             .map(|i| {
                 let angle = i as f32 * 2.4;
                 let spot = cover + Vec2::new(angle.cos(), angle.sin()) * 2.2;
-                Deer {
-                    position: ground(world, spot),
-                    heading: rng.next_f32() * std::f32::consts::TAU,
-                    activity: Activity::Lying,
-                    head: 0.0,
-                    lying: 1.0,
-                    stride: 0.0,
-                    speed: 0.0,
-                    // Two calves of the year among the hinds.
-                    size: if i >= HERD - 2 {
-                        0.68
-                    } else {
-                        0.95 + 0.1 * rng.next_f32()
-                    },
-                    stamp: 0.0,
-                    suspicion: 0.0,
-                    noticed: None,
-                    goal: spot,
-                    timer: rng.next_f32() * 3.0,
-                    scanning: 0.0,
-                }
+                // Two calves of the year among the hinds.
+                let size = if i >= HERD - 2 {
+                    0.68
+                } else {
+                    0.95 + 0.1 * rng.next_f32()
+                };
+                Deer::new(ground(world, spot), size, &mut rng)
             })
             .collect();
         Self {
@@ -255,12 +287,17 @@ impl Herd {
             turn: 0.0,
             glow: 0.0,
             rite: None,
+            pasture: ring,
+            grazing: Vec::new(),
         }
     }
 
     /// Where the herd is, roughly: the lead hind.
     pub fn centre(&self) -> Vec2 {
-        let p = self.deer[0].position;
+        let Some(lead) = self.deer.first() else {
+            return self.ring;
+        };
+        let p = lead.position;
         Vec2::new(p.x, p.z)
     }
 
@@ -271,7 +308,9 @@ impl Herd {
 
     /// Whether the lead hind is walking the circle alone (the foretelling).
     pub fn foretelling(&self) -> bool {
-        self.deer[0].activity == Activity::Circling && self.glow < 0.05
+        self.deer
+            .first()
+            .is_some_and(|d| d.activity == Activity::Circling && self.glow < 0.05)
     }
 
     fn mode(&self, now: &Conditions) -> Mode {
@@ -284,7 +323,7 @@ impl Herd {
         if foretelling_time(now) {
             return Mode::Foretelling;
         }
-        let pasture = self.ring;
+        let pasture = self.pasture;
         match now.hour {
             h if (9.5..16.5).contains(&h) => Mode::Lie(self.cover),
             h if (16.5..18.5).contains(&h) => Mode::Travel(pasture),
@@ -293,6 +332,75 @@ impl Herd {
             h if (7.5..9.5).contains(&h) => Mode::Travel(self.cover),
             // Late night: lying in the open, between grazing bouts.
             _ => Mode::Lie(pasture),
+        }
+    }
+
+    /// Where they graze, outside the rite (their meadow, or a better one when it is grazed
+    /// out).
+    pub fn set_pasture(&mut self, at: Vec2) {
+        self.pasture = at;
+    }
+
+    pub fn pasture(&self) -> Vec2 {
+        self.pasture
+    }
+
+    /// Where the deer grazing now are; `feed` gives each what it ate, in this order.
+    pub fn grazers(&mut self) -> Vec<Vec2> {
+        self.grazing = (0..self.deer.len())
+            .filter(|&i| self.deer[i].activity == Activity::Grazing)
+            .collect();
+        self.grazing
+            .iter()
+            .map(|&i| Vec2::new(self.deer[i].position.x, self.deer[i].position.z))
+            .collect()
+    }
+
+    /// What the grazers (as last asked for) ate: their reserves fill.
+    pub fn feed(&mut self, eaten: &[f32]) {
+        for (&i, &e) in self.grazing.iter().zip(eaten) {
+            if let Some(d) = self.deer.get_mut(i) {
+                d.energy = (d.energy + e * ENERGY_PER_BITE / d.size.max(0.5)).min(1.0);
+            }
+        }
+    }
+
+    /// Reserves spent, calves growing, births and deaths, over `dt` seconds.
+    fn live(&mut self, dt: f32, world: &World, events: &mut Vec<HerdEvent>) {
+        let days = dt / crate::clock::DAY_SECONDS;
+        let mut births = Vec::new();
+        let room = self.deer.len() < MAX_HERD;
+        let fecundity = (1.0 - self.deer.len() as f32 / CROWDED).max(0.0);
+        for d in &mut self.deer {
+            d.energy -= METABOLISM * d.size * days;
+            if d.size < 0.95 {
+                d.size += GROWTH_PER_DAY * days;
+            }
+            if room
+                && d.size > 0.9
+                && d.energy > FED
+                && self.rng.next_f32() < BIRTHS * fecundity * days
+            {
+                births.push(d.position);
+            }
+        }
+        let before = self.deer.len();
+        self.deer.retain(|d| d.energy > 0.0);
+        for _ in self.deer.len()..before {
+            events.push(HerdEvent::Starved);
+        }
+        for mother in births {
+            if self.deer.len() >= MAX_HERD {
+                break;
+            }
+            let at = Vec2::new(mother.x + 0.6, mother.z);
+            let calf = Deer::new(ground(world, at), CALF, &mut self.rng);
+            self.deer.push(Deer {
+                lying: 0.0,
+                energy: 0.6,
+                ..calf
+            });
+            events.push(HerdEvent::Born);
         }
     }
 
@@ -306,6 +414,12 @@ impl Herd {
         fires: &[Vec2],
         events: &mut Vec<HerdEvent>,
     ) {
+        self.live(dt, world, events);
+        if self.deer.is_empty() {
+            self.glow = 0.0;
+            self.rite = None;
+            return;
+        }
         self.sense(dt, now, observers, fires, events);
         let mode = self.mode(now);
         let rite = rite_progress(now).filter(|_| mode == Mode::Ritual);
@@ -363,6 +477,8 @@ impl Herd {
                 (Activity::Vigilant, here, 0.0, false)
             } else {
                 match mode {
+                    // A hungry deer grazes on in its resting hours.
+                    Mode::Lie(centre) if d.energy < 0.4 => graze(d, rng, centre, dt),
                     Mode::Lie(centre) => {
                         let spot = centre + rest_offset(i);
                         if here.distance(spot) < 0.6 {

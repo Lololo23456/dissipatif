@@ -139,6 +139,13 @@ Généré à partir d'une graine (crate `world`) : la forme des terres (île, ar
 - **Plus tard, un monde qui change** : l'eau qui coule et érode, les rivières qui creusent et migrent (méandres), la végétation qui pousse et recule, les saisons et la météo.
 - **Événements** : des phénomènes rares et marquants qui transforment le monde et laissent des traces durables : tornades qui couchent une forêt sur leur passage, arbres qui tombent (vieillesse, tempête, foudre), crues qui déplacent une rivière, incendies de forêt et repousse, éboulements en montagne. Ce sont eux aussi des structures loin de l'équilibre (une tornade est une structure dissipative), et le joueur apprend à les lire et à les anticiper.
 
+## L'écosystème
+Un seul système, à deux vitesses (fiche complète : `docs/reactions/ecologie.md`) :
+- **variables lentes**, le sol, par parcelles de 8 × 8 cases : l'eau qu'il retient et sa matière organique ;
+- **variables rapides**, les populations : les plantes (Lotka-Volterra à plusieurs espèces), les cerfs (qui broutent vraiment, mettent bas, meurent de faim).
+
+La végétation fait le sol, le sol fait la végétation : sur une large plage de conditions, une prairie a **deux états stables**, couverte ou nue. Poussée trop loin (surpâturage, brûlis répétés, défrichement), elle **bascule** et ne revient pas quand la pression cesse (hystérésis). Une petite tache nue se referme par ses bords ; une grande étendue reste un désert. Les cerfs gardent la prairie ouverte en broutant les jeunes arbres ; trop nombreux ou concentrés, ils l'épuisent. Le joueur provoque ces bascules sans le vouloir : en effrayant la harde de ses autres pâtures, en brûlant, en prélevant.
+
 ## La vie
 
 ### Faune
