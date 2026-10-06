@@ -15,12 +15,36 @@ use world::{Biome, Material, Plant, World};
 
 use crate::trample::Pliable;
 
+/// The ground's look (material id and a brightness variation per voxel) and mesh. Plants are
+/// drawn from their models: the world grid only has a coarse copy of them, left out here.
+fn solid(world: &World) -> (Field3, MeshData) {
+    let dims = world.dims();
+    let seed = world.config.seed ^ VARIATION_SEED;
+    let mut occupied = Field3::filled(dims, 0.0);
+    let mut look = Field3::filled(dims, 0.0);
+    for (i, &id) in world.blocks().iter().enumerate() {
+        let plant = Material::from_id(id).is_some_and(Material::is_plant);
+        if id == Material::Air.id() || plant {
+            continue;
+        }
+        occupied.data[i] = 1.0;
+        // Same variation for a whole voxel: hash of its index.
+        let variation = hash_unit(seed, &[i as i64]);
+        look.data[i] = id as f32 + 0.999 * variation;
+    }
+    let mut mesh = MeshData::default();
+    mesh_field(&occupied, 0.5, &mut mesh);
+    (look, mesh)
+}
+
 /// Seed offset of the per-voxel brightness variation.
 const VARIATION_SEED: u64 = 0x5eed;
 
 /// The world, ready to upload.
 pub struct SceneData {
     dims: Dims,
+    /// The ground's volume in the renderer, once installed.
+    solid_id: Option<render::VolumeId>,
     /// Material id + brightness variation in [0, 1) per voxel (see `VolumeStyle::materials`).
     solid_look: Field3,
     solid_mesh: MeshData,
@@ -46,21 +70,7 @@ impl SceneData {
     pub fn build(world: &World) -> Self {
         let dims = world.dims();
         let seed = world.config.seed ^ VARIATION_SEED;
-        let mut occupied = Field3::filled(dims, 0.0);
-        let mut solid_look = Field3::filled(dims, 0.0);
-        for (i, &id) in world.blocks().iter().enumerate() {
-            // Plants are drawn from their models; the world grid only has a coarse copy.
-            let plant = Material::from_id(id).is_some_and(Material::is_plant);
-            if id == Material::Air.id() || plant {
-                continue;
-            }
-            occupied.data[i] = 1.0;
-            // Same variation for a whole voxel: hash of its index.
-            let variation = hash_unit(seed, &[i as i64]);
-            solid_look.data[i] = id as f32 + 0.999 * variation;
-        }
-        let mut solid_mesh = MeshData::default();
-        mesh_field(&occupied, 0.5, &mut solid_mesh);
+        let (solid_look, solid_mesh) = solid(world);
 
         let (nx, nz) = (dims.nx, dims.nz);
         let columns = Dims { nx, ny: 1, nz };
@@ -139,6 +149,7 @@ impl SceneData {
         let groups = plant_models.len();
         Self {
             dims,
+            solid_id: None,
             plant_models,
             pliable,
             slots,
@@ -150,6 +161,19 @@ impl SceneData {
             solid_mesh,
             water_depth,
             water_mesh,
+        }
+    }
+
+    /// The ground changed (dug): rebuilds its mesh and, if installed, sends it to the
+    /// renderer. The whole ground is remeshed (some tens of milliseconds); per-chunk
+    /// remeshing will come with the micro-bricks.
+    pub fn remesh_ground(&mut self, world: &World, renderer: Option<&mut Renderer>) {
+        let (look, mesh) = solid(world);
+        self.solid_look = look;
+        self.solid_mesh = mesh;
+        if let (Some(renderer), Some(id)) = (renderer, self.solid_id) {
+            renderer.upload_base(id, &self.solid_look);
+            renderer.upload_mesh(id, &self.solid_mesh);
         }
     }
 
@@ -189,6 +213,7 @@ impl SceneData {
             life: no_overlay(),
             transparent: true,
         });
+        self.solid_id = Some(solid);
         renderer.upload_base(solid, &self.solid_look);
         renderer.upload_life(solid, &self.no_overlay_solid);
         renderer.upload_mesh(solid, &self.solid_mesh);

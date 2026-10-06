@@ -130,6 +130,8 @@ struct App {
     bag_open: bool,
     /// Shift is held.
     shift: bool,
+    /// The ground was dug: its mesh must be rebuilt before the next frame.
+    ground_dirty: bool,
     /// A one-off gesture being played (laying, eating…) and when it began.
     gesture: Option<(GestureKind, f32)>,
     /// Seconds since start, as of the last frame.
@@ -192,6 +194,7 @@ impl App {
             hover: None,
             bag_open: false,
             shift: false,
+            ground_dirty: false,
             gesture: None,
             now: 0.0,
         }
@@ -335,6 +338,12 @@ impl App {
             }
             Event::Ate { matter, .. } => format!("Vous mangez : {}", matter.name()),
             Event::Drank { .. } => "Vous buvez quelques gorgées.".to_owned(),
+            Event::Excavated { x, z } => {
+                if self.world.remove_top(x, z).is_some() {
+                    self.ground_dirty = true;
+                }
+                return;
+            }
             Event::Cleared { plant } => {
                 self.data.hide(plant);
                 return;
@@ -552,6 +561,10 @@ impl ApplicationHandler for App {
                 if let Some(graphics) = self.graphics.as_mut() {
                     let renderer = &mut graphics.renderer;
                     self.naturalist.pose(renderer, &motion);
+                    if self.ground_dirty {
+                        self.ground_dirty = false;
+                        self.data.remesh_ground(&self.world, Some(renderer));
+                    }
                     self.data.upload_changes(renderer);
                     self.weather.draw(renderer);
                     set_sky(
@@ -1111,6 +1124,9 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.camera.target = Vec3::new(x, app.camera.target.y, z);
     }
     let time = (still + walking) as f32 * CAPTURE_STEP;
+    if app.ground_dirty {
+        app.data.remesh_ground(&app.world, None);
+    }
     let mut renderer = Renderer::new(Gpu::offscreen(options.width, options.height));
     app.data.install(&mut renderer);
     app.naturalist.install(&mut renderer);

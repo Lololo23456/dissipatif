@@ -191,6 +191,24 @@ impl World {
         self.tops[x + self.dims().nx * z]
     }
 
+    /// Digs out the top ground voxel of column (x, z): it becomes air and the column is one
+    /// lower. Returns what was dug, or None if too little ground is left (bedrock).
+    pub fn remove_top(&mut self, x: usize, z: usize) -> Option<Material> {
+        let dims = self.dims();
+        let column = x + dims.nx * z;
+        let top = self.tops[column];
+        if top <= 2 {
+            return None;
+        }
+        let i = dims.index(x, top - 1, z);
+        let dug = Material::from_id(self.blocks[i])?;
+        self.blocks[i] = Material::Air.id();
+        self.tops[column] = top - 1;
+        let height = &mut self.ground.data[column];
+        *height = height.min((top - 1) as f32);
+        Some(dug)
+    }
+
     /// Water surface of column (x, z), if water covers its ground.
     pub fn water_level(&self, x: usize, z: usize) -> Option<f32> {
         let i = x + self.dims().nx * z;

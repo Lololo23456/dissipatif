@@ -217,3 +217,8 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Une seule commande de travail des mains (F, `Command::Work`), qui fait ce que permet ce qu'on tient : modeler une coupelle (2 argiles), **tailler** (frapper un caillou avec un autre : roche sombre à grain fin, éclat tranchant 70 % ; caillou clair grenu, 15 %, sinon débris), tirer 3 baguettes d'un fagot, **emmancher** (éclat + baguette + fibre souple → couteau).
 - Le couteau coupe les buissons (bois vert, plein de sève : il doit sécher avant de brûler) ; il s'use à chaque coupe (8), puis la ligature lâche et rend l'éclat et la baguette. Un éclat tenu à nu se brise souvent (40 %).
 - Hasard tiré d'un générateur à graine (déterministe). Exemple de rituel des sorts consigné dans `design.md` (cerfs en cercle les soirs de pleine lune).
+
+## 2026-10-06 — Sac, icônes, creuser pour de vrai
+- Sac ouvrable (Tab ou I) : 8 cases avec icônes, détail de l'objet choisi (masse et propriétés en mots : « très dur », « tranchant »…), clic pour choisir, X jeter un exemplaire, Maj+X toute la pile. Icônes tirées des modèles voxels (vue de dessus ou de face, celle qui montre le plus) : toujours procédurales.
+- Creuser modifie le monde : 3 poignées au même endroit retirent le cube du dessus (`World::remove_top`, événement `Excavated`), et la couche du dessous apparaît. Un cube faisant 1 m, c'est une simplification d'échelle ; creuser finement demandera les micro-briques. Le sol entier est remaillé à chaque fois (quelques dizaines de ms) : à remplacer par un remaillage par tronçon.
+- Limite connue : l'eau ne s'écoule pas encore dans un trou creusé près d'elle.
