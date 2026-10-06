@@ -20,13 +20,29 @@ Un jeu de terrain où le joueur comprend un monde fragile en reproduisant ses st
 
 **Le verbe central : le joueur est la cause, sans le vouloir.** Prélever, expérimenter, faire du feu altèrent le monde : comprendre a un coût. Chaque prélèvement pèse. Cela rejoint « la nature amplifie les petites actions du joueur ».
 
-## Les comportements étranges et les sorts
+## Le verbe central : enquêter
 
-Les animaux (puis les plantes, les arbres, les rivières) ont parfois des **comportements anormaux**, autour de certaines choses ou à certains moments. Le joueur qui les **observe assez longtemps** gagne un **sort** lié à cette anomalie de comportement. Observer est le seul moyen d'en obtenir : la patience du naturaliste est récompensée.
+Le joueur **enquête** sur les anomalies de la nature. La progression, c'est ce qu'il a compris.
 
-**Le ton** : ce sont les êtres vivants qui pratiquent la magie, le joueur ne fait que l'apprendre en les observant. Exemple : une harde de cerfs qui, les soirs de pleine lune, se rassemble en cercle dans une plaine pour une incantation ; qui l'a vue assez longtemps, sans la troubler, en garde le sort. Ces rituels sont rares, liés à un lieu, une heure, une saison ou une phase de lune, et le joueur doit d'abord les remarquer, puis revenir. Prérequis : une faune plus riche (cerfs…) et les phases de la lune.
+### Les anomalies et la magie
+- **La nature est la source de la magie** ; ce sont les êtres vivants qui la pratiquent. Le joueur l'apprend en les observant.
+- Une anomalie est un **comportement étrange** (des animaux, plus tard des plantes, des arbres, des rivières), lié à **un lieu, une date, une phase de lune** ou un moment précis. Exemple : une harde de cerfs qui tourne en cercle dans une plaine les soirs de pleine lune.
+- **Elle ne se gagne pas en patientant, mais en comprenant quand et où elle a lieu.** Le joueur la devine à partir d'**indices** (empreintes en rond, herbe aplatie, un cerf qui tourne un peu une nuit de lune presque pleine), puis se place au bon endroit, à la bonne date, avec le bon vent.
+- **Observer, c'est se cacher** : contre le vent, en lisière, accroupi, sans feu ni lumière, sur un sol qui ne craque pas. Les systèmes physiques (vent, bruit des pas, lumière, couvert des plantes) deviennent des outils d'observation ; un affût se construit.
+- **Provoquer pour comprendre** (plus tard) : allumer un feu, laisser un fruit, creuser un point d'eau. Chaque intervention a un coût écologique : l'observation coûte du temps, l'expérience coûte au monde.
+- **Les anomalies se croisent** (plus tard) : deux anomalies liées forment une énigme (les cerfs tournent là où les lucioles s'éteignent, là où un vieil arbre meurt). Le sort récompense la compréhension d'un enchaînement.
+- **Les sorts** sont variés (sauter plus haut, boules de feu…) et passent par la vraie physique. Ils forment un **arbre caché** : un sort permet d'observer l'anomalie qui en donne un autre.
+- **Génération** : logique fixe (gabarits de causalité écrits à la main), incarnation générée (animaux, lieux, dates du monde).
+- **Le vieil homme de la forêt** (plus tard) dit voir des choses : des rumeurs, pas des réponses.
 
-À trancher : la nature des sorts, et s'ils obéissent eux aussi à la grammaire des flux (un sort qui déplace de la chaleur, de l'eau, de la lumière, et donc a un coût et des conséquences écologiques) pour rester cohérents avec le reste du monde.
+### Les animaux
+**Hors anomalies, leur comportement suit la réalité** : rythmes d'activité (le cerf est crépusculaire), alimentation, vie en groupe, vigilance, perception (vue sensible au mouvement, ouïe, odorat porté par le vent), distance de fuite. L'étrange n'existe que par contraste avec ce comportement réel.
+
+### Le carnet
+Posé devant le joueur au départ, **il brille seulement à ce moment-là** ; personne ne sait d'où il vient. **Il se remplit tout seul** de ce que le joueur a vu (images, parfois quelques mots), avec le lieu, le jour, l'heure, la phase de lune et le vent : c'est un **outil d'hypothèses**. Le joueur relie les pages ; il pourra peut-être plus tard les marquer.
+
+### Le monde à terme
+Un sandbox **infini**. D'abord, valider la boucle sur le monde actuel ; ensuite l'infini, avec un code pensé par régions dès maintenant.
 
 ## Piliers
 

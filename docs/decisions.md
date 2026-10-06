@@ -244,3 +244,7 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Les nouvelles pousses se couchent au passage.
 - Coût mesuré : un pas de vie ≈ 3,3 ms pour 8 000 plantes, toutes les 2 s réelles (30 pas/s en accéléré).
 - À peaufiner (prévu) : paramètres des espèces, saisons, banque de graines, herbivores, cendres qui enrichissent le sol, arbres qui tombent.
+
+## 2026-10-06 — Enquêter : anomalies, sorts, carnet, animaux réels
+- **Actées (discussion avec l'utilisateur)** : le verbe central est **enquêter**. La nature est la source de la magie, pratiquée par les êtres vivants. Une anomalie (lieu, date, lune) se gagne en la **comprenant** (indices, puis se placer au bon endroit, au bon moment, avec le bon vent), pas en attendant. Observer = se cacher (vent, bruit, lumière, couvert). Plus tard : provoquer pour comprendre (coût écologique), anomalies croisées, vieil homme. Sorts variés dans un arbre caché ; logique fixe, incarnation générée. Carnet lumineux au départ, qui se remplit seul (hypothèse : le joueur relie les pages ; marques peut-être plus tard). Animaux réalistes hors anomalies. Monde infini plus tard (option 3 : le cœur du jeu d'abord).
+- Plan : carnet → lune, calendrier, vent changeant → perception animale et cerfs réalistes → indices et rituel → premier sort.
