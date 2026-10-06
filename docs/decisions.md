@@ -313,3 +313,9 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Le joueur peut déterrer une cache (« terre remuée » quand il est dessus) : gland (amer, tanins) ou noisette. Le carnet note un écureuil qui enterre, et un qui retrouve.
 - Le modèle est légèrement agrandi (×1,4) pour être vu de la caméra haute.
 - Sauvegarde : version 4.
+
+## 2026-10-07 — Le sol se voit ; les sons de la harde
+- **Sol visible** : toutes les 10 s de jeu, chaque colonne de sol (herbe, litière, herbe sèche, terre) est comparée à sa parcelle. Une parcelle tombée sous 60 % de sa couverture de départ montre de la terre nue, d'autant plus qu'elle est dénudée (choix de colonnes par hachage). Le monde change vraiment (`World::set_surface`, sauvegardé) ; seules les colonnes mises à nu par le jeu reverdissent ensuite (la terre nue d'origine n'est jamais touchée). Côté rendu, seul le champ de matériaux est renvoyé au GPU (pas de remaillage).
+- **L'anneau du rituel** suit la harde : foulé tant que le rituel est tenu, repris par l'herbe, cellule après cellule, au cours de la troisième lune sans rituel.
+- **Sons** : aboiement (un éclat de bruit filtré et une fondamentale qui tombe), coup de sabot (un choc grave), brame (2,2 s, dents de scie glissant de 160 à 90 Hz, résonance de gorge, grain rauque). Portée : 50, 20 et 100 cases. Écoutables avec `--sound-demo DIR`.
+- Sauvegarde : version 5.

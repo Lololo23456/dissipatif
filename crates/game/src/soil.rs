@@ -100,6 +100,8 @@ pub struct Soil {
     /// What the soil offered at the start: the generated world is at its balance, and what
     /// the plants get is measured against it.
     reference: Vec<f32>,
+    /// The plant cover at the start: a patch is bare when it has lost most of it.
+    cover_start: Vec<f32>,
 }
 
 impl Soil {
@@ -127,6 +129,7 @@ impl Soil {
             cover: vec![0.0; px * pz],
             forage: vec![0.0; px * pz],
             reference: vec![1.0; px * pz],
+            cover_start: vec![0.0; px * pz],
             rain,
         }
     }
@@ -136,6 +139,7 @@ impl Soil {
         w.put(&self.water);
         w.put(&self.humus);
         w.put(&self.reference);
+        w.put(&self.cover_start);
     }
 
     /// Reads back what `save` wrote, over a soil built for the same world.
@@ -147,6 +151,11 @@ impl Soil {
             return Err("sol de taille différente".into());
         }
         (self.water, self.humus, self.reference) = (water, humus, reference);
+        let cover_start: Vec<f32> = r.get()?;
+        if cover_start.len() != n {
+            return Err("sol de taille différente".into());
+        }
+        self.cover_start = cover_start;
         Ok(())
     }
 
@@ -180,6 +189,7 @@ impl Soil {
             self.water[k] = water_target(self.rain[k], self.cover[k]);
             self.humus[k] = humus_target(self.cover[k]);
             self.reference[k] = offer(self.water[k], self.humus[k], self.rain[k]).max(0.05);
+            self.cover_start[k] = self.cover[k];
         }
     }
 
@@ -236,6 +246,16 @@ impl Soil {
         if let Some(k) = self.patch(at) {
             self.humus[k] = (self.humus[k] + amount).min(1.2);
         }
+    }
+
+    /// How bare patch `k` has grown, 0 (as at the start) to 1 (stripped): it shows from
+    /// below 60 % of its starting cover.
+    pub fn bareness(&self, k: usize) -> f32 {
+        let start = self.cover_start[k];
+        if start < 0.1 {
+            return 0.0;
+        }
+        (1.0 - self.cover[k] / start / 0.6).clamp(0.0, 1.0)
     }
 
     pub fn cover(&self, k: usize) -> f32 {

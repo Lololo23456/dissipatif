@@ -528,6 +528,31 @@ impl App {
             }
             Event::Ate { matter, .. } => format!("Vous mangez : {}", matter.name()),
             Event::Drank { .. } => "Vous buvez quelques gorgées.".to_owned(),
+            Event::Call { call, at } => {
+                // Heard as far as it carries, softer with distance, on its side.
+                let reach = match call {
+                    sound::AnimalCall::Bark => 50.0,
+                    sound::AnimalCall::Stamp => 20.0,
+                    sound::AnimalCall::Bell => 100.0,
+                };
+                let feet = self.state.body(self.me).position;
+                let offset = at - glam::Vec2::new(feet.x, feet.z);
+                let loudness = (1.0 - offset.length() / reach).clamp(0.0, 1.0).powi(2);
+                let right = glam::Vec2::new(self.camera.yaw.cos(), -self.camera.yaw.sin());
+                let pan = (offset.normalize_or_zero().dot(right)).clamp(-1.0, 1.0) * 0.8;
+                if loudness > 0.0
+                    && let Some(audio) = &self.audio
+                {
+                    audio.shared.cry(call, loudness, pan);
+                }
+                return;
+            }
+            Event::Ground { x, z, material } => {
+                if let Some(cell) = self.world.set_surface(x, z, material) {
+                    self.data.surface_changed(&self.world, cell);
+                }
+                return;
+            }
             Event::Dig { at } => {
                 if let Some(dug) = self.world.dig(at.x, at.y) {
                     self.dug_cells.push((dug.cell, dug.flooded));

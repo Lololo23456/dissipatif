@@ -184,6 +184,17 @@ pub enum Event {
     Dig {
         at: Vec2,
     },
+    /// An animal called (a deer barked, stamped, a stag belled), there.
+    Call {
+        call: crate::sound::AnimalCall,
+        at: Vec2,
+    },
+    /// The surface of a column changed: worn to bare earth, or grown over again.
+    Ground {
+        x: usize,
+        z: usize,
+        material: Material,
+    },
     /// Physics changed an object (fired, burst, burnt to ash).
     Changed {
         from: Matter,
@@ -277,6 +288,10 @@ pub struct GameState {
     /// The squirrels and their caches.
     squirrels: Option<crate::squirrels::Squirrels>,
     squirrel_events: Vec<crate::squirrels::SquirrelEvent>,
+    /// Columns the game laid bare (worn, grazed out, burnt): they may grow over again.
+    bared: std::collections::HashSet<(usize, usize)>,
+    /// Game seconds until the ground is looked over again.
+    ground_in: f32,
     herd_events: Vec<HerdEvent>,
     /// The notebook lying on the ground, until someone picks it up.
     notebook_lying: Option<Vec3>,
@@ -316,6 +331,8 @@ impl GameState {
             herd: None,
             squirrels: None,
             squirrel_events: Vec::new(),
+            bared: std::collections::HashSet::new(),
+            ground_in: 0.0,
             herd_events: Vec::new(),
             notebook_lying: None,
             now: Conditions {
@@ -342,6 +359,9 @@ impl GameState {
         w.put(&self.rng);
         w.put(&self.herd);
         w.put(&self.squirrels);
+        let mut bared: Vec<(usize, usize)> = self.bared.iter().copied().collect();
+        bared.sort();
+        w.put(&bared);
         w.put(&self.notebook_lying);
         w.put(&self.now);
     }
@@ -365,6 +385,7 @@ impl GameState {
         state.rng = r.get()?;
         state.herd = r.get()?;
         state.squirrels = r.get()?;
+        state.bared = r.get::<Vec<(usize, usize)>>()?.into_iter().collect();
         state.notebook_lying = r.get()?;
         state.now = r.get()?;
         // What is rebuilt rather than saved: what can be picked, and the stones in the way.
@@ -1393,6 +1414,70 @@ impl GameState {
         }
         self.step_deer(world, now);
         self.step_squirrels(world, now);
+        self.ground_in -= STEP * self.time_scale;
+        if self.ground_in <= 0.0 {
+            self.ground_in = GROUND_EVERY;
+            self.step_ground(world, now);
+        }
+    }
+
+    /// The ground shows the state of the soil: a patch stripped of its plants shows bare
+    /// earth, which grows over again as the plants come back; the circle of the rite stays
+    /// trodden while the rite is kept, and grows over when it is not.
+    fn step_ground(&mut self, world: &World, now: &Conditions) {
+        let dims = world.dims();
+        let seed = world.config.seed;
+        let mut ring_columns = std::collections::HashMap::new();
+        if let Some(herd) = &self.herd {
+            // Unkept for two moons, the circle grows over in a third, cell after cell.
+            let unkept = ((now.days - herd.last_rite) as f32 - 2.0 * crate::clock::LUNAR_DAYS)
+                / crate::clock::LUNAR_DAYS;
+            let trodden = 0.8 * (1.0 - unkept.clamp(0.0, 1.0));
+            for (x, z, wear) in deer::ring_cells(herd.ring, seed) {
+                ring_columns.insert((x, z), wear < trodden);
+            }
+        }
+        let soil = self.ecology.soil();
+        for z in 0..dims.nz {
+            for x in 0..dims.nx {
+                let surface = world.surface(x, z);
+                if !matches!(
+                    surface,
+                    Material::Grass | Material::ForestFloor | Material::DryGrass | Material::Dirt
+                ) {
+                    continue;
+                }
+                let natural = world.biome(x, z).surface();
+                let target = if let Some(&worn) = ring_columns.get(&(x, z)) {
+                    if worn {
+                        Material::Dirt
+                    } else {
+                        Material::Grass
+                    }
+                } else {
+                    let Some(k) = soil.patch(Vec2::new(x as f32 + 0.5, z as f32 + 0.5)) else {
+                        continue;
+                    };
+                    let bare = world::noise::hash_unit(seed ^ 0xba7e, &[x as i64, z as i64])
+                        < soil.bareness(k);
+                    if bare && surface == natural {
+                        self.bared.insert((x, z));
+                        Material::Dirt
+                    } else if !bare && self.bared.remove(&(x, z)) {
+                        natural
+                    } else {
+                        continue;
+                    }
+                };
+                if target != surface {
+                    self.events.push(Event::Ground {
+                        x,
+                        z,
+                        material: target,
+                    });
+                }
+            }
+        }
     }
 
     /// The squirrels hoard, dig up and lose their nuts; what they lose goes to the soil.
@@ -1468,6 +1553,18 @@ impl GameState {
             herd.update(STEP, world, now, &observers, &fires, &mut self.herd_events);
         }
 
+        // What the herd makes heard.
+        for &event in &self.herd_events {
+            let call = match event {
+                HerdEvent::Alarm { at, .. } => Some((crate::sound::AnimalCall::Bark, at)),
+                HerdEvent::Stamp { at } => Some((crate::sound::AnimalCall::Stamp, at)),
+                HerdEvent::Bell { at } => Some((crate::sound::AnimalCall::Bell, at)),
+                _ => None,
+            };
+            if let Some((call, at)) = call {
+                self.events.push(Event::Call { call, at });
+            }
+        }
         // Shed antlers lie in the wood until someone finds them.
         for &event in &self.herd_events {
             if let HerdEvent::AntlerShed { at } = event {
@@ -1498,11 +1595,13 @@ impl GameState {
                     HerdEvent::Born => Entry::Calf,
                     HerdEvent::Starved => Entry::Starved,
                     // The bell carries far.
-                    HerdEvent::Bell if nearest < 70.0 => {
+                    HerdEvent::Bell { .. } if nearest < 70.0 => {
                         entries.push(Entry::Bell);
                         continue;
                     }
-                    HerdEvent::Bell | HerdEvent::AntlerShed { .. } => continue,
+                    HerdEvent::Bell { .. }
+                    | HerdEvent::AntlerShed { .. }
+                    | HerdEvent::Stamp { .. } => continue,
                 };
                 if nearest < 35.0 {
                     entries.push(entry);
@@ -1588,6 +1687,9 @@ fn choose_pasture(world: &World, ecology: &Ecology, herd: &mut Herd) {
         herd.set_pasture(soil.centre(best));
     }
 }
+
+/// Game seconds between two looks at the ground (bare or grown over).
+const GROUND_EVERY: f32 = 10.0;
 
 /// How close to the hands a buried nut can be found by digging.
 const CACHE_REACH: f32 = 0.9;
@@ -2227,5 +2329,49 @@ mod tests {
         };
         assert_eq!(pages(&state), pages(&loaded));
         assert!(world.state().blocks == again.state().blocks);
+    }
+
+    /// The circle of the rite grows over when the rite is no longer kept, and is trodden
+    /// bare again when it is.
+    #[test]
+    fn an_unkept_circle_grows_over() {
+        let mut world = World::generate(WorldConfig::standard(1));
+        let spawn = crate::player::spawn_point(&world);
+        let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
+        deer::wear_ring(&mut world, ring, 1);
+        let mut state = GameState::new(&world);
+        state.add_herd(Herd::new(ring, cover, &world, 7));
+        let mut now = Conditions::noon();
+        let apply = |state: &mut GameState, world: &mut World, now: &Conditions| {
+            state.step_ground(world, now);
+            let mut changed = 0;
+            for event in state.drain_events().collect::<Vec<_>>() {
+                if let Event::Ground { x, z, material } = event
+                    && deer::ring_cells(ring, world.config.seed)
+                        .iter()
+                        .any(|c| (c.0, c.1) == (x, z))
+                    && world.set_surface(x, z, material).is_some()
+                {
+                    changed += 1;
+                }
+            }
+            changed
+        };
+        let dirt = |world: &World| {
+            deer::ring_cells(ring, world.config.seed)
+                .iter()
+                .filter(|c| world.surface(c.0, c.1) == Material::Dirt)
+                .count()
+        };
+        let worn = dirt(&world);
+        assert!(worn > 10, "{worn}");
+        // Three moons without the rite: grown over.
+        now.days = 3.5 * crate::clock::LUNAR_DAYS as f64;
+        apply(&mut state, &mut world, &now);
+        assert_eq!(dirt(&world), 0);
+        // The rite kept again: trodden bare.
+        state.herd.as_mut().expect("herd").last_rite = now.days;
+        apply(&mut state, &mut world, &now);
+        assert_eq!(dirt(&world), worn);
     }
 }

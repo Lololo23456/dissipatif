@@ -132,6 +132,8 @@ pub struct SceneData {
     model_ids: Vec<ModelId>,
     /// Model groups whose instances changed since the last upload.
     dirty: Vec<bool>,
+    /// The ground's look changed since it was last uploaded.
+    look_dirty: bool,
     /// No overlays yet: zero fields with the shapes of the textures above.
     no_overlay_solid: Field3,
     no_overlay_water: Field3,
@@ -218,6 +220,7 @@ impl SceneData {
             slots,
             model_ids: Vec::new(),
             dirty: vec![false; groups],
+            look_dirty: false,
             no_overlay_solid: Field3::filled(dims, 0.0),
             no_overlay_water: Field3::filled(columns, 0.0),
             water_id: None,
@@ -410,7 +413,24 @@ impl SceneData {
     }
 
     /// Sends the model groups that changed to the renderer.
+    /// The material of a ground cell changed (grass worn to earth, earth grown over): its
+    /// look follows, uploaded with the next changes.
+    pub fn surface_changed(&mut self, world: &World, cell: [usize; 3]) {
+        let [x, y, z] = cell;
+        let dims = world.dims();
+        let i = dims.index(x, y, z);
+        let variation = self.solid_look.data[i].fract();
+        self.solid_look.data[i] = world.block(x, y, z).id() as f32 + variation;
+        self.look_dirty = true;
+    }
+
     pub fn upload_changes(&mut self, renderer: &mut Renderer) {
+        if self.look_dirty
+            && let Some(id) = self.solid_id
+        {
+            renderer.upload_base(id, &self.solid_look);
+            self.look_dirty = false;
+        }
         for (group, dirty) in self.dirty.iter_mut().enumerate() {
             if *dirty && let Some(&id) = self.model_ids.get(group) {
                 renderer.set_model_instances(id, &self.plant_models[group].1);

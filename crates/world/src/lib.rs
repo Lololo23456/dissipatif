@@ -274,6 +274,43 @@ impl World {
         Ok(())
     }
 
+    /// The material of the surface of column (x, z) (the top ground cell).
+    pub fn surface(&self, x: usize, z: usize) -> Material {
+        let top = self.ground_top(x, z);
+        if top == 0 {
+            return Material::Air;
+        }
+        self.block(x, top - 1, z)
+    }
+
+    /// Changes the surface of column (x, z) between soil materials (grass, forest floor, dry
+    /// grass, bare earth): what grows or has worn away. Returns the cell changed, if it did.
+    pub fn set_surface(&mut self, x: usize, z: usize, material: Material) -> Option<[usize; 3]> {
+        let dims = self.dims();
+        if x >= dims.nx || z >= dims.nz {
+            return None;
+        }
+        let top = self.ground_top(x, z);
+        if top == 0 {
+            return None;
+        }
+        let i = dims.index(x, top - 1, z);
+        let soil = |m: Option<Material>| {
+            matches!(
+                m,
+                Some(Material::Grass | Material::ForestFloor | Material::DryGrass | Material::Dirt)
+            )
+        };
+        if !soil(Material::from_id(self.blocks[i])) || !soil(Some(material)) {
+            return None;
+        }
+        if self.blocks[i] == material.id() {
+            return None;
+        }
+        self.blocks[i] = material.id();
+        Some([x, top - 1, z])
+    }
+
     /// Wears the ground of column (x, z) bare, as a path trodden for years: grass and forest
     /// floor turn to earth and the ground cover growing there is gone. Meant right after
     /// generation, before the world is shown or lived in (plant indices shift).

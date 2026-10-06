@@ -8,6 +8,9 @@
 //! - Birds by day (a dawn chorus), crickets at night: tones with a few harmonics, glides and
 //!   trills, started at random moments (a Poisson process: constant chance per instant).
 //! - Footsteps: two bursts of noise (heel, then toe) shaped by the ground.
+//! - Animal calls: a deer's alarm bark (a harsh burst), the thump of a stamping hoof, the
+//!   stag's bell in the rut (a long roar gliding down, rich in harmonics, with a throat
+//!   resonance and a rough grain).
 //!
 //! Left and right use independent noise, so the beds of sound are wide instead of sitting
 //! inside the head; birds, crickets and steps go through a small reverb (echoes of a place).
@@ -28,6 +31,15 @@ pub enum Surface {
     Water = 3,
 }
 
+/// An animal call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AnimalCall {
+    Bark = 0,
+    Stamp = 1,
+    Bell = 2,
+}
+
 /// The scene as heard, written by the game, read by the audio thread. Values are f32 stored
 /// as bits.
 #[derive(Default)]
@@ -42,6 +54,11 @@ pub struct Shared {
     steps: AtomicU32,
     step_surface: AtomicU32,
     step_strength: AtomicU32,
+    /// Incremented at every animal call, with its kind, loudness and place.
+    cries: AtomicU32,
+    cry_kind: AtomicU32,
+    cry_loudness: AtomicU32,
+    cry_pan: AtomicU32,
 }
 
 /// Levels of the ambient sounds, each in [0, 1].
@@ -71,6 +88,14 @@ impl Shared {
         store(&self.birds, scene.birds);
         store(&self.crickets, scene.crickets);
         store(&self.rain, scene.rain);
+    }
+
+    /// An animal call, `loudness` in [0, 1] (by its distance), `pan` −1 (left) to 1 (right).
+    pub fn cry(&self, call: AnimalCall, loudness: f32, pan: f32) {
+        self.cry_kind.store(call as u32, Ordering::Relaxed);
+        store(&self.cry_loudness, loudness);
+        store(&self.cry_pan, pan);
+        self.cries.fetch_add(1, Ordering::Release);
     }
 
     /// A footstep on `surface`, `strength` 0.3 (walking softly) to 1 (running).
@@ -324,6 +349,20 @@ struct Step {
     phase: f32,
 }
 
+/// An animal call being played.
+#[derive(Clone, Copy, Default)]
+struct Cry {
+    active: bool,
+    t: f32,
+    kind: u32,
+    loudness: f32,
+    pan: f32,
+    phase: f32,
+    low: f32,
+    band_low: f32,
+    band: f32,
+}
+
 /// A bubble in running water: a short tone rising in pitch.
 #[derive(Clone, Copy, Default)]
 struct Bubble {
@@ -338,6 +377,7 @@ struct Bubble {
 
 const CALLS: usize = 4;
 const STEPS: usize = 4;
+const CRIES: usize = 4;
 const BUBBLES: usize = 6;
 /// Crickets, each with its own pitch, rhythm and place.
 const CRICKETS: [(f32, f32, f32); 3] = [
@@ -368,6 +408,8 @@ pub struct Soundscape {
     cricket_phase: [f32; 3],
     cricket_time: [f32; 3],
     footsteps: [Step; STEPS],
+    cries_heard: u32,
+    cries: [Cry; CRIES],
 }
 
 impl Soundscape {
@@ -393,6 +435,8 @@ impl Soundscape {
             cricket_phase: [0.0; 3],
             cricket_time: [0.0, 0.21, 0.37],
             footsteps: [Step::default(); STEPS],
+            cries_heard: 0,
+            cries: [Cry::default(); CRIES],
         }
     }
 
@@ -402,6 +446,7 @@ impl Soundscape {
         let channels = channels.max(1);
         let scene = self.shared.scene();
         self.start_steps();
+        self.start_cries();
         // Random events are drawn once per buffer: their chance scales with its duration.
         let frames = out.len() / channels;
         let seconds = frames as f32 / self.rate;
@@ -432,6 +477,25 @@ impl Soundscape {
                     surface,
                     strength,
                     ..Step::default()
+                };
+            }
+        }
+    }
+
+    fn start_cries(&mut self) {
+        let count = self.shared.cries.load(Ordering::Acquire);
+        while self.cries_heard != count {
+            self.cries_heard = self.cries_heard.wrapping_add(1);
+            let kind = self.shared.cry_kind.load(Ordering::Relaxed);
+            let loudness = load(&self.shared.cry_loudness);
+            let pan = load(&self.shared.cry_pan);
+            if let Some(slot) = self.cries.iter_mut().find(|c| !c.active) {
+                *slot = Cry {
+                    active: true,
+                    kind,
+                    loudness,
+                    pan,
+                    ..Cry::default()
                 };
             }
         }
@@ -630,6 +694,66 @@ impl Soundscape {
             place(v * 0.35 * s.strength, 0.0, &mut left, &mut right);
         }
 
+        for c in &mut self.cries {
+            if !c.active {
+                continue;
+            }
+            c.t += dt;
+            let n = self.noise.next();
+            let v = match c.kind {
+                // Bark: a harsh burst, a quarter of a second.
+                0 => {
+                    let length = 0.25;
+                    if c.t > length {
+                        c.active = false;
+                        continue;
+                    }
+                    let k = c.t / length;
+                    let envelope = (k * 40.0).min(1.0) * (1.0 - k).powi(3);
+                    c.phase = (c.phase + (380.0 - 120.0 * k) * dt).fract();
+                    let f = 2.0 * (PI * 750.0 / self.rate).sin();
+                    c.band_low += f * c.band;
+                    let high = n - c.band_low - 0.5 * c.band;
+                    c.band += f * high;
+                    (0.5 * c.band + 0.5 * (c.phase * TAU).sin()) * envelope * 0.5
+                }
+                // Stamp: a dull thump.
+                1 => {
+                    let length = 0.15;
+                    if c.t > length {
+                        c.active = false;
+                        continue;
+                    }
+                    let k = c.t / length;
+                    c.phase = (c.phase + (90.0 - 40.0 * k) * dt).fract();
+                    c.low += coefficient(500.0, self.rate) * (n - c.low);
+                    ((c.phase * TAU).sin() * 0.8 + c.low * 0.5) * (1.0 - k).powi(4) * 0.6
+                }
+                // Bell: a long roar gliding down, harmonics, a throat resonance, a rough grain.
+                _ => {
+                    let length = 2.2;
+                    if c.t > length {
+                        c.active = false;
+                        continue;
+                    }
+                    let k = c.t / length;
+                    let swell = (k * 6.0).min(1.0) * (1.0 - k).powf(0.7);
+                    let pitch = 160.0 - 70.0 * k + 6.0 * (c.t * 9.0).sin();
+                    c.phase = (c.phase + pitch * dt).fract();
+                    // A sawtooth (all harmonics), roughened by noise.
+                    let saw = 2.0 * c.phase - 1.0 + 0.3 * n;
+                    let f = 2.0 * (PI * 480.0 / self.rate).sin();
+                    c.band_low += f * c.band;
+                    let high = saw - c.band_low - 0.7 * c.band;
+                    c.band += f * high;
+                    c.low += coefficient(900.0, self.rate) * (saw - c.low);
+                    (0.6 * c.band + 0.4 * c.low) * swell * 0.35
+                }
+            };
+            let v = v * c.loudness;
+            place(v, c.pan, &mut left, &mut right);
+        }
+
         left += self.reverbs[0].run(send[0]);
         right += self.reverbs[1].run(send[1]);
         // Gentle limiter: never clips, however many sounds add up.
@@ -766,7 +890,30 @@ pub fn demo(dir: &std::path::Path) -> std::io::Result<Vec<String>> {
         write_wav(&path, &samples, rate)?;
         written.push(path.display().to_string());
     }
+    for (name, call) in [
+        ("10-cerf-aboiement", AnimalCall::Bark),
+        ("11-cerf-sabot", AnimalCall::Stamp),
+        ("12-cerf-brame", AnimalCall::Bell),
+    ] {
+        let samples = render_call(call, 3.0, rate as f32);
+        let path = dir.join(format!("{name}.wav"));
+        write_wav(&path, &samples, rate)?;
+        written.push(path.display().to_string());
+    }
     Ok(written)
+}
+
+/// Renders `seconds` of silence with one animal call at its start, close and centred.
+pub fn render_call(call: AnimalCall, seconds: f32, rate: f32) -> Vec<f32> {
+    let shared = Arc::new(Shared::default());
+    shared.set_scene(&Scene::default());
+    shared.cry(call, 1.0, 0.0);
+    let mut sound = Soundscape::new(rate, shared, 7);
+    let mut out = vec![0.0; (seconds * rate) as usize * 2];
+    for chunk in out.chunks_mut(1024) {
+        sound.fill(chunk, 2);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -828,5 +975,27 @@ mod tests {
         ));
         assert!(steps > quiet * 3.0, "{quiet} → {steps}");
         assert!(steps < 0.3, "steps too loud: {steps}");
+    }
+
+    #[test]
+    fn deer_calls_are_heard_and_end() {
+        let rate = 48_000.0;
+        for (call, length) in [
+            (AnimalCall::Bark, 0.25),
+            (AnimalCall::Stamp, 0.15),
+            (AnimalCall::Bell, 2.2),
+        ] {
+            let samples = render_call(call, 3.0, rate);
+            assert!(samples.iter().all(|s| s.is_finite()));
+            let window = |from: f32, to: f32| {
+                let (a, b) = ((from * rate) as usize * 2, (to * rate) as usize * 2);
+                (samples[a..b].iter().map(|s| s * s).sum::<f32>() / (b - a) as f32).sqrt()
+            };
+            let during = window(0.0, length);
+            assert!(during > 0.01, "{call:?} too quiet: {during}");
+            // After it, only the reverb's tail fading.
+            let after = window(length + 0.6, length + 0.8);
+            assert!(after < during * 0.3, "{call:?}: {during} then {after}");
+        }
     }
 }

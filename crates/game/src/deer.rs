@@ -94,7 +94,9 @@ pub enum Cause {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HerdEvent {
     /// A deer stamped and barked: it sensed the naturalist without making them out.
-    Alarm { cause: Cause },
+    Alarm { cause: Cause, at: Vec2 },
+    /// A hoof struck the ground (in alarm, or in the rite).
+    Stamp { at: Vec2 },
     /// The herd fled.
     Fled { cause: Cause },
     /// A calf was born (the herd is well fed).
@@ -102,7 +104,7 @@ pub enum HerdEvent {
     /// A deer starved.
     Starved,
     /// The stag bells (the rut, in autumn).
-    Bell,
+    Bell { at: Vec2 },
     /// A stag shed an antler there (the end of winter).
     AntlerShed { at: Vec2 },
 }
@@ -241,6 +243,8 @@ pub struct Herd {
     bell_in: f32,
     /// The last year (count since the start) antlers were shed.
     shed_year: i64,
+    /// When the rite was last kept (days): the circle stays trodden while it is.
+    pub last_rite: f64,
 }
 
 /// Lit share of the moon at a phase (0 new, 0.5 full).
@@ -319,6 +323,7 @@ impl Herd {
             stag: None,
             bell_in: BELL_EVERY,
             shed_year: -1,
+            last_rite: 0.0,
         }
     }
 
@@ -498,7 +503,9 @@ impl Herd {
                 if self.bell_in <= 0.0 {
                     self.bell_in = BELL_EVERY * (0.7 + 0.6 * self.rng.next_f32());
                     stag.stamp = 0.0;
-                    events.push(HerdEvent::Bell);
+                    events.push(HerdEvent::Bell {
+                        at: Vec2::new(stag.position.x, stag.position.z),
+                    });
                 }
                 // Belling: the head raised for three seconds.
                 let belling = self.bell_in > BELL_EVERY * 0.7 - 3.0;
@@ -630,6 +637,7 @@ impl Herd {
                             && (beat as usize) % n == i
                         {
                             d.stamp = 0.6;
+                            events.push(HerdEvent::Stamp { at: here });
                         }
                         circle(here, slot)
                     }
@@ -670,6 +678,9 @@ impl Herd {
                 let to = at - here;
                 turn_towards(d, to.x.atan2(to.y), dt);
             }
+        }
+        if self.glow > 0.5 {
+            self.last_rite = now.days;
         }
         // The rite gathers while (nearly) all walk their places.
         let gathering = mode == Mode::Ritual && self.flight.is_none() && in_place + 1 >= n;
@@ -769,6 +780,7 @@ impl Herd {
                 d.stamp = 0.6;
                 events.push(HerdEvent::Alarm {
                     cause: d.noticed.map_or(strongest.1, |n| n.1),
+                    at: here,
                 });
             }
             if d.suspicion >= FLEE && alarm.is_none() {
@@ -1051,20 +1063,30 @@ fn meadow(world: &World, start: Vec2, open: impl Fn(usize, usize) -> bool) -> Op
 /// The circle worn into the meadow by years of the rite: a ring of bare, trodden earth, not
 /// quite closed (grass still holds here and there). A clue, seen from afar.
 pub fn wear_ring(world: &mut World, ring: Vec2, seed: u64) {
-    let mut rng = SplitMix64::new(seed ^ 0x51ce);
-    let r = RING_RADIUS.ceil() as i64 + 1;
-    for dz in -r..=r {
-        for dx in -r..=r {
-            let at = Vec2::new(
-                (ring.x.floor() as i64 + dx) as f32 + 0.5,
-                (ring.y.floor() as i64 + dz) as f32 + 0.5,
-            );
-            let off = (at.distance(ring) - RING_RADIUS).abs();
-            if off < 0.6 && rng.next_f32() < 0.8 {
-                world.wear(at.x as usize, at.y as usize);
-            }
+    for (x, z, wear) in ring_cells(ring, seed) {
+        if wear < 0.8 {
+            world.wear(x, z);
         }
     }
+}
+
+/// The columns of the circle, each with its own number in [0, 1): those below 0.8 are worn
+/// when the rite is kept (grass holds in the others); they grow over in turn when it is not.
+pub fn ring_cells(ring: Vec2, seed: u64) -> Vec<(usize, usize, f32)> {
+    let r = RING_RADIUS.ceil() as i64 + 1;
+    let mut cells = Vec::new();
+    for dz in -r..=r {
+        for dx in -r..=r {
+            let (x, z) = (ring.x.floor() as i64 + dx, ring.y.floor() as i64 + dz);
+            let at = Vec2::new(x as f32 + 0.5, z as f32 + 0.5);
+            if x < 0 || z < 0 || (at.distance(ring) - RING_RADIUS).abs() >= 0.6 {
+                continue;
+            }
+            let wear = world::noise::hash_unit(seed ^ 0x51ce, &[x, z]);
+            cells.push((x as usize, z as usize, wear));
+        }
+    }
+    cells
 }
 
 crate::save::persist_enum!(Cause {
@@ -1115,6 +1137,7 @@ impl crate::save::Persist for Herd {
         w.put(&self.rite);
         w.put(&self.pasture);
         w.put(&self.shed_year);
+        w.put(&self.last_rite);
     }
     fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
         Ok(Self {
@@ -1133,6 +1156,7 @@ impl crate::save::Persist for Herd {
             pasture: r.get()?,
             grazing: Vec::new(),
             shed_year: r.get()?,
+            last_rite: r.get()?,
         })
     }
 }
@@ -1380,7 +1404,7 @@ mod tests {
                 .iter()
                 .all(|&s| s == crate::season::Season::Autumn)
         );
-        assert!(events.contains(&HerdEvent::Bell));
+        assert!(events.iter().any(|e| matches!(e, HerdEvent::Bell { .. })));
         assert_eq!(
             events
                 .iter()
