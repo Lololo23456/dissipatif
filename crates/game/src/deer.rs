@@ -50,10 +50,21 @@ const FLEE: f32 = 1.0;
 const WARY_DAYS: f64 = 0.15;
 /// Radius of the circle they walk, in cells.
 pub const RING_RADIUS: f32 = 3.5;
-/// One turn of the circle takes this long, in seconds.
-const RING_TURN: f32 = 55.0;
-/// Seconds for the ritual to gather fully once the herd walks its circle.
-const GATHERING: f32 = 20.0;
+/// The rite, the night of the full moon: the herd gathers on its circle from 21 h 20; the
+/// incantation itself begins at 22 h and lasts 1.2 game hours (a minute of play).
+const GATHER_HOUR: f32 = 21.3;
+pub const RITE_HOUR: f32 = 22.0;
+pub const RITE_HOURS: f32 = 1.2;
+/// One turn of the circle, in seconds (the procession, and the lone hind's foretelling).
+const RING_TURN: f32 = 40.0;
+/// Seconds for the light of the rite to gather once all stand in their places.
+const GATHERING: f32 = 8.0;
+/// The incantation's movements, as shares of it: gathered and still, bowing together (a stamp
+/// running round the circle), the procession, heads raised to the moon, the end.
+const BOWING: f32 = 0.12;
+const PROCESSION: f32 = 0.45;
+const TO_THE_MOON: f32 = 0.8;
+const ENDING: f32 = 0.97;
 
 /// What a deer is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +166,8 @@ pub struct Herd {
     turn: f32,
     /// How far the ritual has gathered, 0 to 1.
     pub glow: f32,
+    /// How far into the incantation, while it lasts (0 to 1).
+    pub rite: Option<f32>,
 }
 
 /// Lit share of the moon at a phase (0 new, 0.5 full).
@@ -167,9 +180,32 @@ pub fn daylight(hour: f32) -> f32 {
     1.0 - render::sky::sky(hour).night
 }
 
-/// The full moon's night: from 21 h 30 to 1 h 30 when the moon is (nearly) full.
+/// The full moon's night, from the gathering to the end of the incantation.
 pub fn ritual_time(now: &Conditions) -> bool {
-    moonlight(now.moon) >= 0.93 && (now.hour >= 21.5 || now.hour < 1.5)
+    moonlight(now.moon) >= 0.93 && (GATHER_HOUR..RITE_HOUR + RITE_HOURS).contains(&now.hour)
+}
+
+/// How far into the incantation (0 to 1), while it lasts.
+pub fn rite_progress(now: &Conditions) -> Option<f32> {
+    let u = (now.hour - RITE_HOUR) / RITE_HOURS;
+    (moonlight(now.moon) >= 0.93 && (0.0..1.0).contains(&u)).then_some(u)
+}
+
+/// Head carriage of the deer during the incantation at `u` (share), `seconds` into it.
+fn incantation_head(u: f32, seconds: f32) -> f32 {
+    if u < BOWING {
+        0.4
+    } else if u < PROCESSION {
+        // Bowing together, slowly, every four seconds.
+        let bow = 0.5 - 0.5 * (std::f32::consts::TAU * seconds / 4.0).cos();
+        0.4 - 1.3 * bow
+    } else if u < TO_THE_MOON {
+        0.8
+    } else if u < ENDING {
+        1.7
+    } else {
+        0.8
+    }
 }
 
 /// The nights before and after: a gibbous moon, around midnight.
@@ -218,6 +254,7 @@ impl Herd {
             refuge: cover,
             turn: 0.0,
             glow: 0.0,
+            rite: None,
         }
     }
 
@@ -271,7 +308,19 @@ impl Herd {
     ) {
         self.sense(dt, now, observers, fires, events);
         let mode = self.mode(now);
-        self.turn = (self.turn + dt * std::f32::consts::TAU / RING_TURN) % std::f32::consts::TAU;
+        let rite = rite_progress(now).filter(|_| mode == Mode::Ritual);
+        self.rite = rite;
+        let seconds = rite.map_or(0.0, |u| u * RITE_HOURS * crate::clock::DAY_SECONDS / 24.0);
+        // The circle turns in the procession (and for the lone hind); otherwise they stand.
+        let turning = match mode {
+            Mode::Foretelling => true,
+            Mode::Ritual => rite.is_some_and(|u| (PROCESSION..TO_THE_MOON).contains(&u)),
+            _ => false,
+        };
+        if turning {
+            self.turn =
+                (self.turn + dt * std::f32::consts::TAU / RING_TURN) % std::f32::consts::TAU;
+        }
         let n = self.deer.len();
         // Fleeing: everyone away from the source, then a stop to look back.
         if let Some((from, left, cause)) = self.flight {
@@ -351,6 +400,15 @@ impl Herd {
                         if here.distance(slot) < 0.8 {
                             in_place += 1;
                         }
+                        // A stamp runs round the circle while they bow, one hind after the
+                        // other, two beats a second.
+                        let beat = seconds * 2.0;
+                        if rite.is_some_and(|u| (BOWING..PROCESSION).contains(&u))
+                            && beat.fract() < dt * 2.0
+                            && (beat as usize) % n == i
+                        {
+                            d.stamp = 0.6;
+                        }
                         circle(here, slot)
                     }
                 }
@@ -367,14 +425,22 @@ impl Herd {
                 Activity::Grazing if d.scanning > 0.0 => 0.8,
                 Activity::Grazing => -1.0,
                 Activity::Vigilant | Activity::Alarmed => 1.0,
-                Activity::Circling if mode == Mode::Ritual && self.glow > 0.5 => {
-                    let pause = (self.turn / std::f32::consts::TAU * 4.0).fract() > 0.8;
-                    if pause { 1.6 } else { 0.2 }
+                Activity::Circling if mode == Mode::Ritual => {
+                    rite.map_or(0.3, |u| incantation_head(u, seconds))
                 }
                 Activity::Fleeing => 0.6,
                 _ => 0.0,
             };
             d.head += (head - d.head) * (1.0 - (-dt * 4.0).exp());
+            // In its place on the circle, standing still: facing the centre.
+            if activity == Activity::Circling
+                && mode == Mode::Ritual
+                && !turning
+                && here.distance(slot) < 0.8
+            {
+                let to = self.ring - here;
+                turn_towards(d, to.x.atan2(to.y), dt);
+            }
             // Facing what it noticed.
             if matches!(activity, Activity::Vigilant | Activity::Alarmed)
                 && let Some((at, _)) = d.noticed
@@ -515,6 +581,18 @@ impl Herd {
 /// The naturalist's walking speed (cells per second): movement is judged against it.
 const WALK_SPEED_PERSON: f32 = 3.2;
 
+/// Ground covered by one full stride (all four feet), in cells, at `speed`: longer strides as
+/// the gait quickens.
+pub fn stride_length(speed: f32, size: f32) -> f32 {
+    size * if speed > 5.5 {
+        3.6
+    } else if speed > 2.2 {
+        2.2
+    } else {
+        1.3
+    }
+}
+
 /// Where deer `i` lies, around a resting place.
 fn rest_offset(i: usize) -> Vec2 {
     let angle = i as f32 * 2.4;
@@ -553,10 +631,11 @@ fn graze(
 /// Walking the circle: to its place on the ring, at a slow, even pace.
 fn circle(here: Vec2, slot: Vec2) -> (Activity, Vec2, f32, bool) {
     let gap = here.distance(slot);
+    // Slowing down to stop on its place.
     let speed = if gap > 3.0 {
         WALK_SPEED
     } else {
-        0.45 + gap * 0.4
+        (0.45 + gap * 0.4).min(gap * 1.5)
     };
     (Activity::Circling, slot, speed, false)
 }
@@ -577,10 +656,14 @@ fn move_towards(d: &mut Deer, world: &World, goal: Vec2, speed: f32, dt: f32) {
     let here = Vec2::new(d.position.x, d.position.z);
     let to = goal - here;
     let k = 1.0 - (-dt * 3.0).exp();
-    if to.length() < 0.05 || speed <= 0.0 {
+    if to.length() < 0.1 || speed <= 0.0 {
         d.speed += (0.0 - d.speed) * k;
     } else {
         turn_towards(d, to.x.atan2(to.y), dt);
+        // Turning first, then going: slower while the goal is off to the side, so it never
+        // circles round it.
+        let along = Vec2::new(d.heading.sin(), d.heading.cos()).dot(to.normalize());
+        let speed = speed * (0.2 + 0.8 * along.max(0.0));
         d.speed += (speed - d.speed) * k;
     }
     if d.speed < 0.01 {
@@ -601,7 +684,7 @@ fn move_towards(d: &mut Deer, world: &World, goal: Vec2, speed: f32, dt: f32) {
             d.position = ground(world, next).with_y(d.position.y);
             let height = world.surface_height(next.x, next.y);
             d.position.y += (height - d.position.y) * (1.0 - (-dt * 10.0).exp());
-            d.stride += step * std::f32::consts::TAU / (1.1 * d.size);
+            d.stride += step * std::f32::consts::TAU / stride_length(d.speed, d.size);
             return;
         }
     }
@@ -898,9 +981,16 @@ mod tests {
         run(&mut herd, &world, at(20.0, 2.0, 0.5, Vec2::X), 60.0, None);
         run(&mut herd, &world, night, 60.0, None);
         assert!(herd.deer.iter().all(|d| d.activity == Activity::Circling));
-        for d in &herd.deer {
+        for (i, d) in herd.deer.iter().enumerate() {
             let r = Vec2::new(d.position.x, d.position.z).distance(herd.ring);
-            assert!((r - RING_RADIUS).abs() < 1.0, "{r}");
+            let slot = herd.ring_slot(i, herd.deer.len());
+            assert!(
+                (r - RING_RADIUS).abs() < 1.0,
+                "{r} at {:?} slot {slot:?} speed {} walkable {}",
+                d.position,
+                d.speed,
+                walkable(&world, d.position.y, slot)
+            );
         }
         assert!(herd.glow > 0.9, "{}", herd.glow);
         // Downwind of them, close: they bolt, and keep away the rest of the night.

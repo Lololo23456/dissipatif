@@ -4,7 +4,7 @@
 //! between two full moons. The cycle is stylised to `LUNAR_DAYS` game days.
 
 /// Real seconds for a whole day: 20 minutes.
-const DAY_SECONDS: f32 = 20.0 * 60.0;
+pub const DAY_SECONDS: f32 = 20.0 * 60.0;
 /// Speed-up while fast-forwarding (key T): a day in 20 seconds.
 const FAST: f32 = 60.0;
 /// Hour at the start of a game: late afternoon, the golden hour comes soon.

@@ -158,6 +158,8 @@ struct App {
     sketch_pending: Vec<usize>,
     /// When a spell was last cast (seconds since start).
     cast_at: Option<f32>,
+    /// Gait cycle of the naturalist in the shape of a deer (radians).
+    deer_stride: f32,
 }
 
 impl App {
@@ -244,6 +246,7 @@ impl App {
             sketches: HashMap::new(),
             sketch_pending: Vec::new(),
             cast_at: None,
+            deer_stride: 0.0,
         }
     }
 }
@@ -283,6 +286,11 @@ impl App {
         for (k, (at, strength)) in self.state.burning_plants().into_iter().enumerate() {
             objects_view::plant_fire(at, strength, time, k as f32, &mut self.particles);
         }
+        // The deer's gait, when in its shape.
+        let speed = glam::Vec2::new(velocity.x, velocity.z).length();
+        self.deer_stride = (self.deer_stride
+            + speed * dt * std::f32::consts::TAU / deer::stride_length(speed, 1.15))
+            % std::f32::consts::TAU;
         self.magic(time);
         self.update_sound(dt, time);
         // Plants pushed aside by the body, springing back once free.
@@ -537,21 +545,32 @@ impl App {
         let mut deer: Vec<DeerPose> = self
             .state
             .herd()
-            .map(|h| h.deer.iter().map(DeerPose::of).collect())
+            .map(|h| {
+                h.deer
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| DeerPose::of(d, i, time))
+                    .collect()
+            })
             .unwrap_or_default();
         if body.deer {
             self.naturalist.hide(renderer);
             let v = body.velocity();
+            let speed = glam::Vec2::new(v.x, v.z).length();
             deer.push(DeerPose {
                 position: motion.position,
                 heading: body.facing(),
-                head: 0.3,
+                head: if speed > 5.5 { 0.6 } else { 0.4 },
                 lying: 0.0,
-                // A deer's stride is shorter than its gait suggests: the same distance, more steps.
-                stride: body.stride().0 * 1.4,
-                speed: glam::Vec2::new(v.x, v.z).length(),
-                size: 1.05,
+                stride: self.deer_stride,
+                speed,
+                size: 1.15,
                 stamp: 0.0,
+                alarmed: false,
+                airborne: motion.airborne,
+                stag: true,
+                time,
+                seed: 0.0,
             });
         } else {
             self.naturalist.pose(renderer, motion);
@@ -619,6 +638,82 @@ impl App {
                     ],
                     color: [silver[0], silver[1], silver[2], -2.5 * g * (1.0 - phase)],
                 });
+            }
+            // The incantation's movements, each with its light.
+            if let Some(u) = herd.rite {
+                let seconds = u * deer::RITE_HOURS * clock::DAY_SECONDS / 24.0;
+                let tau = std::f32::consts::TAU;
+                let point =
+                    |out: &mut Vec<render::ParticleInstance>, p: Vec3, size: f32, glow: f32| {
+                        out.push(render::ParticleInstance {
+                            centre_size: [p.x, p.y, p.z, size],
+                            color: [silver[0], silver[1], silver[2], -glow],
+                        });
+                    };
+                let centre = Vec3::new(ring.x, ground, ring.y);
+                if (0.12..0.45).contains(&u) {
+                    // Each bow sends a wave of light out from the centre over the grass.
+                    let wave = (seconds / 4.0 + 0.5).fract();
+                    for k in 0..40 {
+                        let a = k as f32 / 40.0 * tau;
+                        let r = deer::RING_RADIUS * 1.15 * wave;
+                        point(
+                            out,
+                            centre + Vec3::new(a.cos() * r, 0.08, a.sin() * r),
+                            0.04,
+                            3.0 * (1.0 - wave),
+                        );
+                    }
+                } else if (0.45..0.8).contains(&u) {
+                    // The procession: light winding up from the circle.
+                    for k in 0..60 {
+                        let phase = (seconds * 0.15 + k as f32 / 60.0) % 1.0;
+                        let a = k as f32 * 0.7 + seconds * 0.6;
+                        let r = deer::RING_RADIUS * (1.0 - 0.7 * phase);
+                        point(
+                            out,
+                            centre + Vec3::new(a.cos() * r, 0.2 + 6.0 * phase, a.sin() * r),
+                            0.03,
+                            3.0 * (1.0 - phase),
+                        );
+                    }
+                } else if (0.8..0.97).contains(&u) {
+                    // Heads raised to the moon: threads from each to the centre, and a column
+                    // of light rising to the sky.
+                    let top = centre + Vec3::Y * 2.5;
+                    for d in &herd.deer {
+                        let head = d.position + Vec3::Y * 1.7 * d.size;
+                        for k in 0..10 {
+                            let t = ((k as f32 + seconds * 3.0) / 10.0).fract();
+                            point(out, head.lerp(top, t), 0.025, 3.5);
+                        }
+                    }
+                    for k in 0..70 {
+                        let phase = (seconds * 0.6 + k as f32 / 70.0) % 1.0;
+                        let a = k as f32 * 2.399;
+                        let r = 0.25 + 0.15 * (seconds * 3.0 + k as f32).sin();
+                        point(
+                            out,
+                            centre + Vec3::new(a.cos() * r, 0.5 + 20.0 * phase, a.sin() * r),
+                            0.05,
+                            5.0 * (1.0 - phase * 0.7),
+                        );
+                    }
+                } else if u >= 0.97 {
+                    // The end: the light bursts and scatters.
+                    let t = (u - 0.97) / 0.03;
+                    for k in 0..90 {
+                        let a = k as f32 * 2.399;
+                        let rise = (k % 9) as f32 / 9.0;
+                        let r = 0.5 + 9.0 * t * (0.5 + 0.5 * rise);
+                        point(
+                            out,
+                            centre + Vec3::new(a.cos() * r, 2.5 + 3.0 * rise * t, a.sin() * r),
+                            0.04,
+                            5.0 * (1.0 - t),
+                        );
+                    }
+                }
             }
             for k in 0..56 {
                 let angle = k as f32 / 56.0 * std::f32::consts::TAU;

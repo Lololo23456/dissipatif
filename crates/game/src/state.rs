@@ -1344,7 +1344,10 @@ impl GameState {
                     p.witnessed += STEP * self.time_scale;
                 }
             }
-            if p.witnessed >= RITE_UNDERSTOOD && !p.spells.contains(&Spell::DeerForm) {
+            // Understood at the height of the rite, heads raised to the moon, by one who watched
+            // it unseen until then.
+            let height = herd.rite.is_some_and(|u| u >= 0.8);
+            if p.witnessed >= RITE_UNDERSTOOD && height && !p.spells.contains(&Spell::DeerForm) {
                 p.spells.push(Spell::DeerForm);
                 entries.push(Entry::Learnt(Spell::DeerForm));
                 self.events.push(Event::Learnt {
@@ -1370,7 +1373,7 @@ impl GameState {
 }
 
 /// Seconds of watching the full rite, unnoticed, to understand it.
-const RITE_UNDERSTOOD: f32 = 30.0;
+const RITE_UNDERSTOOD: f32 = 20.0;
 
 /// A player as the deer perceive them: moving or still, crouched, hidden by plants, on loud
 /// or soft ground, in their own shape or a deer's.

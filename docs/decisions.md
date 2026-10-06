@@ -263,3 +263,8 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Retour visible** : pendant qu'on comprend le rite, des poussières argentées quittent le cercle et viennent au naturaliste, de plus en plus nombreuses ; le message « Vous avez compris » reste 8 s.
 - **Vent lisible** : une flèche sous l'heure, orientée selon la caméra, montre où le vent emporte l'odeur.
 - **Cerfs** : collisions avec les troncs ; modèle refait en formes continues (voxels de 5 cm, tronc elliptique, cou oblique, tête effilée, grandes oreilles, dos plus sombre, ventre et croupe pâles), aux proportions d'une biche.
+
+## 2026-10-06 — Incantation d'une minute, cerfs articulés
+- **Le rituel dure une minute de jeu** (22 h à 23 h 12, après un rassemblement dès 21 h 20) et devient une chorégraphie d'incantation : immobiles face au centre, saluts synchronisés et coup de sabot qui fait le tour du cercle ; procession ; têtes levées vers la lune (fils de lumière vers le centre, colonne vers le ciel) ; éclat final. Le sort s'apprend à ce sommet, après au moins 20 s d'observation sans être repéré.
+- **Cerfs articulés** : pattes en deux segments (genou, jarret), allures réelles (pas à quatre temps, trot diagonal, bonds au galop avec le dos qui ondule), cou et tête séparés, queue qui se relève à l'alarme. La Forme du cerf est un cerf mâle à bois.
+- Correction : un cerf qui arrive sur sa place ne tourne plus en orbite autour (il ralentit, et tourne avant d'avancer).
