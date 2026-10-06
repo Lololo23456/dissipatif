@@ -475,8 +475,14 @@ impl Renderer {
 
     /// Replaces the mesh of a volume. Buffers are reused, so this can run every frame.
     pub fn upload_mesh(&mut self, id: VolumeId, data: &MeshData) {
+        self.upload_mesh_part(id, 0, data);
+    }
+
+    /// Replaces part `part` of a volume's mesh: a large volume (the ground) is meshed in
+    /// chunks, and only the chunk that changed is sent again.
+    pub fn upload_mesh_part(&mut self, id: VolumeId, part: usize, data: &MeshData) {
         let (device, queue) = (self.gpu.device(), self.gpu.queue());
-        self.volumes[id.0].upload_mesh(device, queue, data);
+        self.volumes[id.0].upload_mesh(device, queue, part, data);
     }
 
     /// Copies the base field of a volume (its inert colour) to the GPU. Must be called once
@@ -559,10 +565,11 @@ impl Renderer {
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &self.shadow_bind_group, &[]);
             for volume in self.volumes.iter().filter(|v| !v.transparent) {
-                if let (Some(mesh), Some(fields)) = (&volume.mesh, &volume.fields)
-                    && mesh.index_count > 0
-                {
-                    pass.set_bind_group(1, &fields.bind_group, &[]);
+                let Some(fields) = &volume.fields else {
+                    continue;
+                };
+                pass.set_bind_group(1, &fields.bind_group, &[]);
+                for mesh in volume.meshes.iter().flatten().filter(|m| m.index_count > 0) {
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -617,10 +624,11 @@ impl Renderer {
                 }
                 pass.set_pipeline(pipeline);
                 for volume in self.volumes.iter().filter(|v| v.transparent == transparent) {
-                    if let (Some(mesh), Some(fields)) = (&volume.mesh, &volume.fields)
-                        && mesh.index_count > 0
-                    {
-                        pass.set_bind_group(1, &fields.bind_group, &[]);
+                    let Some(fields) = &volume.fields else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, &fields.bind_group, &[]);
+                    for mesh in volume.meshes.iter().flatten().filter(|m| m.index_count > 0) {
                         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                         pass.set_index_buffer(
                             mesh.index_buffer.slice(..),

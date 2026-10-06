@@ -103,8 +103,9 @@ pub(crate) struct Volume {
     uniform_buffer: wgpu::Buffer,
     /// `None` until the base field is uploaded.
     pub(crate) fields: Option<VolumeFields>,
-    /// `None` until a mesh is uploaded.
-    pub(crate) mesh: Option<GpuMesh>,
+    /// The mesh, in parts (chunks of a large volume, remeshed separately). Empty until a mesh
+    /// is uploaded; a part is `None` until its first upload.
+    pub(crate) meshes: Vec<Option<GpuMesh>>,
 }
 
 impl Volume {
@@ -118,7 +119,7 @@ impl Volume {
             transparent: style.transparent,
             uniform_buffer,
             fields: None,
-            mesh: None,
+            meshes: Vec::new(),
         }
     }
 
@@ -127,15 +128,20 @@ impl Volume {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    /// Replaces part `part` of the mesh (part 0 for a volume in one piece).
     pub(crate) fn upload_mesh(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        part: usize,
         data: &MeshData,
     ) {
-        match &mut self.mesh {
+        if self.meshes.len() <= part {
+            self.meshes.resize_with(part + 1, || None);
+        }
+        match &mut self.meshes[part] {
             Some(mesh) => mesh.update(device, queue, data),
-            None => self.mesh = Some(GpuMesh::new(device, queue, data)),
+            slot => *slot = Some(GpuMesh::new(device, queue, data)),
         }
     }
 

@@ -39,6 +39,53 @@ pub fn mesh_field(field: &Field3, threshold: f32, mesh: &mut MeshData) {
     });
 }
 
+/// Rebuilds `mesh` from the cells of `field` above `threshold` whose x lies in `xs` and z in
+/// `zs` (a chunk of a large grid): only that part is meshed, but its faces and ambient
+/// occlusion look at the whole grid, so neighbouring chunks join without seams.
+pub fn mesh_field_region(
+    field: &Field3,
+    threshold: f32,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
+    mesh: &mut MeshData,
+) {
+    mesh.clear();
+    let solid = |x: usize, y: usize, z: usize| field.get(x, y, z) > threshold;
+    visible_faces_in(field.dims, solid, xs, zs, |cell, normal, ao| {
+        mesh.push_face(cell, normal, ao);
+    });
+}
+
+/// Appends to `mesh` a brick of micro-voxels (`side`³ material ids, 0 = empty, x fastest)
+/// filling the world cell `cell`: each micro-voxel is 1/`side` of a cell. Faces between two
+/// micro-voxels of the brick are culled; faces against the outside of the brick are kept
+/// (a neighbouring solid cell hides them).
+pub fn append_brick(voxels: &[u8], side: usize, cell: [usize; 3], seed: u64, mesh: &mut MeshData) {
+    let dims = Dims {
+        nx: side,
+        ny: side,
+        nz: side,
+    };
+    assert_eq!(voxels.len(), dims.len(), "brick size");
+    let solid = |x: usize, y: usize, z: usize| voxels[dims.index(x, y, z)] != 0;
+    let offset = cell.map(|c| c as f32);
+    let scale = 1.0 / side as f32;
+    visible_faces(dims, solid, |micro, normal, ao| {
+        let [x, y, z] = micro.map(|c| c as usize);
+        let id = voxels[dims.index(x, y, z)];
+        let world = [cell[0] * side + x, cell[1] * side + y, cell[2] * side + z];
+        let variation = (variation_hash(seed, world[0], world[1], world[2]) >> 56) as u8;
+        mesh.push_face_scaled(
+            micro,
+            normal,
+            ao,
+            offset,
+            scale,
+            pack_material(id, variation),
+        );
+    });
+}
+
 /// Rebuilds `mesh` from a grid of material ids (0 = empty), for a model drawn at `scale` world
 /// units per voxel, with `anchor` (in voxels) at the origin of the mesh. Each vertex carries its
 /// material and a brightness variation drawn from `seed` (see `mesh::pack_material`).
@@ -74,6 +121,17 @@ pub fn mesh_materials(
 fn visible_faces(
     dims: Dims,
     solid: impl Fn(usize, usize, usize) -> bool,
+    emit: impl FnMut([u32; 3], [i32; 3], [f32; 4]),
+) {
+    visible_faces_in(dims, solid, 0..dims.nx, 0..dims.nz, emit);
+}
+
+/// `visible_faces` for the cells with x in `xs` and z in `zs` only.
+fn visible_faces_in(
+    dims: Dims,
+    solid: impl Fn(usize, usize, usize) -> bool,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
     mut emit: impl FnMut([u32; 3], [i32; 3], [f32; 4]),
 ) {
     // Outside the grid counts as empty, so the boundary of the grid is closed.
@@ -85,9 +143,9 @@ fn visible_faces(
             && solid(p[0] as usize, p[1] as usize, p[2] as usize)
     };
     // z outermost, x innermost: same order as the memory layout of the grids.
-    for z in 0..dims.nz as isize {
+    for z in zs.start as isize..zs.end.min(dims.nz) as isize {
         for y in 0..dims.ny as isize {
-            for x in 0..dims.nx as isize {
+            for x in xs.start as isize..xs.end.min(dims.nx) as isize {
                 if !at([x, y, z]) {
                     continue;
                 }
@@ -254,5 +312,44 @@ mod tests {
         mesh_field(&field, 0.5, &mut mesh);
         mesh_field(&field, 0.5, &mut mesh);
         assert_eq!(mesh.face_count(), 6);
+    }
+
+    #[test]
+    fn chunks_together_make_the_whole_mesh() {
+        let dims = Dims {
+            nx: 10,
+            ny: 4,
+            nz: 7,
+        };
+        let mut field = Field3::filled(dims, 0.0);
+        for (i, v) in field.data.iter_mut().enumerate() {
+            *v = if (i * 7919) % 5 < 3 { 1.0 } else { 0.0 };
+        }
+        let mut whole = MeshData::default();
+        mesh_field(&field, 0.5, &mut whole);
+        let mut total = 0;
+        for xs in [0..4, 4..10] {
+            for zs in [0..3, 3..7] {
+                let mut part = MeshData::default();
+                mesh_field_region(&field, 0.5, xs.clone(), zs, &mut part);
+                total += part.indices.len();
+            }
+        }
+        assert_eq!(total, whole.indices.len());
+    }
+
+    #[test]
+    fn a_full_brick_shows_its_six_sides_only() {
+        let voxels = [3u8; 64];
+        let mut mesh = MeshData::default();
+        append_brick(&voxels, 4, [2, 5, 1], 0, &mut mesh);
+        // 6 sides of 4 × 4 micro-faces, 6 indices each.
+        assert_eq!(mesh.indices.len(), 6 * 16 * 6);
+        let min = mesh
+            .vertices
+            .iter()
+            .map(|v| v.position[1])
+            .fold(f32::MAX, f32::min);
+        assert_eq!(min, 5.0);
     }
 }

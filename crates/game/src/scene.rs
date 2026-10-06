@@ -4,7 +4,7 @@
 
 use glam::Vec3;
 use render::mesh::MeshData;
-use render::mesher::{mesh_field, mesh_materials};
+use render::mesher::{append_brick, mesh_field_region, mesh_materials};
 use render::palette;
 use render::water_mesher::mesh_water;
 use render::{LifeStyle, ModelId, ModelInstance, Renderer, VolumeStyle};
@@ -15,9 +15,14 @@ use world::{Biome, Material, Plant, World};
 
 use crate::trample::Pliable;
 
-/// The ground's look (material id and a brightness variation per voxel) and mesh. Plants are
-/// drawn from their models: the world grid only has a coarse copy of them, left out here.
-fn solid(world: &World) -> (Field3, MeshData) {
+/// Columns per side of a chunk of the ground: the ground is meshed (and remeshed when dug)
+/// chunk by chunk.
+pub const CHUNK: usize = 32;
+
+/// The ground's look (material id and a brightness variation per voxel) and its occupancy
+/// (1 where a whole cell is drawn: subdivided cells are drawn from their micro-voxels). Plants
+/// are drawn from their models: the world grid only has a coarse copy of them, left out here.
+fn ground_fields(world: &World) -> (Field3, Field3) {
     let dims = world.dims();
     let seed = world.config.seed ^ VARIATION_SEED;
     let mut occupied = Field3::filled(dims, 0.0);
@@ -32,9 +37,49 @@ fn solid(world: &World) -> (Field3, MeshData) {
         let variation = hash_unit(seed, &[i as i64]);
         look.data[i] = id as f32 + 0.999 * variation;
     }
+    for ([x, y, z], _) in world.micro_cells() {
+        occupied.set(x, y, z, 0.0);
+    }
+    (look, occupied)
+}
+
+/// The mesh of chunk (cx, cz): its whole cells, then the micro-voxels of its subdivided cells.
+fn chunk_mesh(world: &World, occupied: &Field3, cx: usize, cz: usize) -> MeshData {
+    let dims = world.dims();
+    let xs = cx * CHUNK..((cx + 1) * CHUNK).min(dims.nx);
+    let zs = cz * CHUNK..((cz + 1) * CHUNK).min(dims.nz);
     let mut mesh = MeshData::default();
-    mesh_field(&occupied, 0.5, &mut mesh);
-    (look, mesh)
+    mesh_field_region(occupied, 0.5, xs.clone(), zs.clone(), &mut mesh);
+    let seed = world.config.seed ^ VARIATION_SEED;
+    for ([x, y, z], voxels) in world.micro_cells() {
+        if xs.contains(&x) && zs.contains(&z) {
+            append_brick(voxels, world::MICRO, [x, y, z], seed, &mut mesh);
+        }
+    }
+    mesh
+}
+
+/// Water depth per column and the water surface mesh.
+fn water(world: &World) -> (Field3, MeshData) {
+    let dims = world.dims();
+    let (nx, nz) = (dims.nx, dims.nz);
+    let columns = Dims { nx, ny: 1, nz };
+    let mut floor = Field2::filled(nx, nz, 0.0);
+    let mut surface = Field2::filled(nx, nz, 0.0);
+    let mut depth = Field3::filled(columns, 0.0);
+    for z in 0..nz {
+        for x in 0..nx {
+            let top = world.ground_top(x, z) as f32;
+            floor.set(x, z, top);
+            let level = world.water_level(x, z).unwrap_or(f32::NEG_INFINITY);
+            // The water surface is drawn where it is above the ground voxels.
+            surface.set(x, z, level.max(top));
+            depth.set(x, 0, z, (level - world.ground.get(x, z)).max(0.0));
+        }
+    }
+    let mut mesh = MeshData::default();
+    mesh_water(&floor, &surface, &mut mesh);
+    (depth, mesh)
 }
 
 /// Seed offset of the per-voxel brightness variation.
@@ -45,9 +90,15 @@ pub struct SceneData {
     dims: Dims,
     /// The ground's volume in the renderer, once installed.
     solid_id: Option<render::VolumeId>,
+    /// The water's volume in the renderer, once installed.
+    water_id: Option<render::VolumeId>,
     /// Material id + brightness variation in [0, 1) per voxel (see `VolumeStyle::materials`).
     solid_look: Field3,
-    solid_mesh: MeshData,
+    /// Where whole cells are drawn (see `ground_fields`).
+    occupied: Field3,
+    /// The ground's mesh, chunk by chunk (`chunks_x` per row).
+    chunks: Vec<MeshData>,
+    chunks_x: usize,
     /// Water: depth per column (a 2D grid stored with a height of 1), and its surface mesh.
     water_depth: Field3,
     water_mesh: MeshData,
@@ -70,25 +121,18 @@ impl SceneData {
     pub fn build(world: &World) -> Self {
         let dims = world.dims();
         let seed = world.config.seed ^ VARIATION_SEED;
-        let (solid_look, solid_mesh) = solid(world);
-
-        let (nx, nz) = (dims.nx, dims.nz);
-        let columns = Dims { nx, ny: 1, nz };
-        let mut floor = Field2::filled(nx, nz, 0.0);
-        let mut surface = Field2::filled(nx, nz, 0.0);
-        let mut water_depth = Field3::filled(columns, 0.0);
-        for z in 0..nz {
-            for x in 0..nx {
-                let top = world.ground_top(x, z) as f32;
-                floor.set(x, z, top);
-                let level = world.water_level(x, z).unwrap_or(f32::NEG_INFINITY);
-                // The water surface is drawn where it is above the ground voxels.
-                surface.set(x, z, level.max(top));
-                water_depth.set(x, 0, z, (level - world.ground.get(x, z)).max(0.0));
-            }
-        }
-        let mut water_mesh = MeshData::default();
-        mesh_water(&floor, &surface, &mut water_mesh);
+        let (solid_look, occupied) = ground_fields(world);
+        let (chunks_x, chunks_z) = (dims.nx.div_ceil(CHUNK), dims.nz.div_ceil(CHUNK));
+        let chunks = (0..chunks_z)
+            .flat_map(|cz| (0..chunks_x).map(move |cx| (cx, cz)))
+            .map(|(cx, cz)| chunk_mesh(world, &occupied, cx, cz))
+            .collect();
+        let (water_depth, water_mesh) = water(world);
+        let columns = Dims {
+            nx: dims.nx,
+            ny: 1,
+            nz: dims.nz,
+        };
 
         // Plants: one mesh per model, a quarter of a cell per micro-voxel, its origin where the
         // plant stands (centre of the bottom of its base cell).
@@ -157,28 +201,65 @@ impl SceneData {
             dirty: vec![false; groups],
             no_overlay_solid: Field3::filled(dims, 0.0),
             no_overlay_water: Field3::filled(columns, 0.0),
+            water_id: None,
             solid_look,
-            solid_mesh,
+            occupied,
+            chunks,
+            chunks_x,
             water_depth,
             water_mesh,
         }
     }
 
-    /// The ground changed (dug): rebuilds its mesh and, if installed, sends it to the
-    /// renderer. The whole ground is remeshed (some tens of milliseconds); per-chunk
-    /// remeshing will come with the micro-bricks.
-    pub fn remesh_ground(&mut self, world: &World, renderer: Option<&mut Renderer>) {
-        let (look, mesh) = solid(world);
-        self.solid_look = look;
-        self.solid_mesh = mesh;
-        if let (Some(renderer), Some(id)) = (renderer, self.solid_id) {
-            renderer.upload_base(id, &self.solid_look);
-            renderer.upload_mesh(id, &self.solid_mesh);
+    /// The ground was dug at `cell`: refreshes that column's occupancy, remeshes the chunks
+    /// the cell touches (its own, and a neighbour's when it lies on a chunk's edge, for faces
+    /// and shadows across the edge), and the water if it moved. Sends them to the renderer if
+    /// installed.
+    pub fn ground_dug(
+        &mut self,
+        world: &World,
+        cell: [usize; 3],
+        flooded: bool,
+        mut renderer: Option<&mut Renderer>,
+    ) {
+        let [x, _, z] = cell;
+        let dims = world.dims();
+        for y in 0..dims.ny {
+            let solid = world.block(x, y, z);
+            let whole = solid.is_solid() && !solid.is_plant() && world.micro(x, y, z).is_none();
+            self.occupied.set(x, y, z, if whole { 1.0 } else { 0.0 });
+        }
+        let mut touched = Vec::new();
+        for (dx, dz) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let (nx, nz) = (x as i64 + dx, z as i64 + dz);
+            if nx < 0 || nz < 0 || nx as usize >= dims.nx || nz as usize >= dims.nz {
+                continue;
+            }
+            let chunk = (nx as usize / CHUNK, nz as usize / CHUNK);
+            if !touched.contains(&chunk) {
+                touched.push(chunk);
+            }
+        }
+        for (cx, cz) in touched {
+            let part = cz * self.chunks_x + cx;
+            self.chunks[part] = chunk_mesh(world, &self.occupied, cx, cz);
+            if let (Some(renderer), Some(id)) = (renderer.as_deref_mut(), self.solid_id) {
+                renderer.upload_mesh_part(id, part, &self.chunks[part]);
+            }
+        }
+        if flooded {
+            let (depth, mesh) = water(world);
+            self.water_depth = depth;
+            self.water_mesh = mesh;
+            if let (Some(renderer), Some(id)) = (renderer, self.water_id) {
+                renderer.upload_base(id, &self.water_depth);
+                renderer.upload_mesh(id, &self.water_mesh);
+            }
         }
     }
 
     pub fn solid_faces(&self) -> usize {
-        self.solid_mesh.face_count()
+        self.chunks.iter().map(MeshData::face_count).sum()
     }
 
     pub fn water_faces(&self) -> usize {
@@ -216,7 +297,10 @@ impl SceneData {
         self.solid_id = Some(solid);
         renderer.upload_base(solid, &self.solid_look);
         renderer.upload_life(solid, &self.no_overlay_solid);
-        renderer.upload_mesh(solid, &self.solid_mesh);
+        for (part, mesh) in self.chunks.iter().enumerate() {
+            renderer.upload_mesh_part(solid, part, mesh);
+        }
+        self.water_id = Some(water);
         renderer.upload_base(water, &self.water_depth);
         renderer.upload_life(water, &self.no_overlay_water);
         renderer.upload_mesh(water, &self.water_mesh);
@@ -343,5 +427,28 @@ fn no_overlay() -> LifeStyle {
         palette: palette::foam(),
         fade: (1.0, 2.0),
         value_range: (1.0, 2.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use world::WorldConfig;
+
+    /// Remeshing the chunk of a dug cell is much faster than meshing the whole ground.
+    #[test]
+    #[ignore = "mesure de temps : cargo test --release -p game remesh -- --ignored --nocapture"]
+    fn remesh_timing() {
+        let mut world = World::generate(WorldConfig::standard(1));
+        let mut data = SceneData::build(&world);
+        let start = std::time::Instant::now();
+        let _ = ground_fields(&world);
+        let whole = start.elapsed();
+        let (x, z) = (100, 100);
+        let start = std::time::Instant::now();
+        let dug = world.dig(x as f32 + 0.6, z as f32 + 0.6).unwrap();
+        data.ground_dug(&world, dug.cell, dug.flooded, None);
+        let chunk = start.elapsed();
+        println!("champs du sol entier : {whole:?} ; creuser + remailler un tronçon : {chunk:?}");
     }
 }

@@ -222,3 +222,9 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Sac ouvrable (Tab ou I) : 8 cases avec icônes, détail de l'objet choisi (masse et propriétés en mots : « très dur », « tranchant »…), clic pour choisir, X jeter un exemplaire, Maj+X toute la pile. Icônes tirées des modèles voxels (vue de dessus ou de face, celle qui montre le plus) : toujours procédurales.
 - Creuser modifie le monde : 3 poignées au même endroit retirent le cube du dessus (`World::remove_top`, événement `Excavated`), et la couche du dessous apparaît. Un cube faisant 1 m, c'est une simplification d'échelle ; creuser finement demandera les micro-briques. Le sol entier est remaillé à chaque fois (quelques dizaines de ms) : à remplacer par un remaillage par tronçon.
 - Limite connue : l'eau ne s'écoule pas encore dans un trou creusé près d'elle.
+
+## 2026-10-06 — Micro-cubes, remaillage par tronçon, eau dans les trous
+- Remplace « 3 poignées enlèvent un cube » : une cellule creusée se subdivise en 4 × 4 × 4 micro-cubes (25 cm), stockés seulement pour les cellules touchées (`World::dig`, `micro`). Chaque poignée retire le micro-cube le plus haut sous les mains : un creux se forme. Cellule vidée → la colonne descend d'un cran.
+- Le joueur heurte les micro-cubes restants (marches de 25 cm), on pose les objets sur la vraie surface (`surface_height`).
+- Le sol est maillé par tronçons de 32 × 32 colonnes (parties d'un même volume dans le renderer) ; creuser ne remaille que le tronçon touché (et son voisin si la cellule est au bord) : ~0,7 ms. Les micro-cubes sont ajoutés au maillage du tronçon (matériau dans le sommet).
+- Eau : quand une cellule est vidée à côté d'une eau plus haute que son fond, l'eau remplit le trou et coule dans les trous voisins plus bas (remplissage), puis la surface de l'eau est remaillée. Pas encore d'écoulement dynamique.

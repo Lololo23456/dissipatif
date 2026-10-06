@@ -130,8 +130,9 @@ struct App {
     bag_open: bool,
     /// Shift is held.
     shift: bool,
-    /// The ground was dug: its mesh must be rebuilt before the next frame.
-    ground_dirty: bool,
+    /// Cells dug since the last frame (and whether water flowed in): their chunks are
+    /// remeshed before the next frame.
+    dug_cells: Vec<([usize; 3], bool)>,
     /// A one-off gesture being played (laying, eating…) and when it began.
     gesture: Option<(GestureKind, f32)>,
     /// Seconds since start, as of the last frame.
@@ -194,7 +195,7 @@ impl App {
             hover: None,
             bag_open: false,
             shift: false,
-            ground_dirty: false,
+            dug_cells: Vec::new(),
             gesture: None,
             now: 0.0,
         }
@@ -229,21 +230,6 @@ impl App {
         self.particles.extend_from_slice(self.fauna.particles());
         self.particles.extend_from_slice(self.traces.instances());
         self.particles.extend_from_slice(self.weather.particles());
-        // Hollows where handfuls of ground were taken: a patch of the darker, damp layer
-        // under the surface, sunk so that only its top shows.
-        let colors = render::palette::materials();
-        for &(centre, depth) in self.state.dug() {
-            let (x, z) = (centre.x as usize, centre.z as usize);
-            let top = self.world.ground_top(x, z);
-            let material = self.world.block(x, top.saturating_sub(1), z);
-            let [r, g, b] = colors[material.id() as usize];
-            let shade = 0.78 - 0.18 * depth;
-            let size = 0.32 + 0.12 * depth;
-            self.particles.push(render::ParticleInstance {
-                centre_size: [centre.x, top as f32 - size * 0.5 + 0.012, centre.z, size],
-                color: [r * shade, g * shade, b * shade, 0.0],
-            });
-        }
         self.update_sound(dt, time);
         // Plants pushed aside by the body, springing back once free.
         let data = &mut self.data;
@@ -338,9 +324,9 @@ impl App {
             }
             Event::Ate { matter, .. } => format!("Vous mangez : {}", matter.name()),
             Event::Drank { .. } => "Vous buvez quelques gorgées.".to_owned(),
-            Event::Excavated { x, z } => {
-                if self.world.remove_top(x, z).is_some() {
-                    self.ground_dirty = true;
+            Event::Dig { at } => {
+                if let Some(dug) = self.world.dig(at.x, at.y) {
+                    self.dug_cells.push((dug.cell, dug.flooded));
                 }
                 return;
             }
@@ -561,9 +547,9 @@ impl ApplicationHandler for App {
                 if let Some(graphics) = self.graphics.as_mut() {
                     let renderer = &mut graphics.renderer;
                     self.naturalist.pose(renderer, &motion);
-                    if self.ground_dirty {
-                        self.ground_dirty = false;
-                        self.data.remesh_ground(&self.world, Some(renderer));
+                    for (cell, flooded) in std::mem::take(&mut self.dug_cells) {
+                        self.data
+                            .ground_dug(&self.world, cell, flooded, Some(renderer));
                     }
                     self.data.upload_changes(renderer);
                     self.weather.draw(renderer);
@@ -1124,8 +1110,8 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.camera.target = Vec3::new(x, app.camera.target.y, z);
     }
     let time = (still + walking) as f32 * CAPTURE_STEP;
-    if app.ground_dirty {
-        app.data.remesh_ground(&app.world, None);
+    for (cell, flooded) in std::mem::take(&mut app.dug_cells) {
+        app.data.ground_dug(&app.world, cell, flooded, None);
     }
     let mut renderer = Renderer::new(Gpu::offscreen(options.width, options.height));
     app.data.install(&mut renderer);

@@ -67,10 +67,6 @@ const FLAKE_CHANCE_LIGHT: f32 = 0.15;
 /// Sticks pulled out of a bundle of twigs.
 const STICKS_PER_BUNDLE: u32 = 3;
 
-/// Handfuls dug at one place before its top voxel is taken away.
-const HANDFULS_PER_VOXEL: u32 = 3;
-/// Hollows remembered at once.
-const MAX_DUG: usize = 96;
 /// Lumps of clay a dish takes.
 const CLAY_PER_DISH: u32 = 2;
 
@@ -168,11 +164,10 @@ pub enum Event {
     Cleared {
         plant: usize,
     },
-    /// Enough was dug at column (x, z) to take its top ground voxel away: the world must
-    /// remove it (`World::remove_top`) and redraw the ground.
-    Excavated {
-        x: usize,
-        z: usize,
+    /// A handful of ground was taken at `at`: the world must dig a micro-voxel out there
+    /// (`World::dig`) and redraw the ground.
+    Dig {
+        at: Vec2,
     },
     /// Physics changed an object (fired, burst, burnt to ash).
     Changed {
@@ -202,9 +197,6 @@ pub struct GameState {
     events: Vec<Event>,
     /// Scratch list of the objects' changes (reused: no allocation per step).
     changes: Vec<(Vec3, Matter, Matter)>,
-    /// Hollows left where handfuls of ground were taken (centre, depth in [0, 1]); the oldest
-    /// go when there are too many.
-    dug: Vec<(Vec3, f32)>,
     /// Chance in the players' gestures (knapping), seeded: deterministic.
     rng: sim::rng::SplitMix64,
 }
@@ -232,14 +224,8 @@ impl GameState {
             rain: 0.0,
             events: Vec::new(),
             changes: Vec::new(),
-            dug: Vec::new(),
             rng: sim::rng::SplitMix64::new(world.config.seed ^ 0x4ea9),
         }
-    }
-
-    /// Hollows left by taking handfuls of ground.
-    pub fn dug(&self) -> &[(Vec3, f32)] {
-        &self.dug
     }
 
     pub fn objects(&self) -> &Objects {
@@ -313,7 +299,7 @@ impl GameState {
         if world.water_level(x, z).is_some() {
             return None;
         }
-        let ground = world.ground_top(x, z) as f32;
+        let ground = world.surface_height(at.x, at.y);
         if (ground - body.position.y).abs() > 1.1 {
             return None;
         }
@@ -337,7 +323,7 @@ impl GameState {
         if world.water_level(x, z).is_some() {
             return None;
         }
-        let ground = world.ground_top(x, z) as f32;
+        let ground = world.surface_height(at.x, at.y);
         if (ground - body.position.y).abs() > 1.6 {
             return None;
         }
@@ -828,30 +814,9 @@ impl GameState {
         Some(Event::Laid { player, matter })
     }
 
-    /// Digs a handful at `at`: the hollow of its cell deepens; the third handful takes the
-    /// cell's top voxel away (event `Excavated`), and the hollow starts again on the layer
-    /// below.
+    /// Digs a handful at `at`: the world takes a micro-voxel out there (event `Dig`).
     fn dig(&mut self, at: Vec2) {
-        let (x, z) = (at.x.floor(), at.y.floor());
-        let spot = Vec3::new(x + 0.5, 0.0, z + 0.5);
-        let index = match self.dug.iter().position(|(c, _)| c.distance(spot) < 0.1) {
-            Some(i) => i,
-            None => {
-                if self.dug.len() >= MAX_DUG {
-                    self.dug.remove(0);
-                }
-                self.dug.push((spot, 0.0));
-                self.dug.len() - 1
-            }
-        };
-        self.dug[index].1 += 1.0 / HANDFULS_PER_VOXEL as f32;
-        if self.dug[index].1 >= 0.999 {
-            self.dug.remove(index);
-            self.events.push(Event::Excavated {
-                x: x as usize,
-                z: z as usize,
-            });
-        }
+        self.events.push(Event::Dig { at });
     }
 
     /// A cut wears the blade: a knife loses a use, and when its binding gives way, the flake
@@ -1377,9 +1342,9 @@ mod tests {
         assert!(flakes <= 8, "{flakes} flakes out of 20 from coarse stone");
     }
 
-    /// Three handfuls at one place take its top voxel away (the world then removes it).
+    /// Taking a handful of ground asks the world to dig there.
     #[test]
-    fn digging_three_handfuls_excavates_a_voxel() {
+    fn a_handful_of_ground_digs_the_world() {
         let (mut world, mut state, id) = setup();
         let dims = world.dims();
         let (x, z) = (2..dims.nz - 2)
@@ -1390,24 +1355,19 @@ mod tests {
             })
             .expect("no sand");
         let top = world.ground_top(x, z);
-        let at = Vec2::new(x as f32 + 0.5, z as f32 + 0.5);
+        let at = Vec2::new(x as f32 + 0.6, z as f32 + 0.6);
         state.place(id, Vec3::new(at.x, top as f32, at.y - 1.0));
-        for _ in 0..3 {
-            assert!(matches!(
-                state.apply(&world, Command::PickAt { player: id, at }),
-                Some(Event::Picked {
-                    matter: Matter::Sand,
-                    ..
-                })
-            ));
-        }
-        let excavated: Vec<Event> = state.drain_events().collect();
-        assert!(
-            excavated.contains(&Event::Excavated { x, z }),
-            "{excavated:?}"
-        );
-        assert_eq!(world.remove_top(x, z), Some(Material::Sand));
-        assert_eq!(world.ground_top(x, z), top - 1);
-        assert_eq!(world.block(x, top - 1, z), Material::Air);
+        assert!(matches!(
+            state.apply(&world, Command::PickAt { player: id, at }),
+            Some(Event::Picked {
+                matter: Matter::Sand,
+                ..
+            })
+        ));
+        let events: Vec<Event> = state.drain_events().collect();
+        assert!(events.contains(&Event::Dig { at }), "{events:?}");
+        let dug = world.dig(at.x, at.y).unwrap();
+        assert_eq!(dug.material, Material::Sand);
+        assert!(world.surface_height(at.x, at.y) < top as f32);
     }
 }

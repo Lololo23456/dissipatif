@@ -379,10 +379,38 @@ fn blocked(world: &World, obstacles: &Obstacles, feet: Vec3) -> bool {
                     return true;
                 }
                 let inside = x >= 0 && z >= 0 && (x as usize) < dims.nx && (z as usize) < dims.nz;
-                if inside
-                    && (y as usize) < dims.ny
-                    && solid(world.block(x as usize, y as usize, z as usize))
-                {
+                if !inside || (y as usize) >= dims.ny {
+                    continue;
+                }
+                let (cx, cy, cz) = (x as usize, y as usize, z as usize);
+                // A dug cell: only its remaining micro-voxels are solid.
+                if let Some(micro) = world.micro(cx, cy, cz) {
+                    if micro_hit(micro, [cx, cy, cz], min, max) {
+                        return true;
+                    }
+                    continue;
+                }
+                if solid(world.block(cx, cy, cz)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether the box [min, max] overlaps a micro-voxel of the brick filling `cell`.
+fn micro_hit(micro: &[u8; world::MICRO_CELLS], cell: [usize; 3], min: Vec3, max: Vec3) -> bool {
+    let m = world::MICRO as f32;
+    let local = |v: f32, c: usize| ((v - c as f32) * m).clamp(0.0, m);
+    let range = |lo: f32, hi: f32, c: usize| {
+        let (a, b) = (local(lo, c), local(hi, c));
+        (a.floor() as usize)..(b.ceil() as usize).min(world::MICRO)
+    };
+    for mz in range(min.z, max.z, cell[2]) {
+        for my in range(min.y, max.y, cell[1]) {
+            for mx in range(min.x, max.x, cell[0]) {
+                if micro[world::micro_index(mx, my, mz)] != 0 {
                     return true;
                 }
             }

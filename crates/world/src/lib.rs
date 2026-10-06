@@ -68,6 +68,29 @@ pub struct World {
     plants: Vec<PlantInstance>,
     /// `plants::VARIANTS` models per kind of plant, in `Plant::ALL` order.
     models: Vec<Model>,
+    /// Cells subdivided into micro-voxels (dug into), by block index: `MICRO`³ material ids,
+    /// x fastest, then y, then z. A subdivided cell keeps its material in `blocks` until its
+    /// last micro-voxel is gone.
+    micro: std::collections::HashMap<usize, [u8; MICRO_CELLS]>,
+}
+
+/// Micro-voxels per cell along each axis, and per cell.
+pub const MICRO: usize = 4;
+pub const MICRO_CELLS: usize = MICRO * MICRO * MICRO;
+
+/// Index of micro-voxel (x, y, z) in a brick.
+pub const fn micro_index(x: usize, y: usize, z: usize) -> usize {
+    x + MICRO * (y + MICRO * z)
+}
+
+/// What changed when digging: the cell dug into, and whether it was emptied (the column then
+/// one cell lower) and whether water flowed into the column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dug {
+    pub material: Material,
+    pub cell: [usize; 3],
+    pub emptied: bool,
+    pub flooded: bool,
 }
 
 impl World {
@@ -166,7 +189,152 @@ impl World {
             blocks,
             plants,
             models,
+            micro: std::collections::HashMap::new(),
         }
+    }
+
+    /// The micro-voxels of a subdivided cell, if it is one.
+    pub fn micro(&self, x: usize, y: usize, z: usize) -> Option<&[u8; MICRO_CELLS]> {
+        self.micro.get(&self.dims().index(x, y, z))
+    }
+
+    /// Every subdivided cell: (x, y, z) and its micro-voxels.
+    pub fn micro_cells(&self) -> impl Iterator<Item = ([usize; 3], &[u8; MICRO_CELLS])> {
+        let d = self.dims();
+        self.micro.iter().map(move |(&i, m)| {
+            let x = i % d.nx;
+            let y = (i / d.nx) % d.ny;
+            let z = i / (d.nx * d.ny);
+            ([x, y, z], m)
+        })
+    }
+
+    /// Height of the ground surface at (x, z), micro-voxels included.
+    pub fn surface_height(&self, x: f32, z: f32) -> f32 {
+        let d = self.dims();
+        if x < 0.0 || z < 0.0 || x >= d.nx as f32 || z >= d.nz as f32 {
+            return 0.0;
+        }
+        let (cx, cz) = (x as usize, z as usize);
+        let top = self.tops[cx + d.nx * cz];
+        if top == 0 {
+            return 0.0;
+        }
+        let Some(m) = self.micro(cx, top - 1, cz) else {
+            return top as f32;
+        };
+        let mx = (((x - cx as f32) * MICRO as f32) as usize).min(MICRO - 1);
+        let mz = (((z - cz as f32) * MICRO as f32) as usize).min(MICRO - 1);
+        let filled = (0..MICRO).rev().find(|&my| m[micro_index(mx, my, mz)] != 0);
+        (top - 1) as f32 + filled.map_or(0.0, |my| (my + 1) as f32 / MICRO as f32)
+    }
+
+    /// Digs one micro-voxel out of the ground near (x, z): the highest one within reach of the
+    /// point in the column's top cell (subdivided on first dig). When the cell is emptied, the
+    /// column becomes one cell lower, and water next to it flows in. Returns what was dug, or
+    /// None at bedrock.
+    pub fn dig(&mut self, x: f32, z: f32) -> Option<Dug> {
+        let d = self.dims();
+        if x < 1.0 || z < 1.0 || x >= d.nx as f32 - 1.0 || z >= d.nz as f32 - 1.0 {
+            return None;
+        }
+        let (cx, cz) = (x as usize, z as usize);
+        let column = cx + d.nx * cz;
+        let top = self.tops[column];
+        if top <= 2 {
+            return None;
+        }
+        let y = top - 1;
+        let index = d.index(cx, y, cz);
+        let material = Material::from_id(self.blocks[index])?;
+        if !material.is_solid() || material.is_plant() {
+            return None;
+        }
+        let brick = self
+            .micro
+            .entry(index)
+            .or_insert([material.id(); MICRO_CELLS]);
+        // The highest micro-voxel among the micro-columns near the point (a pit forms under
+        // the hands), else the highest anywhere in the cell.
+        let (px, pz) = (
+            (x - cx as f32) * MICRO as f32,
+            (z - cz as f32) * MICRO as f32,
+        );
+        let mut best: Option<(usize, f32, usize)> = None;
+        for mz in 0..MICRO {
+            for mx in 0..MICRO {
+                let Some(my) = (0..MICRO)
+                    .rev()
+                    .find(|&my| brick[micro_index(mx, my, mz)] != 0)
+                else {
+                    continue;
+                };
+                let distance =
+                    ((mx as f32 + 0.5 - px).powi(2) + (mz as f32 + 0.5 - pz).powi(2)).sqrt();
+                // Near the hands first, then the highest, then the nearest.
+                let near = distance < 1.6;
+                let key = (near as usize) * 100 + my;
+                let better = match best {
+                    None => true,
+                    Some((k, dist, _)) => key > k || (key == k && distance < dist),
+                };
+                if better {
+                    best = Some((key, distance, micro_index(mx, my, mz)));
+                }
+            }
+        }
+        let (_, _, voxel) = best?;
+        brick[voxel] = 0;
+        let emptied = brick.iter().all(|&v| v == 0);
+        let mut flooded = false;
+        if emptied {
+            self.micro.remove(&index);
+            self.blocks[index] = Material::Air.id();
+            self.tops[column] = y;
+            let height = &mut self.ground.data[column];
+            *height = height.min(y as f32);
+            flooded = self.flood(cx, cz);
+        }
+        Some(Dug {
+            material,
+            cell: [cx, y, cz],
+            emptied,
+            flooded,
+        })
+    }
+
+    /// Water from the columns around (x, z) flows into it if their surface is above its ground,
+    /// and on into the dry columns lower than that surface it reaches (a dug channel fills).
+    fn flood(&mut self, x: usize, z: usize) -> bool {
+        let d = self.dims();
+        let neighbours = |x: usize, z: usize| {
+            [
+                (x + 1, z),
+                (x.wrapping_sub(1), z),
+                (x, z + 1),
+                (x, z.wrapping_sub(1)),
+            ]
+            .into_iter()
+            .filter(move |&(a, b)| a < d.nx && b < d.nz)
+        };
+        let level = neighbours(x, z)
+            .filter_map(|(a, b)| self.water_level(a, b))
+            .fold(f32::NEG_INFINITY, f32::max);
+        if level <= self.tops[x + d.nx * z] as f32 + 0.05 {
+            return false;
+        }
+        let mut stack = vec![(x, z)];
+        let mut filled = false;
+        while let Some((a, b)) = stack.pop() {
+            let column = a + d.nx * b;
+            if self.water_level(a, b).is_some() || self.tops[column] as f32 >= level - 0.05 {
+                continue;
+            }
+            self.water.data[column] = level;
+            filled = true;
+            stack.extend(neighbours(a, b));
+        }
+        filled
     }
 
     pub fn dims(&self) -> Dims {
@@ -189,24 +357,6 @@ impl World {
     /// Ground voxels of column (x, z), plants excluded.
     pub fn ground_top(&self, x: usize, z: usize) -> usize {
         self.tops[x + self.dims().nx * z]
-    }
-
-    /// Digs out the top ground voxel of column (x, z): it becomes air and the column is one
-    /// lower. Returns what was dug, or None if too little ground is left (bedrock).
-    pub fn remove_top(&mut self, x: usize, z: usize) -> Option<Material> {
-        let dims = self.dims();
-        let column = x + dims.nx * z;
-        let top = self.tops[column];
-        if top <= 2 {
-            return None;
-        }
-        let i = dims.index(x, top - 1, z);
-        let dug = Material::from_id(self.blocks[i])?;
-        self.blocks[i] = Material::Air.id();
-        self.tops[column] = top - 1;
-        let height = &mut self.ground.data[column];
-        *height = height.min((top - 1) as f32);
-        Some(dug)
     }
 
     /// Water surface of column (x, z), if water covers its ground.
@@ -398,5 +548,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn digging_takes_micro_voxels_until_the_cell_is_gone() {
+        let mut world = small(6);
+        let dims = world.dims();
+        let (x, z) = (4..dims.nz - 4)
+            .flat_map(|z| (4..dims.nx - 4).map(move |x| (x, z)))
+            .find(|&(x, z)| world.water_level(x, z).is_none() && world.ground_top(x, z) > 4)
+            .unwrap();
+        let top = world.ground_top(x, z);
+        // Inside a micro-column (not on a corner between four).
+        let (px, pz) = (x as f32 + 0.6, z as f32 + 0.6);
+        let first = world.dig(px, pz).unwrap();
+        assert!(!first.emptied && world.micro(x, top - 1, z).is_some());
+        assert!(world.surface_height(px, pz) < top as f32);
+        let mut digs = 1;
+        while !world.dig(px, pz).unwrap().emptied {
+            digs += 1;
+        }
+        assert_eq!(digs + 1, MICRO_CELLS);
+        assert_eq!(world.ground_top(x, z), top - 1);
+        assert!(world.micro(x, top - 1, z).is_none());
+    }
+
+    #[test]
+    fn water_flows_into_a_hole_dug_beside_it() {
+        let mut world = small(6);
+        let dims = world.dims();
+        // A dry column next to a lake or the sea, its ground just above the water.
+        let found = (2..dims.nz - 2)
+            .flat_map(|z| (2..dims.nx - 2).map(move |x| (x, z)))
+            .find_map(|(x, z)| {
+                if world.water_level(x, z).is_some() {
+                    return None;
+                }
+                let level = [(x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)]
+                    .into_iter()
+                    .filter_map(|(a, b)| world.water_level(a, b))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let top = world.ground_top(x, z) as f32;
+                (level > top - 1.0 && level < top).then_some((x, z))
+            });
+        let Some((x, z)) = found else {
+            return;
+        };
+        let mut flooded = false;
+        for _ in 0..MICRO_CELLS {
+            if let Some(dug) = world.dig(x as f32 + 0.5, z as f32 + 0.5) {
+                flooded |= dug.flooded;
+                if dug.emptied {
+                    break;
+                }
+            }
+        }
+        assert!(flooded && world.water_level(x, z).is_some());
     }
 }
