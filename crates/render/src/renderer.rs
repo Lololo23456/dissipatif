@@ -1,9 +1,10 @@
 //! Draws the voxel scene: owns the render pipelines, the frame data (camera, atmosphere,
 //! materials, shadow map), the volumes (terrain, water…) and the depth buffer.
 //!
-//! A frame is two passes: the shadow pass draws the opaque volumes seen from the sun, keeping
-//! only depth (the shadow map); the main pass draws everything seen from the camera and asks
-//! the shadow map, for each pixel, whether the sun reaches it.
+//! A frame is three passes: the shadow pass draws the opaque volumes seen from the sun, keeping
+//! only depth (the shadow map); the main pass draws everything seen from the camera into the
+//! HDR scene image, asking the shadow map, for each pixel, whether the sun reaches it; the post
+//! pass reworks that image into the final one (see `post`).
 
 use glam::Vec3;
 use sim::grid::Field3;
@@ -11,10 +12,13 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{CameraUniform, OrbitCamera, light_view_proj};
 use crate::gpu::Gpu;
+use crate::marks::{MarksUniform, Print, Ripple};
 use crate::mesh::{MeshData, Vertex};
-use crate::models::{GpuModel, ModelInstance};
+use crate::models::{GpuModel, ModelInstance, PartInstance};
 use crate::palette::{self, AtmosphereUniform, MaterialsUniform};
 use crate::particles::{CubeVertex, ParticleInstance, unit_cube};
+use crate::post::{Post, SCENE_FORMAT};
+use crate::sky::Sky;
 use crate::volume::{Volume, VolumeStyle};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -24,6 +28,10 @@ const SHADOW_SIZE: u32 = 2048;
 /// Handle to a model added with `Renderer::add_model`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelId(usize);
+
+/// Handle to an articulated part added with `Renderer::add_part`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PartId(usize);
 
 /// Handle to a volume added with `Renderer::add_volume`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +49,8 @@ pub struct Renderer {
     particle_buffer: wgpu::Buffer,
     particle_count: u32,
     camera_buffer: wgpu::Buffer,
+    atmosphere_buffer: wgpu::Buffer,
+    marks_buffer: wgpu::Buffer,
     /// Group 0: camera, atmosphere, materials, shadow map.
     frame_bind_group: wgpu::BindGroup,
     /// Draws depth only, from the sun.
@@ -49,6 +59,10 @@ pub struct Renderer {
     model_pipeline: wgpu::RenderPipeline,
     model_shadow_pipeline: wgpu::RenderPipeline,
     models: Vec<GpuModel>,
+    /// Articulated parts (characters): each instance has its own full transform.
+    part_pipeline: wgpu::RenderPipeline,
+    part_shadow_pipeline: wgpu::RenderPipeline,
+    parts: Vec<GpuModel>,
     /// Group 1 for models: a material volume with no fields of its own (models carry their
     /// materials in their vertices), for the volume uniform the fragment shader reads.
     model_volume: Volume,
@@ -59,12 +73,16 @@ pub struct Renderer {
     /// Towards the sun, and the box the shadow map must cover.
     sun_direction: Vec3,
     scene_bounds: (Vec3, Vec3),
+    /// Mist, wetness of the ground, height of the mist floor (see `set_weather`).
+    weather: [f32; 3],
     /// Background, the colour of the haze (linear RGB).
     clear_color: wgpu::Color,
     /// Group 1: one bind group per volume, all with this layout.
     volume_layout: wgpu::BindGroupLayout,
     volumes: Vec<Volume>,
     depth_view: wgpu::TextureView,
+    /// The scene image and the last pass that turns it into the final image.
+    post: Post,
 }
 
 impl Renderer {
@@ -80,17 +98,23 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // The atmosphere does not change during the game (for now): written once at creation.
+        // The atmosphere follows the hour of the day: rewritten by `set_sky`.
         let atmosphere = palette::golden_hour();
         let atmosphere_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("atmosphere"),
-            contents: bytemuck::bytes_of(&AtmosphereUniform::new(&atmosphere)),
-            usage: wgpu::BufferUsages::UNIFORM,
+            contents: bytemuck::bytes_of(&AtmosphereUniform::new(&atmosphere, 0.0)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let materials_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("materials"),
             contents: bytemuck::bytes_of(&MaterialsUniform::new(&palette::materials())),
             usage: wgpu::BufferUsages::UNIFORM,
+        });
+        // Ripples and footprints, rewritten when they change (see `set_marks`).
+        let marks_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("marks"),
+            contents: bytemuck::bytes_of(&MarksUniform::new(&[], &[])),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         // Shadow map: a depth texture drawn by the shadow pass and read by the main pass.
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -156,6 +180,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                uniform_entry(5, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         // Bind group: the actual resources plugged into that signature.
@@ -182,6 +207,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: marks_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -235,7 +264,8 @@ impl Renderer {
         // Opaque volumes write their depth; transparent ones (water) are drawn afterwards,
         // blended over what is behind them, and do not write depth so that what lies beneath
         // the surface stays visible through it.
-        let format = gpu.surface_format();
+        // The scene passes draw into the HDR scene image, not into the final image.
+        let format = SCENE_FORMAT;
         let pipeline =
             create_voxel_pipeline(device, &pipeline_layout, &shader, format, VoxelPass::Opaque);
         let transparent_pipeline = create_voxel_pipeline(
@@ -251,10 +281,16 @@ impl Renderer {
             bind_group_layouts: &[Some(&shadow_frame_layout), Some(&volume_layout)],
             immediate_size: 0,
         });
-        let shadow_pipeline = create_shadow_pipeline(device, &shadow_layout, &shader, false);
-        let model_shadow_pipeline = create_shadow_pipeline(device, &shadow_layout, &shader, true);
+        let shadow_pipeline =
+            create_shadow_pipeline(device, &shadow_layout, &shader, VoxelPass::Opaque);
+        let model_shadow_pipeline =
+            create_shadow_pipeline(device, &shadow_layout, &shader, VoxelPass::Model);
+        let part_shadow_pipeline =
+            create_shadow_pipeline(device, &shadow_layout, &shader, VoxelPass::Part);
         let model_pipeline =
             create_voxel_pipeline(device, &pipeline_layout, &shader, format, VoxelPass::Model);
+        let part_pipeline =
+            create_voxel_pipeline(device, &pipeline_layout, &shader, format, VoxelPass::Part);
         let mut model_volume = Volume::new(
             device,
             &VolumeStyle {
@@ -299,6 +335,7 @@ impl Renderer {
 
         let (width, height) = gpu.size();
         let depth_view = create_depth_view(device, width, height);
+        let post = Post::new(device, gpu.surface_format(), width, height);
 
         Self {
             gpu,
@@ -310,20 +347,27 @@ impl Renderer {
             particle_buffer,
             particle_count: 0,
             camera_buffer,
+            atmosphere_buffer,
+            marks_buffer,
             frame_bind_group,
             shadow_pipeline,
             model_pipeline,
             model_shadow_pipeline,
             models: Vec::new(),
+            part_pipeline,
+            part_shadow_pipeline,
+            parts: Vec::new(),
             model_volume,
             shadow_bind_group,
             shadow_view,
             sun_direction: Vec3::from(atmosphere.sun_direction),
             scene_bounds: (Vec3::ZERO, Vec3::splat(64.0)),
+            weather: [0.0, 0.0, 0.0],
             clear_color,
             volume_layout,
             volumes: Vec::new(),
             depth_view,
+            post,
         }
     }
 
@@ -333,6 +377,34 @@ impl Renderer {
         }
         self.gpu.resize(width, height);
         self.depth_view = create_depth_view(self.gpu.device(), width, height);
+        self.post.resize(self.gpu.device(), width, height);
+    }
+
+    /// Light, haze and grading for the hour of the day (see `sky::sky`).
+    pub fn set_sky(&mut self, sky: &Sky) {
+        let atmosphere = &sky.atmosphere;
+        let uniform = AtmosphereUniform::new(atmosphere, sky.stars);
+        self.gpu
+            .queue()
+            .write_buffer(&self.atmosphere_buffer, 0, bytemuck::bytes_of(&uniform));
+        self.sun_direction = Vec3::from(atmosphere.sun_direction).normalize();
+        let [r, g, b] = atmosphere.fog_color.map(f64::from);
+        self.clear_color = wgpu::Color { r, g, b, a: 1.0 };
+        self.post.set_grade(&sky.grade, sky.night);
+    }
+
+    /// Ripples on the water and footprints in the sand (see `marks`).
+    pub fn set_marks(&mut self, ripples: &[Ripple], prints: &[Print]) {
+        let uniform = MarksUniform::new(ripples, prints);
+        self.gpu
+            .queue()
+            .write_buffer(&self.marks_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Mist (0 to 1) lying around `floor` (height in cells: thick below it, thinning above),
+    /// and how wet the ground is (0 dry to 1 soaked: darker, glossy).
+    pub fn set_weather(&mut self, mist: f32, wet: f32, floor: f32) {
+        self.weather = [mist, wet, floor];
     }
 
     /// The box (world coordinates) that casts and receives shadows. Outside it, everything is
@@ -353,6 +425,20 @@ impl Renderer {
     pub fn set_model_instances(&mut self, id: ModelId, instances: &[ModelInstance]) {
         let (device, queue) = (self.gpu.device(), self.gpu.queue());
         self.models[id.0].set_instances(device, queue, instances);
+    }
+
+    /// Adds an articulated part (a mesh made with `mesher::mesh_materials`, its origin at its
+    /// pivot). Nothing is drawn until it has instances.
+    pub fn add_part(&mut self, mesh: &MeshData) -> PartId {
+        let (device, queue) = (self.gpu.device(), self.gpu.queue());
+        self.parts.push(GpuModel::new(device, queue, mesh));
+        PartId(self.parts.len() - 1)
+    }
+
+    /// Where a part is drawn this frame: one copy per instance.
+    pub fn set_part_instances(&mut self, id: PartId, instances: &[PartInstance]) {
+        let (device, queue) = (self.gpu.device(), self.gpu.queue());
+        self.parts[id.0].set_instances(device, queue, instances);
     }
 
     /// Adds a volume to the scene. Nothing is drawn for it until it has a mesh and a field.
@@ -419,7 +505,7 @@ impl Renderer {
         };
         let (min, max) = self.scene_bounds;
         let light = light_view_proj(self.sun_direction, min, max);
-        let uniform = CameraUniform::new(camera, self.aspect(), time, light);
+        let uniform = CameraUniform::new(camera, self.aspect(), time, self.weather, light);
         self.gpu
             .queue()
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -463,6 +549,8 @@ impl Renderer {
             }
             pass.set_pipeline(&self.model_shadow_pipeline);
             self.draw_models(&mut pass);
+            pass.set_pipeline(&self.part_shadow_pipeline);
+            self.draw_parts(&mut pass);
         }
         {
             // A render pass = a series of draws into the same target images.
@@ -470,7 +558,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
+                    view: self.post.scene_view(),
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -524,9 +612,13 @@ impl Renderer {
                 if !transparent {
                     pass.set_pipeline(&self.model_pipeline);
                     self.draw_models(&mut pass);
+                    pass.set_pipeline(&self.part_pipeline);
+                    self.draw_parts(&mut pass);
                 }
             }
         }
+        self.post
+            .draw(self.gpu.queue(), &mut encoder, &frame.view, time, camera);
         self.gpu.queue().submit([encoder.finish()]);
         self.gpu.present(frame);
     }
@@ -539,30 +631,23 @@ fn create_shadow_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
-    models: bool,
+    pass: VoxelPass,
 ) -> wgpu::RenderPipeline {
-    let model_buffers = [Some(Vertex::layout()), Some(ModelInstance::layout())];
-    let volume_buffers = [Some(Vertex::layout())];
+    let (label, entry_point) = match pass {
+        VoxelPass::Model => ("model shadow pipeline", "vs_model_shadow"),
+        VoxelPass::Part => ("part shadow pipeline", "vs_part_shadow"),
+        VoxelPass::Opaque | VoxelPass::Transparent => ("shadow pipeline", "vs_shadow"),
+    };
+    let models = pass == VoxelPass::Model;
+    let buffers = vertex_buffers(pass);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(if models {
-            "model shadow pipeline"
-        } else {
-            "shadow pipeline"
-        }),
+        label: Some(label),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some(if models {
-                "vs_model_shadow"
-            } else {
-                "vs_shadow"
-            }),
+            entry_point: Some(entry_point),
             compilation_options: Default::default(),
-            buffers: if models {
-                &model_buffers
-            } else {
-                &volume_buffers
-            },
+            buffers: &buffers,
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -593,10 +678,19 @@ fn create_shadow_pipeline(
 impl Renderer {
     /// Draws every model with instances, with the pipeline already set on `pass`.
     fn draw_models(&self, pass: &mut wgpu::RenderPass<'_>) {
-        if let Some(fields) = &self.model_volume.fields {
+        Self::draw_instanced(pass, &self.models, &self.model_volume);
+    }
+
+    /// Draws every articulated part with instances, with the pipeline already set on `pass`.
+    fn draw_parts(&self, pass: &mut wgpu::RenderPass<'_>) {
+        Self::draw_instanced(pass, &self.parts, &self.model_volume);
+    }
+
+    fn draw_instanced(pass: &mut wgpu::RenderPass<'_>, models: &[GpuModel], volume: &Volume) {
+        if let Some(fields) = &volume.fields {
             pass.set_bind_group(1, &fields.bind_group, &[]);
         }
-        for model in &self.models {
+        for model in models {
             if model.instance_count == 0 || model.mesh.index_count == 0 {
                 continue;
             }
@@ -614,6 +708,17 @@ enum VoxelPass {
     Transparent,
     /// Opaque models drawn by instancing (vertex + instance buffers).
     Model,
+    /// Articulated parts: instancing with a full transform per instance.
+    Part,
+}
+
+/// Vertex buffers of each kind of draw: the mesh, plus the instances for models and parts.
+fn vertex_buffers(pass: VoxelPass) -> Vec<Option<wgpu::VertexBufferLayout<'static>>> {
+    match pass {
+        VoxelPass::Opaque | VoxelPass::Transparent => vec![Some(Vertex::layout())],
+        VoxelPass::Model => vec![Some(Vertex::layout()), Some(ModelInstance::layout())],
+        VoxelPass::Part => vec![Some(Vertex::layout()), Some(PartInstance::layout())],
+    }
 }
 
 fn create_voxel_pipeline(
@@ -628,9 +733,9 @@ fn create_voxel_pipeline(
         VoxelPass::Opaque => ("voxel pipeline", "vs_main"),
         VoxelPass::Transparent => ("transparent voxel pipeline", "vs_main"),
         VoxelPass::Model => ("model pipeline", "vs_model"),
+        VoxelPass::Part => ("part pipeline", "vs_part"),
     };
-    let model_buffers = [Some(Vertex::layout()), Some(ModelInstance::layout())];
-    let volume_buffers = [Some(Vertex::layout())];
+    let buffers = vertex_buffers(pass);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -638,11 +743,7 @@ fn create_voxel_pipeline(
             module: shader,
             entry_point: Some(entry_point),
             compilation_options: Default::default(),
-            buffers: if pass == VoxelPass::Model {
-                &model_buffers
-            } else {
-                &volume_buffers
-            },
+            buffers: &buffers,
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,

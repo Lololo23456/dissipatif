@@ -37,10 +37,23 @@ pub enum Material {
     Stone = 29,
     WillowLeaves = 30,
     DryShrub = 31,
+    // Worn and made things (the naturalist's clothes and gear), never generated in the world.
+    Skin = 32,
+    Khaki = 33,
+    OliveCloth = 34,
+    Leather = 35,
+    Canvas = 36,
+    Felt = 37,
+    NotebookRed = 38,
+    Hair = 39,
+    Eye = 40,
+    Brass = 41,
+    /// Dark furrows and cracks of bark (generated, part of the trees).
+    BarkDark = 42,
 }
 
 /// Number of materials, `Air` included: the size of the colour table.
-pub const MATERIAL_COUNT: usize = 32;
+pub const MATERIAL_COUNT: usize = 43;
 
 impl Material {
     /// Every material, in id order.
@@ -77,6 +90,17 @@ impl Material {
         Material::Stone,
         Material::WillowLeaves,
         Material::DryShrub,
+        Material::Skin,
+        Material::Khaki,
+        Material::OliveCloth,
+        Material::Leather,
+        Material::Canvas,
+        Material::Felt,
+        Material::NotebookRed,
+        Material::Hair,
+        Material::Eye,
+        Material::Brass,
+        Material::BarkDark,
     ];
 
     pub const fn id(self) -> u8 {
@@ -93,21 +117,23 @@ impl Material {
 
     /// Part of a plant or of what lies on the ground (stones), not of the ground itself.
     pub const fn is_plant(self) -> bool {
-        !matches!(
-            self,
-            Material::Air
-                | Material::Grass
-                | Material::ForestFloor
-                | Material::Dirt
-                | Material::Sand
-                | Material::DesertSand
-                | Material::Sandstone
-                | Material::Rock
-                | Material::Snow
-                | Material::Gravel
-                | Material::DryGrass
-                | Material::Clay
-        )
+        matches!(self, Material::BarkDark)
+            || (self as u8) < Material::Skin as u8
+                && !matches!(
+                    self,
+                    Material::Air
+                        | Material::Grass
+                        | Material::ForestFloor
+                        | Material::Dirt
+                        | Material::Sand
+                        | Material::DesertSand
+                        | Material::Sandstone
+                        | Material::Rock
+                        | Material::Snow
+                        | Material::Gravel
+                        | Material::DryGrass
+                        | Material::Clay
+                )
     }
 
     /// Leaves of a tree crown: where falling leaves come from.

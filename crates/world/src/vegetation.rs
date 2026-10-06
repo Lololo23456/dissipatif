@@ -13,7 +13,7 @@ use sim::grid::Dims;
 use crate::biome::{Biome, Plant};
 use crate::material::{MATERIAL_COUNT, Material};
 use crate::noise::{hash, hash_unit};
-use crate::plants::{MICRO, Model, VARIANTS};
+use crate::plants::{Model, VARIANTS};
 
 /// Size of the grid cells: at most one plant per `SPACING × SPACING` columns.
 const SPACING: usize = 4;
@@ -21,8 +21,8 @@ const SPACING: usize = 4;
 const MAX_SLOPE: f32 = 1.5;
 /// Room kept above the tallest ground for the tallest tree.
 pub const HEADROOM: usize = 20;
-/// A world cell counts as part of a plant when at least this many of its micro-cells are.
-const COARSE_SHARE: usize = MICRO * MICRO * MICRO / 8;
+/// A world cell counts as part of a plant when at least this share of its micro-cells are.
+const COARSE_SHARE: f32 = 1.0 / 8.0;
 
 /// One plant of the world. Variant, orientation and size combine so that no two neighbours
 /// look alike.
@@ -191,7 +191,8 @@ pub fn rotate(dx: f32, dz: f32, rotation: u32) -> (f32, f32) {
 /// Writes the coarse copy of a plant into the world grid (only into air cells): each world cell
 /// takes the plant material most present among its micro-cells, if there are enough of them.
 pub fn stamp(blocks: &mut [u8], dims: Dims, plant: &PlantInstance, model: &Model) {
-    let m = MICRO as f32;
+    let m = model.resolution as f32;
+    let needed = (COARSE_SHARE * m * m * m) as usize;
     // Micro-cells per world cell and material.
     let mut counts: std::collections::HashMap<(i64, i64, i64), [usize; MATERIAL_COUNT]> =
         Default::default();
@@ -231,7 +232,7 @@ pub fn stamp(blocks: &mut [u8], dims: Dims, plant: &PlantInstance, model: &Model
             .enumerate()
             .max_by_key(|(_, n)| **n)
             .unwrap_or((0, &0));
-        if in_world && n >= COARSE_SHARE {
+        if in_world && n >= needed {
             let i = dims.index(x as usize, y as usize, z as usize);
             if blocks[i] == Material::Air.id() {
                 blocks[i] = best as u8;

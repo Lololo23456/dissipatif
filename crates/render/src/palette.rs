@@ -68,7 +68,7 @@ pub fn foam() -> Palette {
 }
 
 /// Number of entries of the material colour table.
-pub const MATERIAL_SLOTS: usize = 32;
+pub const MATERIAL_SLOTS: usize = 48;
 
 /// Colour of each material of the world, indexed by material id (`world::Material`, same
 /// order). Golden-hour tones: yellow-green grass, warm sand, warm grey rock.
@@ -109,6 +109,24 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
         srgb_hex(0xaaa49c), // 29 stone (68)
         srgb_hex(0x8cad52), // 30 willow leaves (67)
         srgb_hex(0xa38c55), // 31 dry shrub (59)
+        // The naturalist's clothes and gear.
+        srgb_hex(0xd9a77c), // 32 skin (72)
+        srgb_hex(0xb39a5e), // 33 khaki shirt (65)
+        srgb_hex(0x666a3c), // 34 olive cloth (43)
+        srgb_hex(0x6a4529), // 35 leather (33)
+        srgb_hex(0xc8b386), // 36 canvas (74)
+        srgb_hex(0x7d5534), // 37 felt hat (40)
+        srgb_hex(0xa63b2d), // 38 red notebook (40)
+        srgb_hex(0x4a3122), // 39 hair (23)
+        srgb_hex(0x241c18), // 40 eyes (11)
+        srgb_hex(0xc9a24a), // 41 brass (69)
+        srgb_hex(0x45301f), // 42 dark bark (22)
+        // Free slots.
+        srgb_hex(0xff00ff),
+        srgb_hex(0xff00ff),
+        srgb_hex(0xff00ff),
+        srgb_hex(0xff00ff),
+        srgb_hex(0xff00ff),
     ]
 }
 
@@ -117,7 +135,7 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
 /// WGSL side (`shaders/voxel.wgsl`):
 /// ```wgsl
 /// struct Materials {
-///     colors: array<vec4<f32>, 32>,  // offset 0, size 512 (rgb + unused w)
+///     colors: array<vec4<f32>, 48>,  // offset 0, size 768 (rgb + unused w)
 /// }
 /// ```
 #[repr(C)]
@@ -180,7 +198,7 @@ pub fn golden_hour() -> Atmosphere {
 ///     sky_color: vec4<f32>,      // offset 32
 ///     ground_color: vec4<f32>,   // offset 48
 ///     fog_color: vec4<f32>,      // offset 64
-///     fog: vec4<f32>,            // offset 80: start, end, max, unused
+///     fog: vec4<f32>,            // offset 80: start, end, max, stars (0 to 1)
 /// }
 /// ```
 #[repr(C)]
@@ -195,7 +213,8 @@ pub struct AtmosphereUniform {
 }
 
 impl AtmosphereUniform {
-    pub fn new(atmosphere: &Atmosphere) -> Self {
+    /// `stars`: how many stars show, in [0, 1] (night sky reflected in the water).
+    pub fn new(atmosphere: &Atmosphere, stars: f32) -> Self {
         let [x, y, z] = atmosphere.sun_direction;
         let length = (x * x + y * y + z * z).sqrt();
         let rgb = |[r, g, b]: [f32; 3]| [r, g, b, 1.0];
@@ -209,7 +228,7 @@ impl AtmosphereUniform {
                 atmosphere.fog_start,
                 atmosphere.fog_end,
                 atmosphere.fog_max,
-                0.0,
+                stars,
             ],
         }
     }
@@ -241,7 +260,7 @@ mod tests {
 
     #[test]
     fn materials_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 512);
+        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 768);
     }
 
     #[test]
@@ -252,7 +271,7 @@ mod tests {
 
     #[test]
     fn sun_direction_is_normalised() {
-        let [x, y, z, _] = AtmosphereUniform::new(&golden_hour()).sun_direction;
+        let [x, y, z, _] = AtmosphereUniform::new(&golden_hour(), 0.0).sun_direction;
         assert!((x * x + y * y + z * z - 1.0).abs() < 1e-6);
         assert!(y > 0.0, "the sun must be above the horizon");
     }

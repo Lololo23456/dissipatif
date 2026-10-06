@@ -19,11 +19,48 @@ Chaque comportement du monde est un vrai phénomène (nuées, cycles prédateurs
 5. **Interagir avec tout, par des règles et non des cas particuliers.** Quelques propriétés et quelques règles générales produisent des milliers d'interactions que personne n'a écrites.
 6. **Le temps a une flèche.** Pas de retour en arrière gratuit : un feu, une rivière qui change de cours, une anomalie qui s'éteint laissent une trace.
 
+## Principe directeur : la nature est plus forte que le joueur
+
+Toute mécanique qui garde la nature dominante reste ; les autres sortent.
+
+- **Le joueur pousse, il ne commande pas** : ses actions sont petites, et la nature les amplifie, les absorbe ou les annule.
+- **Rien n'est permanent sans entretien** : c'est la logique des structures dissipatives, qui s'effondrent sans flux.
+- **Le monde suit son cours** sans attendre le joueur.
+- **La progression élargit la perception** (lentilles, télescope, carnet), jamais la puissance.
+- **La survie rappelle que le naturaliste est fragile.**
+- **L'échec se lit après coup** (carnet, historique) : le joueur doit se sentir petit, pas puni.
+
+### Tout est touchable, rien n'est contrôlable
+
+- Pas d'actions codées objet par objet, mais des **propriétés** (masse, dureté, inflammabilité, humidité, valeur nutritive…) et quelques **verbes généraux** : pousser, porter, jeter, enflammer, arroser, déplacer, goûter.
+- **À l'échelle d'un humain** : un rocher oui, une montagne non.
+- Chaque action **déborde en conséquences** que le joueur n'avait pas prévues ; la nature répare, détourne ou déforme.
+- Toutes les actions passent par la **commande unique** (contrainte multijoueur, voir `decisions.md`).
+
+### Le creusage
+
+Il existe, mais pas à la Minecraft :
+- il a un **coût** (temps, effort, dureté du matériau) et reste borné par le corps ;
+- la **matière est conservée** : la terre est dans les mains ou en tas ;
+- **la nature réagit** : l'eau s'accumule dans le trou, un sol sans soutien s'éboule, les racines tiennent le terrain, le trou se comble avec le temps ;
+- techniquement, il demande un remaillage local : à faire avec la simulation de l'eau et des éboulements, pas avant.
+
+### L'artisanat : des propriétés, pas des recettes
+
+On ne combine pas « 3 bois + 2 pierres = hache » : on assemble des matières, et leurs propriétés décident de ce que l'objet peut faire.
+
+- **Un objet = ses matériaux + sa forme.** Une pierre tranchante attachée à un bâton long coupe et porte loin. Le jeu ne connaît pas « la hache » : il calcule le tranchant (de la pierre), le levier (du manche), la solidité (du plus faible des deux).
+- **Les verbes restent généraux** : assembler, tailler, tresser, chauffer, mouiller, sécher. Chacun transforme des propriétés ; il n'y a pas de verbe « fabriquer » par objet.
+- **La qualité vient du matériau, pas d'un niveau.** Un manche en bois vert plie, en bois sec il casse net, en bois mort il est fragile. Le joueur l'apprend en observant, pas dans un menu : c'est le pilier « comprendre » appliqué à l'artisanat.
+- **Les objets s'usent et retournent à la nature** : le bois pourrit, le métal rouille, la corde moisit à l'humidité. Rien n'est permanent sans entretien.
+- **Pas d'escalade de puissance**, pas d'outil en diamant. Les objets servent à observer, mesurer, survivre ou agir localement, jamais à dominer : un meilleur outil est plus précis, pas plus destructeur.
+- **Les ressources sont locales** : les matières dépendent du biome, donc ce qu'on peut fabriquer dépend de l'endroit où l'on est. Cela pousse à explorer.
+
 ## Le joueur
 
 - Un personnage vu de haut, caméra plongeante à la manière de Minecraft Dungeons.
 - Il explore, observe, note, manipule, construit. Il n'est pas un conquérant : il est un observateur qui apprend, et dont les actions ont des conséquences sur un monde qui réagit.
-- **Il agit directement sur le monde** : détruire des blocs, creuser, en poser, abattre un arbre, déplacer de la terre ou des pierres, détourner un ruisseau. Un bloc détruit se brise en micro-cubes qui tombent et roulent. Le monde réagit en chaîne : l'eau s'engouffre dans un trou, un arbre abattu prive la terre de racines, une anomalie privée de son flux s'éteint.
+- **Il agit directement sur le monde, à l'échelle de son corps** (voir le principe directeur) : creuser un peu, déplacer de la terre ou des pierres, détourner un ruisseau, abattre un arbre au prix d'un effort. Ce qui est arraché se brise en micro-cubes qui tombent et roulent, et la matière est conservée. Le monde réagit en chaîne : l'eau s'engouffre dans un trou, un arbre abattu prive la terre de racines, une anomalie privée de son flux s'éteint.
 
 ## Boucle centrale
 
@@ -121,8 +158,7 @@ Le jeu sert aussi de laboratoire : les régimes d'anomalies découverts (paramè
 
 ## À trancher
 
-- **Ce que le joueur cherche, au fond** : comprendre les anomalies, les protéger, les cultiver, ou simplement les observer. C'est ce qui donnera le fil du jeu.
+- **Le verbe central, ce que le joueur cherche au fond** : comprendre les anomalies, les protéger, les cultiver, ou simplement les observer. C'est ce qui donnera le fil du jeu. (Le principe directeur cadre la réponse : quel qu'il soit, ce verbe pousse sans commander.)
 - La place exacte des mécaniques héritées (flux, bifurcations, hystérésis, culture) dans le rapport aux anomalies.
-- Difficulté : un monde qui peut se dégrader sérieusement par les actions du joueur, ou un monde apaisé.
 - Particules purement visuelles ou porteuses de matière (conservation).
 - La forme des anomalies dans le monde : motifs dans le sol, êtres qui se déplacent, les deux.

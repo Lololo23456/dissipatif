@@ -10,8 +10,23 @@ use crate::biome::Plant;
 use crate::material::Material;
 use crate::noise::{hash, hash_unit, value3};
 
-/// Micro-cells per world cell, along each axis.
+/// Micro-cells per world cell, along each axis, for trees.
 pub const MICRO: usize = 4;
+/// Finer resolution for small plants (ground cover, bushes), where details show from close.
+pub const FINE: usize = 8;
+/// Finest resolution, for flowers: their heads are a few centimetres wide.
+pub const VERY_FINE: usize = 16;
+
+/// Voxels per world cell of a plant's model.
+pub const fn resolution(plant: Plant) -> usize {
+    if matches!(plant, Plant::Flower) {
+        VERY_FINE
+    } else if plant.is_ground_cover() || matches!(plant, Plant::Bush) {
+        FINE
+    } else {
+        MICRO
+    }
+}
 /// Variants generated for each kind of plant.
 pub const VARIANTS: u32 = 16;
 
@@ -24,6 +39,8 @@ pub struct Model {
     /// Micro-coordinates of the point the plant stands on: the centre of the bottom face of its
     /// base world cell. It lies on a corner between micro-cells.
     pub anchor: [usize; 3],
+    /// Voxels per world cell (`MICRO` or `FINE`).
+    pub resolution: usize,
 }
 
 impl Model {
@@ -47,17 +64,17 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::Pine => Builder::new(44, 68, seed),
         Plant::Acacia => Builder::new(64, 40, seed),
         Plant::Cactus => Builder::new(24, 32, seed),
-        Plant::Bush => Builder::new(24, 14, seed),
+        Plant::Bush => Builder::new(40, 24, seed),
         Plant::Birch => Builder::new(36, 60, seed),
         Plant::Willow => Builder::new(64, 44, seed),
         Plant::Palm => Builder::new(72, 64, seed),
         Plant::DeadTree => Builder::new(44, 44, seed),
-        Plant::Grass => Builder::new(12, 10, seed),
-        Plant::Flower => Builder::new(10, 10, seed),
-        Plant::Fern => Builder::new(26, 10, seed),
-        Plant::Mushroom => Builder::new(14, 10, seed),
-        Plant::Stone => Builder::new(16, 8, seed),
-        Plant::DryShrub => Builder::new(24, 14, seed),
+        Plant::Grass => Builder::new(16, 10, seed),
+        Plant::Flower => Builder::new(16, 18, seed),
+        Plant::Fern => Builder::new(44, 14, seed),
+        Plant::Mushroom => Builder::new(24, 12, seed),
+        Plant::Stone => Builder::new(36, 10, seed),
+        Plant::DryShrub => Builder::new(32, 20, seed),
     };
     match plant {
         Plant::Broadleaf => broadleaf(&mut b),
@@ -76,7 +93,9 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::Stone => stones(&mut b, variant),
         Plant::DryShrub => dry_shrub(&mut b),
     }
-    b.crop()
+    let mut model = b.crop();
+    model.resolution = resolution(plant);
+    model
 }
 
 /// Scratch space where a plant is drawn, centred on its anchor, then cropped to what is filled.
@@ -148,6 +167,49 @@ impl Builder {
     }
 
     /// A line of micro-cells from `from` to `to`, `width` cells thick.
+    /// A round trunk rising from the anchor, `height` micro-cells tall. Its radius tapers from
+    /// `r0` at the foot to `r1` at the top and swells into `roots` buttresses near the ground
+    /// (`flare`: extra radius at the foot); its axis follows `axis(y)` (lean, curve). Surface
+    /// voxels take their material from `bark(angle, y)` (furrows, marks, rings); inside, `core`.
+    #[allow(clippy::too_many_arguments)]
+    fn trunk(
+        &mut self,
+        height: f32,
+        r0: f32,
+        r1: f32,
+        flare: f32,
+        roots: f32,
+        axis: impl Fn(f32) -> [f32; 2],
+        core: Material,
+        bark: impl Fn(f32, f32) -> Material,
+    ) {
+        let root_phase = std::f32::consts::TAU * self.rand();
+        let mut y = 0.5;
+        while y < height {
+            let t = y / height;
+            let foot = flare * (-y / 1.6).exp();
+            let [cx, cz] = axis(y);
+            let reach = (r0.max(r1) + flare).ceil() as i32 + 1;
+            let (ix, iz) = (cx.floor() as i32, cz.floor() as i32);
+            for vz in iz - reach..=iz + reach {
+                for vx in ix - reach..=ix + reach {
+                    let (x, z) = (vx as f32 + 0.5, vz as f32 + 0.5);
+                    let (dx, dz) = (x - cx, z - cz);
+                    let angle = dz.atan2(dx);
+                    // Buttress roots: the foot bulges in a few directions.
+                    let lobes = 0.45 + 0.55 * (roots * angle + root_phase).cos().max(0.0);
+                    let r = r0 + (r1 - r0) * t + foot * lobes;
+                    let d = (dx * dx + dz * dz).sqrt();
+                    if d <= r {
+                        let material = if d > r - 1.0 { bark(angle, y) } else { core };
+                        self.set(x, y, z, material);
+                    }
+                }
+            }
+            y += 1.0;
+        }
+    }
+
     fn branch(&mut self, from: [f32; 3], to: [f32; 3], width: f32, material: Material) {
         let length = (0..3)
             .map(|i| (to[i] - from[i]).powi(2))
@@ -226,15 +288,52 @@ impl Builder {
             dims,
             voxels,
             anchor: [anchor[0] - lo[0], anchor[1] - lo[1], anchor[2] - lo[2]],
+            resolution: MICRO,
         }
     }
 }
 
 /// Round deciduous tree: thin trunk flared at the roots, a few branches, a crown of clumps.
+/// Furrowed bark (oak, willow, acacia): dark vertical grooves, wavering as they rise.
+fn furrowed(seed: u64, grooves: f32) -> impl Fn(f32, f32) -> Material {
+    let phase = hash_unit(seed, &[0xba4c]) * std::f32::consts::TAU;
+    move |angle, y| {
+        let wave = 0.5 * (y * 0.35 + phase).sin() + 0.25 * (y * 0.9 + 2.0 * phase).sin();
+        if (grooves * angle + wave + phase).sin() > 0.55 {
+            Material::BarkDark
+        } else {
+            Material::Wood
+        }
+    }
+}
+
+/// Plated bark (pine): irregular plates separated by dark cracks.
+fn plated(seed: u64) -> impl Fn(f32, f32) -> Material {
+    move |angle, y| {
+        let column = ((angle + std::f32::consts::PI) * 1.6).floor() as i64;
+        let row = ((y + 3.0 * hash_unit(seed, &[column])) / 3.0).floor() as i64;
+        let edge = ((y + 3.0 * hash_unit(seed, &[column])) / 3.0).fract() < 0.34;
+        if edge || hash_unit(seed, &[column, row]) < 0.2 {
+            Material::BarkDark
+        } else {
+            Material::Wood
+        }
+    }
+}
+
 fn broadleaf(b: &mut Builder) {
     let height = 16.0 + (b.rand() * 8.0).floor();
-    b.post(0.0, 0.0, 2.0, height, 2.0, Material::Wood);
-    b.post(0.0, 0.0, 0.0, 2.0, 4.0, Material::Wood);
+    let bark = furrowed(b.seed, 7.0);
+    b.trunk(
+        height,
+        1.8,
+        1.1,
+        1.8,
+        4.0,
+        |_| [0.0, 0.0],
+        Material::Wood,
+        bark,
+    );
     let mut ends = vec![[0.0, height + 3.0, 0.0]];
     let branches = 2 + (b.rand() * 2.0) as usize;
     for k in 0..branches {
@@ -273,7 +372,17 @@ fn broadleaf(b: &mut Builder) {
 /// Conifer: a straight thin trunk and stacked cones of needles narrowing to a spike.
 fn pine(b: &mut Builder) {
     let height = 34.0 + (b.rand() * 10.0).floor();
-    b.post(0.0, 0.0, 0.0, height, 2.0, Material::Wood);
+    let bark = plated(b.seed);
+    b.trunk(
+        height,
+        1.5,
+        0.6,
+        1.3,
+        5.0,
+        |_| [0.0, 0.0],
+        Material::Wood,
+        bark,
+    );
     let first = 6.0 + (b.rand() * 4.0).floor();
     let tiers = 5;
     let span = (height - first) / tiers as f32;
@@ -314,19 +423,12 @@ fn acacia(b: &mut Builder) {
     let lean_angle = std::f32::consts::TAU * b.rand();
     let lean = [lean_angle.cos(), lean_angle.sin()];
     // Trunk bending further as it rises.
-    let mut y = 0.0;
-    while y < height {
-        let bend = 6.0 * (y / height).powi(2);
-        b.post(
-            lean[0] * bend,
-            lean[1] * bend,
-            y,
-            y + 1.0,
-            2.0,
-            Material::Wood,
-        );
-        y += 1.0;
-    }
+    let bark = furrowed(b.seed, 5.0);
+    let bend = move |y: f32| {
+        let off = 6.0 * (y / height).powi(2);
+        [lean[0] * off, lean[1] * off]
+    };
+    b.trunk(height, 1.5, 1.0, 1.3, 3.0, bend, Material::Wood, bark);
     let top = [lean[0] * 6.0, height, lean[1] * 6.0];
     let forks = 2 + (b.rand() * 2.0) as usize;
     for k in 0..forks {
@@ -417,17 +519,31 @@ fn cactus(b: &mut Builder) {
 /// Birch: a slender white trunk speckled with dark marks, a light crown of tall clumps.
 fn birch(b: &mut Builder) {
     let height = 26.0 + (b.rand() * 8.0).floor();
-    let mut y = 0.0;
-    while y < height {
-        // Bark: white, with the dark marks birches are known for.
-        let material = if b.rand() < 0.18 {
+    // Bark: white, with the short horizontal dark marks birches are known for, and a darker,
+    // rougher foot.
+    let seed = b.seed;
+    let bark = move |angle: f32, y: f32| {
+        let column = ((angle + std::f32::consts::PI) * 2.0).floor() as i64;
+        let mark = hash_unit(seed, &[column, y as i64]) < 0.16;
+        let foot = y < 4.0 && hash_unit(seed, &[column, y as i64, 1]) < 0.6 - 0.12 * y;
+        if foot {
+            Material::BarkDark
+        } else if mark {
             Material::DeadWood
         } else {
             Material::BirchBark
-        };
-        b.post(0.0, 0.0, y, y + 1.0, 2.0, material);
-        y += 1.0;
-    }
+        }
+    };
+    b.trunk(
+        height,
+        1.3,
+        0.8,
+        0.9,
+        3.0,
+        |_| [0.0, 0.0],
+        Material::BirchBark,
+        bark,
+    );
     let clumps = 4 + (b.rand() * 3.0) as usize;
     for _ in 0..clumps {
         let angle = std::f32::consts::TAU * b.rand();
@@ -443,7 +559,17 @@ fn birch(b: &mut Builder) {
 /// Willow: a stout trunk, a dome of foliage and curtains of leaves hanging down to the ground.
 fn willow(b: &mut Builder) {
     let height = 14.0 + (b.rand() * 4.0).floor();
-    b.post(0.0, 0.0, 0.0, height, 3.0, Material::Wood);
+    let bark = furrowed(b.seed, 9.0);
+    b.trunk(
+        height,
+        2.3,
+        1.7,
+        2.2,
+        5.0,
+        |_| [0.0, 0.0],
+        Material::Wood,
+        bark,
+    );
     let r = 10.0 + 2.0 * b.rand();
     b.blob(
         [0.0, height + 2.0, 0.0],
@@ -472,18 +598,19 @@ fn palm(b: &mut Builder) {
     let height = 30.0 + (b.rand() * 10.0).floor();
     let lean_angle = std::f32::consts::TAU * b.rand();
     let lean = [lean_angle.cos(), lean_angle.sin()];
-    let mut y = 0.0;
-    while y < height {
-        let bend = 8.0 * (y / height).powi(2);
-        // Rings of the trunk: a darker band every few cells.
-        let material = if (y as i32) % 4 == 0 {
+    let bend = move |y: f32| {
+        let off = 8.0 * (y / height).powi(2);
+        [lean[0] * off, lean[1] * off]
+    };
+    // Rings of the trunk: a darker band every few cells.
+    let rings = |_angle: f32, y: f32| {
+        if (y as i32) % 3 == 0 {
             Material::Wood
         } else {
             Material::PalmTrunk
-        };
-        b.post(lean[0] * bend, lean[1] * bend, y, y + 1.0, 2.0, material);
-        y += 1.0;
-    }
+        }
+    };
+    b.trunk(height, 1.4, 1.1, 1.2, 6.0, bend, Material::PalmTrunk, rings);
     let top = [lean[0] * 8.0, height, lean[1] * 8.0];
     let fronds = 6 + (b.rand() * 3.0) as usize;
     for k in 0..fronds {
@@ -525,19 +652,19 @@ fn dead_tree(b: &mut Builder) {
     let height = 18.0 + (b.rand() * 10.0).floor();
     let lean_angle = std::f32::consts::TAU * b.rand();
     let lean = [lean_angle.cos(), lean_angle.sin()];
-    let mut y = 0.0;
-    while y < height {
-        let off = 2.0 * y / height;
-        b.post(
-            lean[0] * off,
-            lean[1] * off,
-            y,
-            y + 1.0,
-            2.0,
-            Material::DeadWood,
-        );
-        y += 1.0;
-    }
+    // Grey, split by long dark cracks.
+    let seed = b.seed;
+    let cracks = move |angle: f32, y: f32| {
+        let column = ((angle + std::f32::consts::PI) * 1.3).floor() as i64;
+        let crack = hash_unit(seed, &[column]) < 0.3 && (y * 0.2 + column as f32).sin() > -0.4;
+        if crack {
+            Material::BarkDark
+        } else {
+            Material::DeadWood
+        }
+    };
+    let off = move |y: f32| [lean[0] * 2.0 * y / height, lean[1] * 2.0 * y / height];
+    b.trunk(height, 1.5, 0.7, 1.0, 3.0, off, Material::DeadWood, cracks);
     let branches = 2 + (b.rand() * 3.0) as usize;
     for _ in 0..branches {
         let angle = std::f32::consts::TAU * b.rand();
@@ -557,23 +684,22 @@ fn dead_tree(b: &mut Builder) {
     }
 }
 
-/// A tuft of grass: thin blades of various heights, the tall ones bending over.
+/// A tuft of grass (fine resolution): thin blades of various heights, curving over as they
+/// rise, the tallest knee-high.
 fn grass(b: &mut Builder) {
-    let blades = 5 + (b.rand() * 5.0) as usize;
+    let blades = 8 + (b.rand() * 8.0) as usize;
     for _ in 0..blades {
         let angle = std::f32::consts::TAU * b.rand();
-        let out = 2.5 * b.rand().sqrt();
+        let out = 3.5 * b.rand().sqrt();
         let (x, z) = (angle.cos() * out, angle.sin() * out);
-        let height = 2.0 + (b.rand() * 4.0).floor();
+        // 2 to 6 voxels of an eighth of a cell: a quarter to three quarters of a cell.
+        let height = 2.0 + (b.rand() * 5.0).floor();
         let lean = std::f32::consts::TAU * b.rand();
+        let curl = 0.5 + 0.8 * b.rand();
         let mut y = 0.0;
         while y < height {
-            // The top of a tall blade leans over by one micro-cell.
-            let bend = if height > 3.0 && y >= height - 1.0 {
-                1.0
-            } else {
-                0.0
-            };
+            // The blade curves away more and more towards its tip.
+            let bend = curl * (y / height).powi(2) * height * 0.5;
             b.set(
                 x + lean.cos() * bend,
                 y,
@@ -585,91 +711,179 @@ fn grass(b: &mut Builder) {
     }
 }
 
-/// A flower: a stem with a leaf, petals of the variant's colour around a heart.
+/// A clump of wild flowers (very fine resolution: a voxel is about 6 cm if a cell is a metre):
+/// several thin stems of different heights over a small rosette of leaves, each topped with a
+/// tiny head. The variant picks the species:
+/// - daisy: four white petals around a yellow heart;
+/// - poppy: a red head with a dark heart, on a taller stem;
+/// - lavender: a spike of violet florets;
+/// - buttercup: small yellow heads.
 fn flower(b: &mut Builder, variant: u32) {
-    let petals = [
-        Material::FlowerRed,
-        Material::FlowerYellow,
-        Material::FlowerWhite,
-        Material::FlowerViolet,
-    ][variant as usize % 4];
-    let heart = if petals == Material::FlowerYellow {
-        Material::FlowerWhite
-    } else {
-        Material::FlowerYellow
+    let species = variant % 4;
+    let stems = match species {
+        1 => 2 + (b.rand() * 3.0) as usize,
+        _ => 3 + (b.rand() * 5.0) as usize,
     };
-    let height = 3.0 + (b.rand() * 3.0).floor();
-    let mut y = 0.0;
-    while y < height {
-        b.set(0.0, y, 0.0, Material::TallGrass);
-        y += 1.0;
+    // Rosette of leaves at the foot of the clump.
+    for _ in 0..6 {
+        let a = std::f32::consts::TAU * b.rand();
+        let r = 1.0 + 2.0 * b.rand();
+        b.set(a.cos() * r, 0.0, a.sin() * r, Material::TallGrass);
     }
-    b.set(1.0, 1.0, 0.0, Material::TallGrass);
-    b.set(0.0, height, 0.0, heart);
-    for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-        b.set(dx, height, dz, petals);
+    for _ in 0..stems {
+        let a = std::f32::consts::TAU * b.rand();
+        let out = 2.5 * b.rand().sqrt();
+        let (x, z) = (a.cos() * out, a.sin() * out);
+        let (low, spread) = match species {
+            1 => (8.0, 5.0),
+            2 => (7.0, 5.0),
+            _ => (5.0, 4.0),
+        };
+        let height = (low + spread * b.rand()).floor();
+        // A slight lean, growing towards the top.
+        let lean = std::f32::consts::TAU * b.rand();
+        let tilt = 1.5 * b.rand();
+        let at = |y: f32| {
+            let t = (y / height).powi(2) * tilt;
+            (x + lean.cos() * t, z + lean.sin() * t)
+        };
+        let mut y = 0.0;
+        while y < height {
+            let (sx, sz) = at(y);
+            b.set(sx, y, sz, Material::TallGrass);
+            y += 1.0;
+        }
+        let (hx, hz) = at(height);
+        match species {
+            0 => {
+                // Daisy.
+                b.set(hx, height, hz, Material::FlowerYellow);
+                for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                    b.set(hx + dx, height, hz + dz, Material::FlowerWhite);
+                }
+            }
+            1 => {
+                // Poppy: a red cup around a dark heart.
+                b.set(hx, height, hz, Material::Eye);
+                for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                    b.set(hx + dx, height, hz + dz, Material::FlowerRed);
+                    b.set(hx + dx, height + 1.0, hz + dz, Material::FlowerRed);
+                }
+            }
+            2 => {
+                // Lavender: florets along the top of the stem.
+                for k in 0..4 {
+                    let y = height + k as f32;
+                    b.set(hx, y, hz, Material::FlowerViolet);
+                    if k % 2 == 0 {
+                        b.set(
+                            hx + if k == 0 { 1.0 } else { -1.0 },
+                            y,
+                            hz,
+                            Material::FlowerViolet,
+                        );
+                    }
+                }
+            }
+            _ => {
+                // Buttercup: a small yellow head.
+                b.set(hx, height, hz, Material::FlowerYellow);
+                b.set(hx, height + 1.0, hz, Material::FlowerYellow);
+            }
+        }
     }
 }
 
-/// A fern: fronds arching out of the ground, with leaflets along them.
+/// A fern (fine resolution): long fronds arching out and down, with leaflets getting shorter
+/// towards the tip.
 fn fern(b: &mut Builder) {
-    let fronds = 5 + (b.rand() * 4.0) as usize;
+    let fronds = 6 + (b.rand() * 4.0) as usize;
     for k in 0..fronds {
         let angle = std::f32::consts::TAU * (k as f32 + 0.5 * b.rand()) / fronds as f32;
         let (dx, dz) = (angle.cos(), angle.sin());
-        let length = 6.0 + 4.0 * b.rand();
+        let length = 11.0 + 6.0 * b.rand();
+        let rise = 0.9 + 0.3 * b.rand();
         let mut s = 0.0;
         while s < length {
-            let y = 0.9 * s - 0.1 * s * s;
+            let y = (rise * s - 0.055 * s * s).max(0.0);
             let (x, z) = (dx * s, dz * s);
-            b.set(x, y.max(0.0), z, Material::Fern);
+            b.set(x, y, z, Material::Fern);
+            // Leaflets on both sides, longest near the base of the frond.
             if s >= 2.0 && (s as i32) % 2 == 0 {
-                b.set(x - dz, y.max(0.0), z + dx, Material::Fern);
-                b.set(x + dz, y.max(0.0), z - dx, Material::Fern);
+                let leaflet = (3.5 * (1.0 - s / length)).round().max(1.0);
+                let mut w = 1.0;
+                while w <= leaflet {
+                    b.set(
+                        x - dz * w,
+                        (y - 0.3 * w).max(0.0),
+                        z + dx * w,
+                        Material::Fern,
+                    );
+                    b.set(
+                        x + dz * w,
+                        (y - 0.3 * w).max(0.0),
+                        z - dx * w,
+                        Material::Fern,
+                    );
+                    w += 1.0;
+                }
             }
             s += 0.5;
         }
     }
 }
 
-/// One to three mushrooms: a pale stem under a round red-brown cap.
+/// One to three mushrooms (fine resolution): a pale stem under a domed cap; some variants carry
+/// the white spots of a fly agaric.
 fn mushrooms(b: &mut Builder) {
+    let spotted = b.rand() < 0.4;
     let count = 1 + (b.rand() * 3.0) as usize;
     for k in 0..count {
         let (x, z) = if k == 0 {
             (0.0, 0.0)
         } else {
             let angle = std::f32::consts::TAU * b.rand();
-            (angle.cos() * 3.0, angle.sin() * 3.0)
+            (angle.cos() * 5.0, angle.sin() * 5.0)
         };
-        let height = 2.0 + (b.rand() * 3.0).floor();
-        let mut y = 0.0;
-        while y < height {
-            b.set(x, y, z, Material::MushroomStem);
-            y += 1.0;
-        }
-        let r = 1.0 + 0.8 * b.rand();
+        let scale = if k == 0 { 1.0 } else { 0.6 + 0.3 * b.rand() };
+        let height = ((3.0 + 3.0 * b.rand()) * scale).round().max(2.0);
+        let stem = if scale > 0.8 { 2.0 } else { 1.0 };
+        b.post(x, z, 0.0, height, stem, Material::MushroomStem);
+        // Dome: a half ellipsoid on top of the stem.
+        let r = (2.5 + 1.5 * b.rand()) * scale;
         let reach = r.ceil() as i32;
-        for dz in -reach..=reach {
-            for dx in -reach..=reach {
-                let d = ((dx * dx + dz * dz) as f32).sqrt();
-                if d <= r {
-                    b.set(x + dx as f32, height, z + dz as f32, Material::MushroomCap);
-                }
-                if d <= r - 1.0 {
-                    b.set(
-                        x + dx as f32,
-                        height + 1.0,
-                        z + dz as f32,
-                        Material::MushroomCap,
-                    );
+        let cap = (r * 0.7).ceil() as i32;
+        for dy in 0..=cap {
+            for dz in -reach..=reach {
+                for dx in -reach..=reach {
+                    let d = ((dx * dx + dz * dz) as f32 / (r * r)
+                        + (dy * dy) as f32 / (r * r * 0.49))
+                        .sqrt();
+                    if d <= 1.0 {
+                        let top = dy as f32 >= r * 0.55 || d > 0.8;
+                        let spot = spotted
+                            && top
+                            && hash_unit(b.seed, &[dx as i64, dy as i64, dz as i64, k as i64])
+                                < 0.12;
+                        let material = if spot {
+                            Material::MushroomStem
+                        } else {
+                            Material::MushroomCap
+                        };
+                        b.set(
+                            x + dx as f32 + 0.5,
+                            height + dy as f32,
+                            z + dz as f32 + 0.5,
+                            material,
+                        );
+                    }
                 }
             }
         }
     }
 }
 
-/// A stone, or a few pebbles, half sunk in the ground.
+/// A stone, or a few pebbles (fine resolution), half sunk in the ground.
 fn stones(b: &mut Builder, variant: u32) {
     let material = if variant.is_multiple_of(3) {
         Material::Rock
@@ -679,14 +893,14 @@ fn stones(b: &mut Builder, variant: u32) {
     let count = 1 + (b.rand() * 3.0) as usize;
     for k in 0..count {
         let r = if k == 0 {
-            2.0 + 2.0 * b.rand()
+            3.5 + 3.5 * b.rand()
         } else {
-            1.0 + 1.0 * b.rand()
+            1.5 + 1.5 * b.rand()
         };
         let angle = std::f32::consts::TAU * b.rand();
-        let out = if k == 0 { 0.0 } else { 3.0 + 2.0 * b.rand() };
+        let out = if k == 0 { 0.0 } else { 6.0 + 3.0 * b.rand() };
         b.blob(
-            [angle.cos() * out, r * 0.3, angle.sin() * out],
+            [angle.cos() * out, r * 0.25, angle.sin() * out],
             r,
             r * 0.6,
             material,
@@ -694,27 +908,37 @@ fn stones(b: &mut Builder, variant: u32) {
     }
 }
 
-/// A dry shrub: bare twigs fanning out of the ground, a few dry leaves at their tips.
+/// A dry shrub (fine resolution): thin bare twigs fanning out of the ground, forking once, a
+/// few dry leaves at their tips.
 fn dry_shrub(b: &mut Builder) {
-    let twigs = 4 + (b.rand() * 3.0) as usize;
+    let twigs = 5 + (b.rand() * 4.0) as usize;
     for _ in 0..twigs {
         let angle = std::f32::consts::TAU * b.rand();
-        let length = 2.5 + 2.5 * b.rand();
-        let end = [
-            angle.cos() * length,
-            2.0 + length * 0.9,
-            angle.sin() * length,
+        let length = 5.0 + 4.0 * b.rand();
+        let mid = [
+            angle.cos() * length * 0.5,
+            length * 0.6,
+            angle.sin() * length * 0.5,
         ];
-        b.branch([0.0, 0.0, 0.0], end, 1.0, Material::DeadWood);
-        if b.rand() < 0.7 {
-            b.blob(end, 1.5, 1.2, Material::DryShrub);
+        b.branch([0.0, 0.0, 0.0], mid, 1.0, Material::DeadWood);
+        for fork in [-0.5f32, 0.5] {
+            let a = angle + fork;
+            let end = [
+                mid[0] + a.cos() * length * 0.5,
+                mid[1] + length * 0.4,
+                mid[2] + a.sin() * length * 0.5,
+            ];
+            b.branch(mid, end, 1.0, Material::DeadWood);
+            if b.rand() < 0.6 {
+                b.blob(end, 1.5, 1.2, Material::DryShrub);
+            }
         }
     }
 }
 
-/// Low shrub: a flattened ragged blob sitting on the ground.
+/// Low shrub (fine resolution): a flattened ragged blob of leaves sitting on the ground.
 fn bush(b: &mut Builder) {
-    let r = 5.0 + 2.0 * b.rand();
+    let r = 10.0 + 4.0 * b.rand();
     b.blob([0.0, r * 0.5, 0.0], r, r * 0.6, Material::Leaves);
 }
 

@@ -32,7 +32,7 @@ impl OrbitCamera {
         Self {
             target,
             yaw: 45.0_f32.to_radians(),
-            pitch: 50.0_f32.to_radians(),
+            pitch: 40.0_f32.to_radians(),
             // The sphere fits in the vertical field of view when sin(fov/2) = radius / distance.
             distance: (radius / (fov_y / 2.0).sin()).clamp(Self::MIN_DISTANCE, Self::MAX_DISTANCE),
             fov_y,
@@ -77,7 +77,7 @@ impl OrbitCamera {
 /// struct Camera {
 ///     view_proj: mat4x4<f32>,  // offset 0, size 64
 ///     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
-///     time: vec4<f32>,         // offset 80: x = seconds since start, yzw unused
+///     time: vec4<f32>,         // offset 80: x = seconds, y = mist, z = wetness, w = mist floor
 ///     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
 /// }
 /// ```
@@ -88,18 +88,27 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     /// Eye position in xyz, distance to the target in w (used by the haze).
     pub eye: [f32; 4],
-    /// x: seconds since start, for animations (water ripples). yzw unused.
+    /// x: seconds since start, for animations (wind, ripples). y: mist (0 to 1), z: how wet
+    /// the ground is (0 to 1), w: height around which mist lies (cells). See `Weather` in
+    /// the renderer.
     pub time: [f32; 4],
     /// World → clip space of the sun, for shadows (see `light_view_proj`).
     pub light_view_proj: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
-    pub fn new(camera: &OrbitCamera, aspect: f32, time: f32, light_view_proj: Mat4) -> Self {
+    /// `weather`: mist, wetness, mist floor height (see `time`).
+    pub fn new(
+        camera: &OrbitCamera,
+        aspect: f32,
+        time: f32,
+        weather: [f32; 3],
+        light_view_proj: Mat4,
+    ) -> Self {
         Self {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
             eye: camera.eye().extend(camera.distance).to_array(),
-            time: [time, 0.0, 0.0, 0.0],
+            time: [time, weather[0], weather[1], weather[2]],
             light_view_proj: light_view_proj.to_cols_array_2d(),
         }
     }

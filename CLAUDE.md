@@ -10,7 +10,7 @@ Les décisions passées et les choix encore provisoires sont dans `docs/decision
 
 ## Stack (versions épinglées, ne pas changer sans décision dans docs/decisions.md)
 - Rust, édition 2024, workspace Cargo
-- wgpu 30.x (shaders en WGSL), winit 0.30.x, glam 0.34.x, bytemuck 1.x, pollster 1.x
+- wgpu 30.x (shaders en WGSL), winit 0.30.x, glam 0.34.x, bytemuck 1.x, pollster 1.x, cpal 0.18.x (son)
 - L'API de wgpu change souvent entre versions majeures : utilise l'API de la version 30, vérifie dans `~/.cargo/registry` ou docs.rs/wgpu/30 en cas de doute, n'invente pas de signature.
 
 ## Organisation du workspace
@@ -25,7 +25,7 @@ Les décisions passées et les choix encore provisoires sont dans `docs/decision
 - Vérifier : `cargo check --workspace`
 - Tests : `cargo test --workspace` ; un seul crate : `cargo test -p sim`
 - Lancer le jeu : `cargo run --release -p game` (`-- --seed N` pour un autre monde)
-- Capture sans fenêtre : `cargo run --release -p game -- --capture vue.png [--seed N] [--at X,Z] [--zoom F] [--yaw DEG] [--pitch DEG] [--size LxH]`. À utiliser pour vérifier un rendu : l'image se lit avec l'outil Read.
+- Capture sans fenêtre : `cargo run --release -p game -- --capture vue.png [--seed N] [--at X,Z] [--zoom F] [--yaw DEG] [--pitch DEG] [--size LxH] [--hour H] [--weather rain] [--time S] [--walk S]`. À utiliser pour vérifier un rendu : l'image se lit avec l'outil Read.
 - Expériences : `cargo run --release -p lab -- <sous-commande>`
 - Lint : `cargo clippy --workspace --all-targets -- -D warnings`
 - Format : `cargo fmt --all` (fait automatiquement par un hook après chaque modification)

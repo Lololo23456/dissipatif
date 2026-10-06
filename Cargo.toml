@@ -13,6 +13,8 @@ winit = "0.30"
 glam = "0.34"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
+# Sortie audio (son procédural), voir docs/decisions.md.
+cpal = "0.18"
 
 sim = { path = "crates/sim" }
 world = { path = "crates/world" }

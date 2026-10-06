@@ -12,7 +12,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,  // offset 0, size 64
     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
-    time: vec4<f32>,         // offset 80: x = seconds since start, yzw unused
+    time: vec4<f32>,         // offset 80: x = seconds, y = mist, z = wetness, w = mist floor
     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
 }
 
@@ -23,12 +23,12 @@ struct Atmosphere {
     sky_color: vec4<f32>,      // offset 32
     ground_color: vec4<f32>,   // offset 48
     fog_color: vec4<f32>,      // offset 64
-    fog: vec4<f32>,            // offset 80: start, end, max, unused
+    fog: vec4<f32>,            // offset 80: start, end, max, w = stars (0 to 1)
 }
 
 // Rust side: `MaterialsUniform` in src/palette.rs. Indexed by material id.
 struct Materials {
-    colors: array<vec4<f32>, 32>,  // offset 0, size 512 (rgb + unused w)
+    colors: array<vec4<f32>, 48>,  // offset 0, size 768 (rgb + unused w)
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -39,6 +39,13 @@ struct Materials {
 // Compares a depth with the map instead of returning it: 1 = lit, 0 = in shadow, and with
 // linear filtering a blend of the 4 nearest comparisons.
 @group(0) @binding(4) var shadow_sampler: sampler_comparison;
+
+// Rust side: `MarksUniform` in src/marks.rs.
+struct Marks {
+    ripples: array<vec4<f32>, 16>,  // offset 0: x, z, start time, strength (0 = none)
+    prints: array<vec4<f32>, 48>,   // offset 256: x, z, facing, start time (< 0 = none)
+}
+@group(0) @binding(5) var<uniform> marks: Marks;
 
 // ---------- Group 1: the volume being drawn (terrain, water…) ----------
 
@@ -233,8 +240,9 @@ fn sun_visibility(p: vec3<f32>, n: vec3<f32>) -> f32 {
     let ndc = clip.xyz / clip.w;
     // Clip space y goes up, texture v goes down.
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let clouds = cloud_light(p);
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0) {
-        return 1.0;
+        return clouds;
     }
     var lit = 0.0;
     for (var dy = -1; dy <= 1; dy++) {
@@ -243,7 +251,58 @@ fn sun_visibility(p: vec3<f32>, n: vec3<f32>) -> f32 {
             lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + offset, ndc.z);
         }
     }
-    return lit / 9.0;
+    return lit / 9.0 * clouds;
+}
+
+// ---------- Cloud shadows ----------
+
+// Clouds are not drawn (the camera looks down), only their shadows: patches of shade drifting
+// over the land with the wind. A cloud layer of fractal noise at `CLOUD_HEIGHT` is looked up
+// where the ray from the point towards the sun crosses it, so shadows fall the right way and
+// slide across slopes.
+const CLOUD_HEIGHT: f32 = 60.0;
+// Size of the clouds: about 1 / CLOUD_SCALE cells across.
+const CLOUD_SCALE: f32 = 0.03;
+// Drift, cells per second (along the wind).
+const CLOUD_SPEED: f32 = 1.5;
+// Share of the sky covered, and how much sunlight a cloud lets through.
+const CLOUD_COVER: f32 = 0.6;
+const CLOUD_LIGHT: f32 = 0.3;
+
+fn hash2(c: vec2<i32>) -> f32 {
+    var h = bitcast<u32>(c.x) * 0x8da6b343u ^ bitcast<u32>(c.y) * 0xd8163841u;
+    h = (h ^ (h >> 13u)) * 0x5bd1e995u;
+    h = h ^ (h >> 15u);
+    return f32(h) / 4294967295.0;
+}
+
+// Value noise: random values at integer points, smoothly interpolated between them.
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash2(i);
+    let b = hash2(i + vec2<i32>(1, 0));
+    let c = hash2(i + vec2<i32>(0, 1));
+    let d = hash2(i + vec2<i32>(1, 1));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// 1 in full sun, `CLOUD_LIGHT` under the thick of a cloud.
+fn cloud_light(p: vec3<f32>) -> f32 {
+    let sun = atmosphere.sun_direction.xyz;
+    let towards = p + sun * ((CLOUD_HEIGHT - p.y) / max(sun.y, 0.1));
+    var q = (towards.xz - WIND_DIRECTION.xz * CLOUD_SPEED * camera.time.x) * CLOUD_SCALE;
+    // Fractal noise: three octaves, each twice finer and half as strong.
+    var n = 0.0;
+    var amplitude = 0.5;
+    for (var k = 0; k < 3; k++) {
+        n += value_noise(q) * amplitude;
+        q = q * 2.03 + vec2<f32>(17.1, 9.3);
+        amplitude *= 0.5;
+    }
+    let cloud = smoothstep(1.0 - CLOUD_COVER - 0.08, 1.0 - CLOUD_COVER + 0.12, n / 0.875);
+    return mix(1.0, CLOUD_LIGHT, cloud);
 }
 
 // Sun (Lambert: light ∝ cos of the angle to the sun, times its visibility) plus hemispheric
@@ -261,7 +320,91 @@ fn haze(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
     let depth = distance(world_position, camera.eye.xyz) - camera.eye.w;
     let fog = atmosphere.fog;
     let amount = clamp((depth - fog.x) / (fog.y - fog.x), 0.0, 1.0) * fog.z;
-    return mix(color, atmosphere.fog_color.rgb, amount);
+    var hazed = mix(color, atmosphere.fog_color.rgb, amount);
+    // Ground mist: dense below the mist floor, thinning above it, so it pools in hollows and
+    // over water; a slow drift breaks it into banks.
+    let mist = camera.time.y;
+    if (mist > 0.0) {
+        let above = world_position.y - camera.time.w;
+        let layer = exp(-max(above, 0.0) / 1.2);
+        let drift = world_position.xz * 0.05 + vec2<f32>(camera.time.x * 0.02, camera.time.x * 0.013);
+        let banks = 0.55 + 0.45 * value_noise(drift) + 0.25 * value_noise(drift * 2.7);
+        let thickness = clamp(mist * layer * banks * 0.6, 0.0, 0.75);
+        let mist_color = mix(atmosphere.fog_color.rgb, vec3<f32>(1.0), 0.25) * 1.05;
+        hazed = mix(hazed, mist_color, thickness);
+    }
+    return hazed;
+}
+
+// ---------- Marks: footprints and ripples ----------
+
+// Seconds a footprint lasts (fading over its last 40 %), as in game/src/traces.rs.
+const PRINT_LIFE: f32 = 40.0;
+// Prints drawn a little larger than a real foot, to stay readable from above.
+const PRINT_SCALE: f32 = 2.0;
+const MATERIAL_SAND: u32 = 4u;
+const MATERIAL_DESERT_SAND: u32 = 5u;
+const MATERIAL_SNOW: u32 = 8u;
+
+// How much the ground at `p` is pressed by a footprint (x, the hollow) and pushed up around
+// it (y, the rim). A sole: the heel and the ball of the foot, two ovals.
+fn footprints(p: vec2<f32>) -> vec2<f32> {
+    var press = 0.0;
+    var rim = 0.0;
+    for (var i = 0; i < 48; i++) {
+        let m = marks.prints[i];
+        let age = camera.time.x - m.w;
+        if (m.w < 0.0 || age < 0.0) {
+            continue;
+        }
+        let d = (p - m.xy) / PRINT_SCALE;
+        if (dot(d, d) > 0.04) {
+            continue;
+        }
+        let fade = 1.0 - smoothstep(PRINT_LIFE * 0.6, PRINT_LIFE, age);
+        let forward = vec2<f32>(sin(m.z), cos(m.z));
+        let side = vec2<f32>(forward.y, -forward.x);
+        let q = vec2<f32>(dot(d, side), dot(d, forward));
+        let heel = length((q - vec2<f32>(0.0, -0.07)) / vec2<f32>(0.045, 0.05));
+        let ball = length((q - vec2<f32>(0.0, 0.05)) / vec2<f32>(0.055, 0.075));
+        let sole = min(heel, ball);
+        press = max(press, (1.0 - smoothstep(0.7, 1.0, sole)) * fade);
+        rim = max(rim, smoothstep(0.85, 1.0, sole) * (1.0 - smoothstep(1.0, 1.35, sole)) * fade);
+    }
+    return vec2<f32>(press, rim);
+}
+
+// Ripples spreading on the water from where something touched it: a ring of small waves
+// moving out at `RIPPLE_SPEED`, a few wavelengths wide, dying away. Returns the tilt of the
+// surface (xy) and how much of a crest is there (z).
+const RIPPLE_SPEED: f32 = 0.7;
+const RIPPLE_LIFE: f32 = 3.0;
+const RIPPLE_WIDTH: f32 = 0.28;
+const RIPPLE_WAVENUMBER: f32 = 20.0;
+const RIPPLE_TILT: f32 = 0.5;
+
+fn ripple_rings(p: vec2<f32>) -> vec3<f32> {
+    var tilt = vec2<f32>(0.0);
+    var crest = 0.0;
+    for (var i = 0; i < 16; i++) {
+        let r = marks.ripples[i];
+        let age = camera.time.x - r.z;
+        if (r.w <= 0.0 || age < 0.0 || age > RIPPLE_LIFE) {
+            continue;
+        }
+        let offset = p - r.xy;
+        let d = length(offset);
+        let x = d - (0.1 + RIPPLE_SPEED * age);
+        // Wider and weaker as it spreads: the energy of the ring is shared over a longer
+        // circle, so its height falls as 1/√d; damping fades it out over its life.
+        let width = RIPPLE_WIDTH * (1.0 + 0.6 * age);
+        let envelope = exp(-x * x / (width * width)) * (1.0 - age / RIPPLE_LIFE) * r.w
+            / sqrt(1.0 + 2.0 * d);
+        let phase = x * RIPPLE_WAVENUMBER / (1.0 + 0.5 * age);
+        tilt += offset / max(d, 1.0e-3) * sin(phase) * envelope * RIPPLE_TILT;
+        crest += max(cos(phase), 0.0) * envelope;
+    }
+    return vec3<f32>(tilt, crest);
 }
 
 // ---------- Opaque volumes ----------
@@ -274,7 +417,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var base: vec3<f32>;
     if (direct || volume.base_range.z > 0.5) {
         // Material id in the integer part, a small brightness variation in the fraction.
-        let id = min(u32(value), 31u);
+        let id = min(u32(value), 47u);
         base = materials.colors[id].rgb * (0.88 + 0.24 * fract(value));
     } else {
         base = base_palette(unit(value, volume.base_range.x, volume.base_range.y));
@@ -294,7 +437,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let n = normalize(in.normal);
-    let color = shade(albedo, n, in.ao, sun_visibility(in.world_position, n));
+    // Footprints in sand and snow: the hollow is darker, its rim a little lighter.
+    if (!direct && volume.base_range.z > 0.5 && n.y > 0.5
+        && (id == MATERIAL_SAND || id == MATERIAL_DESERT_SAND || id == MATERIAL_SNOW)) {
+        let print = footprints(in.world_position.xz);
+        albedo *= (1.0 - 0.4 * print.x) * (1.0 + 0.15 * print.y);
+    }
+    let sunlit = sun_visibility(in.world_position, n);
+    // Wet ground and leaves after rain: darker (water fills the pores) and glossy on top.
+    let wet = camera.time.z * smoothstep(0.3, 0.8, n.y);
+    albedo *= 1.0 - 0.35 * wet;
+    var color = shade(albedo, n, in.ao, sunlit);
+    if (wet > 0.0) {
+        let to_eye = normalize(camera.eye.xyz - in.world_position);
+        let mirrored = reflect(-atmosphere.sun_direction.xyz, n);
+        let sheen = pow(max(dot(mirrored, to_eye), 0.0), 24.0) * 0.5 + 0.06;
+        color += atmosphere.sky_color.rgb * sheen * wet + atmosphere.sun_color.rgb * pow(max(dot(mirrored, to_eye), 0.0), 64.0) * wet * sunlit;
+    }
     return vec4<f32>(haze(color, in.world_position), 1.0);
 }
 
@@ -316,6 +475,90 @@ fn ripple(p: vec2<f32>, t: f32) -> vec2<f32> {
     return vec2<f32>(a, b) * RIPPLE_STRENGTH;
 }
 
+// Night sky seen in the water: stars, the Milky Way, the moon. The sky dome is flattened onto
+// a plane (`sky_plane`) and cut into a grid; some cells hold a star at a random place. Stars
+// are sized in screen pixels (`pixel`: size of a pixel on that plane, from the screen
+// derivatives), so they stay crisp points at any distance: a sharp core of 1 to 3 pixels,
+// anti-aliased over one pixel, and for the brightest, four thin twinkling rays.
+const STAR_GRID: f32 = 12.0;
+const STAR_SHARE: f32 = 0.75;
+// Direction the Milky Way's band is perpendicular to.
+const GALAXY_AXIS: vec3<f32> = vec3<f32>(0.62, 0.35, -0.7);
+// Apparent radius of the moon (cosine of the angle), and of its glow.
+const MOON_SIZE: f32 = 0.9985;
+const MOON_GLOW: f32 = 0.97;
+
+fn sky_plane(d: vec3<f32>) -> vec2<f32> {
+    return d.xz / (max(d.y, 0.02) + 0.4) * STAR_GRID;
+}
+
+fn star_color(h: f32) -> vec3<f32> {
+    if (h < 0.25) {
+        return vec3<f32>(0.72, 0.82, 1.0);  // hot, bluish
+    } else if (h > 0.85) {
+        return vec3<f32>(1.0, 0.8, 0.58);   // cool, amber
+    }
+    return vec3<f32>(1.0, 0.97, 0.92);
+}
+
+fn night_sky(d: vec3<f32>, pixel: f32) -> vec3<f32> {
+    if (d.y <= 0.02) {
+        return vec3<f32>(0.0);
+    }
+    let p = sky_plane(d);
+    let cell = vec2<i32>(floor(p));
+    var light = vec3<f32>(0.0);
+    for (var oy = -1; oy <= 1; oy++) {
+        for (var ox = -1; ox <= 1; ox++) {
+            let c = cell + vec2<i32>(ox, oy);
+            if (hash2(c + vec2<i32>(311, 97)) > STAR_SHARE) {
+                continue;
+            }
+            let centre = vec2<f32>(c) + 0.15 + 0.7 * vec2<f32>(hash2(c), hash2(c + vec2<i32>(7, 3)));
+            // Few bright stars, many faint ones.
+            let size = pow(hash2(c + vec2<i32>(13, 51)), 2.5);
+            let q = (p - centre) / pixel;  // in pixels
+            let r = length(q);
+            let radius = 1.2 + 2.6 * size;
+            let core = 1.0 - smoothstep(radius - 0.5, radius + 0.5, r);
+            // Rays along the axes: thin (about a pixel), longer for brighter stars.
+            let reach = 3.0 + 12.0 * size;
+            let ray_x = exp(-q.y * q.y / 0.6) * max(1.0 - abs(q.x) / reach, 0.0);
+            let ray_y = exp(-q.x * q.x / 0.6) * max(1.0 - abs(q.y) / reach, 0.0);
+            let rays = (ray_x + ray_y) * smoothstep(0.3, 0.75, size) * 0.8;
+            let twinkle = 0.7 + 0.3 * sin(camera.time.x * (0.8 + 1.6 * hash2(c + vec2<i32>(5, 9))) + 40.0 * hash2(c));
+            let brightness = (0.5 + 2.6 * size) * twinkle;
+            light += star_color(hash2(c + vec2<i32>(17, 29))) * (core + rays) * brightness;
+        }
+    }
+    // A finer layer of many faint stars: in a real sky, faint stars far outnumber bright ones.
+    let fine = p * 3.0;
+    let fine_cell = vec2<i32>(floor(fine));
+    for (var oy = -1; oy <= 1; oy++) {
+        for (var ox = -1; ox <= 1; ox++) {
+            let c = fine_cell + vec2<i32>(ox, oy) + vec2<i32>(9001, 4007);
+            if (hash2(c + vec2<i32>(311, 97)) > 0.5) {
+                continue;
+            }
+            let centre = vec2<f32>(c - vec2<i32>(9001, 4007)) + 0.15 + 0.7 * vec2<f32>(hash2(c), hash2(c + vec2<i32>(7, 3)));
+            let r = length((fine - centre) / (pixel * 3.0));
+            let dot_ = 1.0 - smoothstep(0.4, 1.4, r);
+            let twinkle = 0.6 + 0.4 * sin(camera.time.x * (1.0 + 2.0 * hash2(c + vec2<i32>(5, 9))) + 40.0 * hash2(c));
+            light += star_color(hash2(c + vec2<i32>(17, 29))) * dot_ * (0.15 + 0.35 * hash2(c + vec2<i32>(13, 51))) * twinkle;
+        }
+    }
+    // Milky Way: a faint, uneven band of light across the sky.
+    let band = exp(-pow(dot(d, normalize(GALAXY_AXIS)), 2.0) / 0.03);
+    let clouds = value_noise(p * 0.35) * 0.6 + value_noise(p * 0.9) * 0.4;
+    light += vec3<f32>(0.55, 0.6, 0.85) * band * clouds * 0.12;
+    // Moon: at night the light direction is the moon's.
+    let facing = dot(d, atmosphere.sun_direction.xyz);
+    let disc = smoothstep(MOON_SIZE - 0.0004, MOON_SIZE, facing);
+    let glow = pow(smoothstep(MOON_GLOW, 1.0, facing), 2.0) * 0.3;
+    light += vec3<f32>(0.95, 0.95, 0.88) * (disc * 3.0 + glow);
+    return light;
+}
+
 @fragment
 fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // Base field: water depth. Life field: speed of the current, shown as foam.
@@ -328,17 +571,44 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var n = normalize(in.normal);
     let sunlit = sun_visibility(in.world_position, n);
+    var crest = 0.0;
     if (n.y > 0.5) {
-        let tilt = ripple(in.world_position.xz, camera.time.x);
+        var tilt = ripple(in.world_position.xz, camera.time.x);
+        let rings = ripple_rings(in.world_position.xz);
+        tilt += rings.xy;
+        crest = rings.z;
         n = normalize(vec3<f32>(tilt.x, 1.0, tilt.y));
     }
     var color = shade(albedo, n, 1.0, sunlit);
 
-    // Glint: the sun mirrored by the surface, seen when the reflection points at the eye.
+    // Mirror: the surface reflects the sky, more at grazing angles (Fresnel), and at night the
+    // stars. The reflected direction picks a star in a grid laid over the sky.
     let to_eye = normalize(camera.eye.xyz - in.world_position);
+    let fresnel = 0.15 + 0.85 * pow(1.0 - max(dot(n, to_eye), 0.0), 3.0);
+    let calm = 1.0 - foam;
+    color = mix(color, atmosphere.sky_color.rgb, fresnel * 0.5 * calm);
+    // The sky is mirrored by a still surface, with only a slow shiver: the ripples that move
+    // the light would shatter the stars into arcs.
+    let shiver = 0.004 * vec2<f32>(
+        sin(in.world_position.z * 0.7 + camera.time.x * 0.9),
+        cos(in.world_position.x * 0.6 + camera.time.x * 0.7),
+    );
+    let mirrored_sky = reflect(-to_eye, normalize(vec3<f32>(shiver.x, 1.0, shiver.y)));
+    // Screen derivatives must be taken where every pixel of a group runs the same code: here,
+    // outside any branch.
+    let sky_p = sky_plane(mirrored_sky);
+    let pixel = max(max(length(dpdx(sky_p)), length(dpdy(sky_p))), 1.0e-4);
+    let top_face = step(0.5, in.normal.y);
+    color += night_sky(mirrored_sky, pixel) * atmosphere.fog.w * calm * top_face * (0.5 + 0.5 * fresnel);
+
+    // Glint: the sun (or moon) mirrored by the surface, seen when the reflection points at
+    // the eye.
     let mirrored = reflect(-atmosphere.sun_direction.xyz, n);
     let glint = pow(max(dot(mirrored, to_eye), 0.0), GLINT_SHARPNESS) * GLINT_STRENGTH;
     color += atmosphere.sun_color.rgb * glint * (1.0 - foam) * sunlit;
+
+    // Crests of the rings catch the light of the sky.
+    color += atmosphere.sky_color.rgb * crest * 0.5;
 
     // Shallow water lets the ground show through; deep water and foam hide it.
     let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.4 * foam, 0.0, 1.0);
@@ -352,7 +622,7 @@ struct ParticleInput {
     @location(0) corner: vec3<f32>,   // cube vertex, in [-0.5, 0.5]³
     @location(1) normal: vec3<f32>,
     @location(2) centre_size: vec4<f32>,  // instance: centre xyz, edge length w
-    @location(3) color: vec4<f32>,        // instance: linear rgb, a unused
+    @location(3) color: vec4<f32>,        // instance: linear rgb, a = glow
 }
 
 struct ParticleOutput {
@@ -360,6 +630,7 @@ struct ParticleOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(3) glow: f32,
 }
 
 @vertex
@@ -370,13 +641,24 @@ fn vs_particle(in: ParticleInput) -> ParticleOutput {
     out.world_position = world_position;
     out.normal = in.normal;
     out.color = in.color.rgb;
+    out.glow = in.color.a;
     return out;
 }
+
+// Brightness added to a fully glowing particle in the sun (see `ParticleInstance::color`).
+const MOTE_GLOW: f32 = 2.2;
 
 @fragment
 fn fs_particle(in: ParticleOutput) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
-    let color = shade(in.color, n, 1.0, sun_visibility(in.world_position, n));
+    let sunlit = sun_visibility(in.world_position, n);
+    // Specks of dust and pollen catch the sun and shine: lit, they get brighter than white,
+    // and the bloom of the post pass spreads them into small soft sparks.
+    // Positive glow: lit by the sun (dust). Negative: shines by itself (fireflies).
+    // Dust shines in sunlight, not moonlight: weighted by the light's strength.
+    let daylight = smoothstep(0.3, 0.8, dot(atmosphere.sun_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    let glow = in.color * (max(in.glow, 0.0) * sunlit * daylight * MOTE_GLOW + max(-in.glow, 0.0));
+    let color = shade(in.color, n, 1.0, sunlit) + glow;
     return vec4<f32>(haze(color, in.world_position), 1.0);
 }
 
@@ -393,7 +675,7 @@ fn vs_shadow(in: VertexInput) -> @builtin(position) vec4<f32> {
 // Rust side: `ModelInstance` in src/models.rs (per-instance attributes).
 struct ModelInstance {
     @location(4) position_turns: vec4<f32>,  // where the model stands (xyz), quarter turns (w)
-    @location(5) scale_mirror: vec4<f32>,    // size (x), mirrored before turning (y: 1 or 0)
+    @location(5) scale_mirror: vec4<f32>,    // size (x), mirrored (y: 1 or 0), bend (zw)
     @location(6) tint: vec4<f32>,            // foliage colour multiplier (rgb), flexibility (a)
 }
 
@@ -425,7 +707,20 @@ fn model_position(in: VertexInput, instance: ModelInstance) -> vec3<f32> {
     let local = orient(in.position, instance.position_turns.w, instance.scale_mirror.y)
         * instance.scale_mirror.x;
     let base = instance.position_turns.xyz;
-    return wind(local, base, plant_phase(base), instance.tint.a);
+    let bent = bend_plant(local, instance.scale_mirror.zw);
+    return wind(bent, base, plant_phase(base), instance.tint.a);
+}
+
+// A plant bent by something pushing through it (the player): the bend is simulated on the CPU
+// for each plant (a damped spring, see game/src/trample.rs) and given per instance. The whole
+// plant bends from its foot: each point moves sideways by `bend` × its height, then is brought
+// back to its distance from the foot, so the plant arcs rather than shears.
+fn bend_plant(local: vec3<f32>, bend: vec2<f32>) -> vec3<f32> {
+    if (local.y <= 0.0 || (bend.x == 0.0 && bend.y == 0.0)) {
+        return local;
+    }
+    let moved = local + vec3<f32>(bend.x, 0.0, bend.y) * local.y;
+    return normalize(moved) * length(local);
 }
 
 @vertex
@@ -446,4 +741,40 @@ fn vs_model(in: VertexInput, instance: ModelInstance) -> VertexOutput {
 fn vs_model_shadow(in: VertexInput, instance: ModelInstance) -> @builtin(position) vec4<f32> {
     // Same wind as the main pass: shadows move with the plants.
     return camera.light_view_proj * vec4<f32>(model_position(in, instance), 1.0);
+}
+
+// ---------- Articulated parts: a full transform per instance (characters) ----------
+
+// Rust side: `PartInstance` in src/models.rs (per-instance attributes).
+struct PartInstance {
+    @location(4) column0: vec4<f32>,
+    @location(5) column1: vec4<f32>,
+    @location(6) column2: vec4<f32>,
+    @location(7) column3: vec4<f32>,
+    @location(8) tint: vec4<f32>,
+}
+
+fn part_transform(instance: PartInstance) -> mat4x4<f32> {
+    return mat4x4<f32>(instance.column0, instance.column1, instance.column2, instance.column3);
+}
+
+@vertex
+fn vs_part(in: VertexInput, instance: PartInstance) -> VertexOutput {
+    var out: VertexOutput;
+    let transform = part_transform(instance);
+    let world_position = (transform * vec4<f32>(in.position, 1.0)).xyz;
+    out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
+    out.world_position = world_position;
+    // Rotation and uniform scale only: the matrix turns normals too (renormalised later).
+    out.normal = (transform * vec4<f32>(in.normal, 0.0)).xyz;
+    out.cell = in.cell;
+    out.ao = in.ao;
+    out.tint = instance.tint.rgb;
+    return out;
+}
+
+@vertex
+fn vs_part_shadow(in: VertexInput, instance: PartInstance) -> @builtin(position) vec4<f32> {
+    let world_position = (part_transform(instance) * vec4<f32>(in.position, 1.0)).xyz;
+    return camera.light_view_proj * vec4<f32>(world_position, 1.0);
 }

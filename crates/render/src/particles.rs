@@ -11,12 +11,15 @@ use crate::mesh::FACE_NORMALS;
 /// WGSL side (`shaders/voxel.wgsl`, `ParticleInput`, per-instance attributes):
 /// ```wgsl
 /// @location(2) centre_size: vec4<f32>,  // offset 0: centre xyz, edge length w
-/// @location(3) color: vec4<f32>,        // offset 16: linear rgb, a unused
+/// @location(3) color: vec4<f32>,        // offset 16: linear rgb, a = glow
 /// ```
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParticleInstance {
     pub centre_size: [f32; 4],
+    /// Linear colour (rgb), and how much the particle glows when the sun catches it (a: 0 a
+    /// leaf, about 1 a speck of dust or pollen lit against the light; negative: shines by
+    /// itself with strength −a, whatever the light, like a firefly).
     pub color: [f32; 4],
 }
 

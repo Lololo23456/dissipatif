@@ -93,3 +93,68 @@ Chaque espèce (feuillu, conifère, acacia, cactus, buisson) a 6 variantes gén�
 
 ## 2026-10-05 — Tapis végétal et nouvelles espèces
 15 espèces en micro-voxels : feuillu, conifère, acacia, cactus, buisson, bouleau, saule (au bord de l'eau : distance à l'eau calculée par parcours en largeur), palmier (plages), arbre mort ; et un tapis végétal tiré colonne par colonne, à position libre dans la cellule (deux tirages) : herbe, fleurs (4 couleurs), fougères, champignons, cailloux, broussailles sèches. Table de matériaux portée à 32. Seuls les arbres et buissons ont une copie grossière dans la grille. Souplesse au vent par espèce, plus grande pour les petites plantes (la flexion croît avec le carré de la hauteur). Herbe de savane teintée paille. Densités réglées à l'image. Environ 10 000 éléments au sol par monde, ~250 000 faces de modèles. **Provisoire** sur les densités.
+
+## 2026-10-05 — Le naturaliste et ses déplacements
+Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièce (jambes, buste avec sac, tête et chapeau, bras) a son pivot et reçoit une matrice par image (nouveau type d'instance `PartInstance`, réutilisable pour les animaux). Animation procédurale : cycle de marche indexé sur la distance parcourue (les pieds ne glissent pas), balancier bras/jambes opposés, rebond à chaque pas, respiration à l'arrêt, buste penché en courant, tête qui regarde autour d'elle (curiosité). Contrôles par position physique des touches (ZQSD en AZERTY) relatifs à la caméra ; vitesse, rotation et caméra lissées exponentiellement ; montée automatique d'une marche avec affichage lissé ; saut ; marche ralentie puis nage dans l'eau ; collisions avec le sol et les troncs (feuillages et herbes traversables). Apparition sur un sol meuble d'un biome accueillant. Table de couleurs portée à 48 (vêtements). Survie choisie : faim, soif et température, en mode doux. **Actée.**
+
+## 2026-10-05 — Nage, cailloux solides, petites plantes fines et qui s'écartent
+- Nage : hystérésis (on nage au-delà de 1,3 cube d'eau, on arrête sous 0,8) ; sans elle, la flottaison faisait sortir de l'état « nage », le corps retombait et coulait. Flottaison stable, tête hors de l'eau ; Espace donne un coup de pied ; on se hisse sur une rive jusqu'à 1,6 cube. Testé : flotter, puis rejoindre la rive la plus proche et sortir.
+- Cailloux du tapis végétal solides : boîtes rangées par colonne (`Obstacles`), les galets de moins de 0,2 cube se franchissent.
+- Résolution par modèle : arbres à 4 voxels par cube, tapis végétal et buissons à 8 (brins d'herbe recourbés, fleurs à cinq pétales, frondes découpées, amanites tachetées).
+- Les plantes souples (herbe, fleurs, fougères, buissons) se couchent en s'écartant du joueur qui les traverse (position du joueur transmise au shader), longueur conservée, et se redressent derrière lui. **Actée.**
+
+## 2026-10-05 — Fleurs sauvages à leur échelle, flexion au contact
+- Les fleurs étaient géantes : à 8 voxels par cube, un voxel fait ~12 cm (le naturaliste mesure 1,85 cube) et une corolle 40 cm. Elles passent à 16 voxels par cube (~6 cm), en touffes de tiges fines sur une rosette, quatre espèces : marguerite, coquelicot, lavande, bouton d'or.
+- La flexion au passage était trop forte (≈ 40°, 1,1 cube de portée, toute la touffe d'un bloc). Désormais au contact seulement (0,75 cube), ≈ 25° au plus, chaque point selon sa propre distance au corps ; buissons plus raides. **Actée.**
+- Correction : la flexion au passage utilisait seulement la direction pied → plante ; sous le pied, elle basculait d'un côté à l'autre en une image (saut mesuré de 0,41 cube, vu comme un « zoom »). Le déplacement est désormais proportionnel au vecteur pied → plante : nul sous le pied, continu autour (saut maximal mesuré : 0,05 cube par image).
+- Remplacement : la flexion calculée dans le shader à partir de la position du joueur était sans mémoire ; la pointe des plantes suivait le joueur et tournait autour de leur pied (« effet 360 »). Désormais chaque plante touchée a une inclinaison simulée sur le CPU par un ressort amorti (`game/src/trample.rs`, raideur 90, amortissement 9) : poussée dans le sens de la marche et vers l'extérieur au contact, retour seule à la verticale une fois libre. Seules les plantes en mouvement sont simulées ; l'inclinaison passe par instance (`scale_mirror.zw`) et la plante entière plie depuis son pied. **Actée.**
+- Caméra : inclinaison par défaut passée de 50° à 40° (plus rasante, plus cinématographique ; demande du joueur après essai à 58°).
+
+## 2026-10-05 — Post-traitement et atmosphère
+- La scène n'est plus dessinée directement à l'écran : elle va dans une image HDR (`Rgba16Float`), puis un passage plein écran (`render/src/post.rs`, `shaders/post.wgsl`) produit l'image finale : tilt-shift (bande nette au centre, flou en haut et en bas : effet miniature), bloom léger, étalonnage façon Firewatch (ombres violet-bleu, lumières ambrées, épaule douce sur les hautes lumières), vignettage, grain.
+- Ombres de nuages : une couche de bruit fractal à 60 cubes de haut, lue le long du rayon vers le soleil et poussée par le vent ; elle n'atténue que le soleil (les ombres gardent le bleu du ciel).
+- Poussières du monde lumineuses : elles brillent au soleil et scintillent (alpha de `ParticleInstance` = éclat), le bloom en fait de petites étincelles.
+- Poussière de premier plan : disques flous (bokeh) dessinés dans le post-traitement, en deux couches avec parallaxe quand la caméra bouge. Purement visuelle, sans lien avec le monde. **Actée** ; réglages dans les constantes en tête de `post.wgsl`.
+- Écartés pour l'instant : rayons de soleil volumétriques (coûteux, délicats).
+
+## 2026-10-05 — Multijoueur possible plus tard
+- **Provisoire** : un mode coopératif (2 à 4 joueurs, l'un d'eux héberge) pourrait venir à la fin. Aucun code réseau pour l'instant, mais l'architecture doit le permettre sans réécriture.
+- Contraintes adoptées dès maintenant :
+  1. Le jeu gère une liste de joueurs avec des identifiants, même s'il n'y en a qu'un.
+  2. Toute action qui modifie le monde (ramasser, casser un bloc, poser, boire…) passe par une commande (« ramasser l'objet 42 ») appliquée par une seule fonction ; les entrées clavier ne modifient jamais l'état directement. En réseau, on enverra ces commandes.
+  3. La logique de jeu avance par pas fixes, séparés de la fréquence d'affichage.
+  4. L'état du jeu (ce qui doit être partagé) est séparé de la présentation (vent, poussières, herbe qui plie, post-traitement : locaux à chaque joueur).
+- Le monde se partage par sa graine (génération déterministe) ; seules les modifications circulent.
+- Points durs connus : l'autorité sur les modifications du monde et la synchronisation des anomalies (envoyer leur état, ou compter sur un déterminisme exact entre machines, fragile en flottants et sur GPU). À trancher le moment venu.
+- À appliquer en premier lors du ramassage et de l'inventaire.
+
+## 2026-10-05 — Cycle jour et nuit
+- Journée de 20 minutes réelles (`game/src/clock.rs`), départ à 16 h 30 ; touche T maintenue : accéléré ×60. Option de capture `--hour H`.
+- `render/src/sky.rs` : moments clés écrits à la main (nuit, aube, matin, midi, heure dorée, coucher, heure bleue), interpolés ; soleil de 5 h 30 à 20 h, lune la nuit ; la lumière s'éteint près de l'horizon, donc le passage soleil ↔ lune est invisible. L'étalonnage du post-traitement (teintes, exposition, saturation réduite la nuit) suit l'heure.
+- L'eau reflète le ciel (Fresnel) et, la nuit, les étoiles (grille procédurale sur la voûte, scintillement).
+- La poussière de premier plan s'éteint la nuit (corrigé ensuite).
+
+## 2026-10-05 — Principe directeur du gameplay
+- **Actée** : « la nature est plus forte que le joueur ». Tout est touchable, rien n'est contrôlable : des propriétés et des verbes généraux plutôt que des actions codées par objet ; creusage coûteux, borné, avec conservation de la matière et réaction de la nature (eau, éboulement, comblement). Détail dans `design.md`. Remplace l'idée de destruction de blocs libre façon Minecraft et tranche la question de la difficulté.
+- Reste ouvert : le verbe central (ce que le joueur cherche au fond).
+
+## 2026-10-05 — Troncs et ciel nocturne
+- Troncs ronds qui s'affinent, évasés en racines au pied, écorce par espèce (sillons, plaques, marques de bouleau, anneaux, fissures) ; nouveau matériau `BarkDark` (42).
+- Étoiles reflétées : plus grosses (cœur et halo, couleurs variées), reflétées par une surface immobile (les vaguelettes les brisaient en arcs), Voie lactée et lune. La poussière de premier plan s'éteint la nuit.
+
+## 2026-10-06 — Son procédural
+- Nouvelle dépendance **`cpal` 0.18** (sortie audio), seule ajoutée à la pile épinglée. Tout le son est synthétisé : aucun fichier audio.
+- `game/src/sound.rs` (synthèse pure, testée sans carte son) : vent (bruit filtré suivant les rafales, gardé discret), feuillage, rivière et bulles, oiseaux (chœur de l'aube), grillons la nuit, pluie, pas selon le sol. `audio.rs` relie à cpal ; jeu ↔ fil audio par atomiques seulement (pas de verrou ni d'allocation dans le rappel). `listen.rs` mesure ce qu'on entend autour du joueur.
+- Sans périphérique audio, le jeu tourne en silence.
+
+## 2026-10-06 — Faune, traces, météo
+- Faune (`fauna.rs`) : oiseaux qui s'envolent à l'approche, papillons, poissons qui fuient le joueur dans l'eau, lucioles la nuit (particules à lumière propre : éclat négatif). Animaux vivant dans un rayon autour du joueur et renaissant plus loin ; plus gros que nature pour rester lisibles vus de haut. Tous en pièces articulées instanciées.
+- Traces (`traces.rs`) : éclaboussures et ronds dans l'eau, empreintes dans le sable et la neige qui s'effacent, poussière en courant.
+- Météo (`weather.rs`) : averses aléatoires (chance constante par seconde, quelques minutes), sol mouillé qui sèche, brume de l'aube plus ou moins épaisse selon le jour ; gouttes en traînées, ciel assombri et grisé. Touche R : pluie forcée ; capture `--weather rain`.
+
+## 2026-10-06 — Artisanat par propriétés
+- **Actée** : pas de recettes. Un objet = matériaux + forme ; ses capacités sont calculées à partir des propriétés (tranchant, levier, solidité du maillon faible…). Verbes généraux (assembler, tailler, tresser, chauffer, mouiller, sécher), qualité selon le matériau et son état (vert, sec, mort), usure et retour à la nature, pas d'escalade de puissance, ressources locales au biome. Détail dans `design.md`. Conséquence technique : les objets du jeu portent des propriétés numériques, pas un type fixe.
+
+## 2026-10-06 — Ondes, empreintes et son retravaillés
+- Les ronds de cubes et les empreintes en blocs sont remplacés par des marques dessinées dans les shaders (`render/src/marks.rs`, groupe 0 binding 5) : de vrais paquets d'ondes qui inclinent la surface de l'eau (amplitude en 1/√d, comme une onde circulaire) et des empreintes de semelle (talon et avant du pied) creusées dans la couleur du sable et de la neige, plus grandes que nature pour rester lisibles.
+- Son : stéréo (bruits indépendants à gauche et à droite), vent en bruit brun plus doux et plus bas, réverbération (Freeverb réduit) pour oiseaux, grillons et pas, oiseaux avec harmoniques, pas en deux temps (talon, pointe). `--sound-demo DOSSIER` écrit un WAV par ambiance pour écouter chaque couche séparément. Option de capture `--start X,Z` pour placer le naturaliste.

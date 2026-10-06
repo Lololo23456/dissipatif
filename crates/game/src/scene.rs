@@ -7,11 +7,13 @@ use render::mesh::MeshData;
 use render::mesher::{mesh_field, mesh_materials};
 use render::palette;
 use render::water_mesher::mesh_water;
-use render::{LifeStyle, ModelInstance, Renderer, VolumeStyle};
+use render::{LifeStyle, ModelId, ModelInstance, Renderer, VolumeStyle};
 use sim::grid::{Dims, Field2, Field3};
 use world::noise::hash_unit;
-use world::plants::{MICRO, VARIANTS};
+use world::plants::VARIANTS;
 use world::{Biome, Material, Plant, World};
+
+use crate::trample::Pliable;
 
 /// Seed offset of the per-voxel brightness variation.
 const VARIATION_SEED: u64 = 0x5eed;
@@ -27,6 +29,12 @@ pub struct SceneData {
     water_mesh: MeshData,
     /// One mesh per plant model (kind × variant) and where each is drawn.
     plant_models: Vec<(MeshData, Vec<ModelInstance>)>,
+    /// Plants that bend when walked through, with where their instance is.
+    pliable: Vec<Pliable>,
+    /// Ids of the plant models in the renderer, once installed.
+    model_ids: Vec<ModelId>,
+    /// Model groups whose instances changed since the last upload.
+    dirty: Vec<bool>,
     /// No overlays yet: zero fields with the shapes of the textures above.
     no_overlay_solid: Field3,
     no_overlay_water: Field3,
@@ -78,15 +86,27 @@ impl SceneData {
             kind * VARIANTS as usize + variant as usize
         };
         let mut grouped = vec![Vec::new(); Plant::ALL.len() * VARIANTS as usize];
+        let mut pliable = Vec::new();
         for p in world.plants() {
             let [x, y, z] = p.base;
             let biome = world.biome(x, z);
-            grouped[model_index(p.plant, p.variant)].push(ModelInstance::new(
-                [
-                    x as f32 + 0.5 + p.offset[0],
-                    y as f32,
-                    z as f32 + 0.5 + p.offset[1],
-                ],
+            let group = model_index(p.plant, p.variant);
+            let position = [
+                x as f32 + 0.5 + p.offset[0],
+                y as f32,
+                z as f32 + 0.5 + p.offset[1],
+            ];
+            let yielding = yielding(p.plant);
+            if yielding > 0.0 {
+                pliable.push(Pliable {
+                    base: Vec3::from(position),
+                    yielding,
+                    group,
+                    index: grouped[group].len(),
+                });
+            }
+            grouped[group].push(ModelInstance::new(
+                position,
                 p.rotation,
                 p.mirrored,
                 p.scale,
@@ -103,7 +123,7 @@ impl SceneData {
                     &model.voxels,
                     model.dims,
                     model.anchor.map(|a| a as f32),
-                    1.0 / MICRO as f32,
+                    1.0 / model.resolution as f32,
                     seed ^ (plant as u64 * 31 + variant as u64),
                     &mut mesh,
                 );
@@ -112,9 +132,13 @@ impl SceneData {
             }
         }
 
+        let groups = plant_models.len();
         Self {
             dims,
             plant_models,
+            pliable,
+            model_ids: Vec::new(),
+            dirty: vec![false; groups],
             no_overlay_solid: Field3::filled(dims, 0.0),
             no_overlay_water: Field3::filled(columns, 0.0),
             solid_look,
@@ -139,7 +163,7 @@ impl SceneData {
 
     /// Adds the world's volumes to a renderer and uploads everything (the world is static,
     /// nothing needs updating afterwards).
-    pub fn install(&self, renderer: &mut Renderer) {
+    pub fn install(&mut self, renderer: &mut Renderer) {
         // The whole world casts and receives shadows.
         let Dims { nx, ny, nz } = self.dims;
         renderer.set_scene_bounds(Vec3::ZERO, Vec3::new(nx as f32, ny as f32, nz as f32));
@@ -166,9 +190,37 @@ impl SceneData {
         renderer.upload_base(water, &self.water_depth);
         renderer.upload_life(water, &self.no_overlay_water);
         renderer.upload_mesh(water, &self.water_mesh);
-        for (mesh, instances) in &self.plant_models {
-            let model = renderer.add_model(mesh);
-            renderer.set_model_instances(model, instances);
+        self.model_ids = self
+            .plant_models
+            .iter()
+            .map(|(mesh, instances)| {
+                let model = renderer.add_model(mesh);
+                renderer.set_model_instances(model, instances);
+                model
+            })
+            .collect();
+    }
+
+    /// The plants that bend when walked through (for `trample::Trample`).
+    pub fn pliable(&self) -> Vec<Pliable> {
+        self.pliable.clone()
+    }
+
+    /// Bends a plant; uploaded with the next `upload_changes`.
+    pub fn set_bend(&mut self, plant: &Pliable, bend: glam::Vec2) {
+        if let Some(instance) = self.plant_models[plant.group].1.get_mut(plant.index) {
+            instance.set_bend(bend.to_array());
+            self.dirty[plant.group] = true;
+        }
+    }
+
+    /// Sends the model groups that changed to the renderer.
+    pub fn upload_changes(&mut self, renderer: &mut Renderer) {
+        for (group, dirty) in self.dirty.iter_mut().enumerate() {
+            if *dirty && let Some(&id) = self.model_ids.get(group) {
+                renderer.set_model_instances(id, &self.plant_models[group].1);
+                *dirty = false;
+            }
         }
     }
 }
@@ -192,6 +244,17 @@ fn flexibility(plant: Plant) -> f32 {
         Plant::Fern => 2.0,
         Plant::DryShrub => 0.8,
         Plant::Cactus | Plant::Mushroom | Plant::Stone => 0.0,
+    }
+}
+
+/// How much a plant bends away from the player walking through it: grass and flowers fully,
+/// bushes partly; trees, cacti, stones and mushrooms not at all.
+fn yielding(plant: Plant) -> f32 {
+    match plant {
+        Plant::Grass | Plant::Flower => 1.0,
+        Plant::Fern => 0.8,
+        Plant::Bush | Plant::DryShrub => 0.3,
+        _ => 0.0,
     }
 }
 

@@ -9,3 +9,4 @@ world.workspace = true
 render.workspace = true
 glam.workspace = true
 winit.workspace = true
+cpal.workspace = true

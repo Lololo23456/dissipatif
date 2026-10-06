@@ -13,6 +13,8 @@ const RADIUS: f32 = 40.0;
 const LEAF_REACH: f32 = 1.5 * RADIUS;
 /// How many motes of pollen and dust float at once.
 const MOTES: usize = 260;
+/// Glow of a mote between glints (see `ParticleInstance::color`).
+const MOTE_GLOW_BASE: f32 = 0.25;
 /// Leaves torn off per second around the target, at full gust (fewer when the wind drops).
 const LEAF_RATE: f32 = 7.0;
 const MAX_LEAVES: usize = 200;
@@ -80,20 +82,28 @@ impl Ambient {
     /// around `target` (x, z).
     pub fn update(&mut self, dt: f32, time: f32, target: [f32; 2], world: &World) {
         // Same gust rhythm as the plants in the shader (`gust` in voxel.wgsl), at the target.
-        let along = WIND[0] * target[0] + WIND[1] * target[1];
-        let gust = 0.35 + 0.65 * (0.5 + 0.5 * (time * 0.7 - along * 0.09).sin());
+        let gust = crate::listen::gust(time, target[0], target[1]);
         self.update_motes(dt, time, gust, target, world);
         self.update_leaves(dt, time, gust, target, world);
 
         self.instances.clear();
-        for p in self.motes.iter().chain(&self.leaves) {
+        let motes = self.motes.iter().map(|p| (p, true));
+        for (p, mote) in motes.chain(self.leaves.iter().map(|p| (p, false))) {
             // Fade in and out by size, so particles never pop.
             let t = p.age / p.lifetime;
             let fade = (t * 6.0).min((1.0 - t) * 6.0).clamp(0.0, 1.0);
             let [r, g, b] = p.color;
+            // Motes glint as they turn in the light: a sharp peak now and then, a soft glow
+            // the rest of the time. Leaves do not glow.
+            let glow = if mote {
+                let turn = 0.5 + 0.5 * (time * 2.3 + p.phase * 7.0).sin();
+                MOTE_GLOW_BASE + turn.powi(6)
+            } else {
+                0.0
+            };
             self.instances.push(ParticleInstance {
                 centre_size: [p.position[0], p.position[1], p.position[2], p.size * fade],
-                color: [r, g, b, 1.0],
+                color: [r, g, b, glow],
             });
         }
     }
