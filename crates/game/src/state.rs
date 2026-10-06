@@ -274,6 +274,9 @@ pub struct GameState {
     rng: sim::rng::SplitMix64,
     /// The deer of the meadow, if the world has one.
     herd: Option<Herd>,
+    /// The squirrels and their caches.
+    squirrels: Option<crate::squirrels::Squirrels>,
+    squirrel_events: Vec<crate::squirrels::SquirrelEvent>,
     herd_events: Vec<HerdEvent>,
     /// The notebook lying on the ground, until someone picks it up.
     notebook_lying: Option<Vec3>,
@@ -311,6 +314,8 @@ impl GameState {
             changes: Vec::new(),
             rng: sim::rng::SplitMix64::new(world.config.seed ^ 0x4ea9),
             herd: None,
+            squirrels: None,
+            squirrel_events: Vec::new(),
             herd_events: Vec::new(),
             notebook_lying: None,
             now: Conditions {
@@ -336,6 +341,7 @@ impl GameState {
         w.put(&self.rain);
         w.put(&self.rng);
         w.put(&self.herd);
+        w.put(&self.squirrels);
         w.put(&self.notebook_lying);
         w.put(&self.now);
     }
@@ -358,6 +364,7 @@ impl GameState {
         state.rain = r.get()?;
         state.rng = r.get()?;
         state.herd = r.get()?;
+        state.squirrels = r.get()?;
         state.notebook_lying = r.get()?;
         state.now = r.get()?;
         // What is rebuilt rather than saved: what can be picked, and the stones in the way.
@@ -385,6 +392,23 @@ impl GameState {
     /// Lets a herd of deer live in the world.
     pub fn add_herd(&mut self, herd: Herd) {
         self.herd = Some(herd);
+    }
+
+    /// Lets squirrels live in the world.
+    pub fn add_squirrels(&mut self, squirrels: crate::squirrels::Squirrels) {
+        self.squirrels = Some(squirrels);
+    }
+
+    pub fn squirrels(&self) -> Option<&crate::squirrels::Squirrels> {
+        self.squirrels.as_ref()
+    }
+
+    /// Whether player `id` could dig up a squirrel's cache right in front of them.
+    pub fn cache_in_reach(&self, id: PlayerId) -> bool {
+        match (&self.squirrels, self.hands(id)) {
+            (Some(s), Some(hands)) => s.cache_near(hands, CACHE_REACH),
+            _ => false,
+        }
     }
 
     pub fn herd(&self) -> Option<&Herd> {
@@ -852,6 +876,26 @@ impl GameState {
                 None
             }
             Command::Pick { player } => {
+                // A squirrel's cache right in front: dig up the nut.
+                if self.cache_in_reach(player) {
+                    let hands = self.hands(player)?;
+                    let matter = match self.squirrels.as_mut()?.dig_up(hands, CACHE_REACH)? {
+                        crate::squirrels::Nut::Acorn => Matter::Acorn,
+                        crate::squirrels::Nut::Hazelnut => Matter::Hazelnut,
+                    };
+                    let p = self.player_mut(player)?;
+                    if let Err(refusal) = p.inventory.add(matter) {
+                        return Some(Event::Failed {
+                            player,
+                            failure: Failure::Bag(refusal),
+                        });
+                    }
+                    return Some(Event::Picked {
+                        player,
+                        matter,
+                        removed: None,
+                    });
+                }
                 // The notebook, if it lies there.
                 if let (Some(at), Some(hands)) = (self.notebook_lying, self.hands(player))
                     && hands.distance(Vec2::new(at.x, at.z)) < ARM_REACH
@@ -1348,6 +1392,52 @@ impl GameState {
             self.events.push(event);
         }
         self.step_deer(world, now);
+        self.step_squirrels(world, now);
+    }
+
+    /// The squirrels hoard, dig up and lose their nuts; what they lose goes to the soil.
+    fn step_squirrels(&mut self, world: &World, now: &Conditions) {
+        let Some(squirrels) = self.squirrels.as_mut() else {
+            return;
+        };
+        let players: Vec<Vec3> = self.players.iter().map(|p| p.body.position).collect();
+        let mut sow = Vec::new();
+        self.squirrel_events.clear();
+        for _ in 0..self.time_scale.round().max(1.0) as usize {
+            squirrels.update(
+                STEP,
+                world,
+                now,
+                &players,
+                &mut self.squirrel_events,
+                &mut sow,
+            );
+        }
+        for (plant, at) in sow {
+            self.ecology.bank_seed(plant, at);
+        }
+        // The notebook: a squirrel seen burying a nut, or digging one up in the lean months.
+        for p in &mut self.players {
+            let Some(book) = p.notebook.as_mut() else {
+                continue;
+            };
+            let feet = Vec2::new(p.body.position.x, p.body.position.z);
+            for &event in &self.squirrel_events {
+                let (entry, at) = match event {
+                    crate::squirrels::SquirrelEvent::Buried { at } => (Entry::Cache, at),
+                    crate::squirrels::SquirrelEvent::DugUp { at } => (Entry::Recovery, at),
+                };
+                if at.distance(feet) < 15.0
+                    && let Some(page) = book.write(entry, now, feet)
+                {
+                    self.events.push(Event::Wrote {
+                        player: p.id,
+                        page,
+                        entry,
+                    });
+                }
+            }
+        }
     }
 
     /// The deer live, sensing the players; the notebooks write what their owners witnessed.
@@ -1498,6 +1588,9 @@ fn choose_pasture(world: &World, ecology: &Ecology, herd: &mut Herd) {
         herd.set_pasture(soil.centre(best));
     }
 }
+
+/// How close to the hands a buried nut can be found by digging.
+const CACHE_REACH: f32 = 0.9;
 
 /// Seconds of watching the full rite, unnoticed, to understand it.
 const RITE_UNDERSTOOD: f32 = 10.0;

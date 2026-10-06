@@ -49,10 +49,14 @@ pub enum Plant {
     Stone,
     /// A twiggy dry shrub of hot, dry lands.
     DryShrub,
+    /// Oak: a short thick trunk, gnarled branches, a wide crown; acorns in autumn.
+    Oak,
+    /// Hazel: a shrub of several thin stems from the ground; hazelnuts in autumn.
+    Hazel,
 }
 
 impl Plant {
-    pub const ALL: [Plant; 15] = [
+    pub const ALL: [Plant; 17] = [
         Plant::Broadleaf,
         Plant::Pine,
         Plant::Acacia,
@@ -68,6 +72,8 @@ impl Plant {
         Plant::Mushroom,
         Plant::Stone,
         Plant::DryShrub,
+        Plant::Oak,
+        Plant::Hazel,
     ];
 
     /// Small things on the ground, scattered densely, not trees.
@@ -135,9 +141,11 @@ impl Biome {
     pub const fn plants(self) -> &'static [(Plant, f32)] {
         match self {
             Biome::Forest => &[
-                (Plant::Broadleaf, 0.55),
+                (Plant::Broadleaf, 0.38),
+                (Plant::Oak, 0.17),
                 (Plant::Birch, 0.15),
-                (Plant::Bush, 0.12),
+                (Plant::Bush, 0.08),
+                (Plant::Hazel, 0.06),
                 (Plant::DeadTree, 0.02),
             ],
             Biome::Taiga => &[
@@ -146,9 +154,11 @@ impl Biome {
                 (Plant::DeadTree, 0.03),
             ],
             Biome::Plains => &[
-                (Plant::Broadleaf, 0.04),
+                (Plant::Broadleaf, 0.03),
+                (Plant::Oak, 0.015),
                 (Plant::Birch, 0.02),
-                (Plant::Bush, 0.12),
+                (Plant::Bush, 0.1),
+                (Plant::Hazel, 0.03),
             ],
             Biome::Savanna => &[
                 (Plant::Acacia, 0.12),

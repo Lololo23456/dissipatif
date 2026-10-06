@@ -78,6 +78,7 @@ fn body(matter: Matter, base: Vec3, air: f32) -> Body {
         Matter::Ash => (0.03, 0.05, 800.0, 0.0, None),
         // Bone: dense, does not burn here.
         Matter::Antler => (0.08, 0.9, 1300.0, 0.0, None),
+        Matter::Acorn | Matter::Hazelnut => (0.01, 0.005, 1500.0, 0.001, None),
         Matter::Flower(_) | Matter::Mushroom { .. } => (0.03, 0.03, 3000.0, 0.02, None),
     };
     Body {

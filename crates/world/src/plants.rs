@@ -81,6 +81,8 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::Mushroom => Builder::new(24, 12, seed),
         Plant::Stone => Builder::new(36, 10, seed),
         Plant::DryShrub => Builder::new(32, 20, seed),
+        Plant::Oak => Builder::new(72, 58, seed),
+        Plant::Hazel => Builder::new(44, 34, seed),
     };
     match plant {
         Plant::Broadleaf => broadleaf(&mut b),
@@ -98,6 +100,8 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::Mushroom => mushrooms(&mut b, variant),
         Plant::Stone => stones(&mut b, variant),
         Plant::DryShrub => dry_shrub(&mut b),
+        Plant::Oak => oak(&mut b),
+        Plant::Hazel => hazel(&mut b),
     }
     let mut model = b.crop();
     model.resolution = resolution(plant);
@@ -943,6 +947,70 @@ fn dry_shrub(b: &mut Builder) {
 }
 
 /// Low shrub (fine resolution): a flattened ragged blob of leaves sitting on the ground.
+/// Oak: a short, thick trunk dividing low into a few gnarled limbs that spread wide, each
+/// carrying clumps of leaves: a broad, irregular crown.
+fn oak(b: &mut Builder) {
+    let height = 10.0 + (b.rand() * 5.0).floor();
+    let bark = furrowed(b.seed, 5.0);
+    b.trunk(
+        height,
+        2.6,
+        1.8,
+        2.4,
+        3.0,
+        |_| [0.0, 0.0],
+        Material::Wood,
+        bark,
+    );
+    let limbs = 4 + (b.rand() * 3.0) as usize;
+    let mut ends = Vec::new();
+    for k in 0..limbs {
+        let angle = std::f32::consts::TAU * (k as f32 + b.rand() * 0.7) / limbs as f32;
+        let start = height * (0.7 + 0.25 * b.rand());
+        let length = 9.0 + 6.0 * b.rand();
+        // A bend half way: limbs of an oak twist.
+        let bend = angle + 0.5 * (b.rand() - 0.5);
+        let middle = [
+            angle.cos() * length * 0.5,
+            start + 0.45 * length,
+            angle.sin() * length * 0.5,
+        ];
+        let end = [
+            middle[0] + bend.cos() * length * 0.5,
+            middle[1] + 0.2 * length,
+            middle[2] + bend.sin() * length * 0.5,
+        ];
+        b.branch([0.0, start, 0.0], middle, 1.4, Material::Wood);
+        b.branch(middle, end, 1.0, Material::Wood);
+        ends.push(middle);
+        ends.push(end);
+    }
+    for &end in &ends {
+        let r = 4.0 + 2.5 * b.rand();
+        b.blob([end[0], end[1] + 1.0, end[2]], r, r * 0.6, Material::Leaves);
+    }
+    let top = [0.0, height + 6.0, 0.0];
+    b.blob(top, 6.0, 4.0, Material::Leaves);
+}
+
+/// Hazel: several thin stems rising from the ground and arching out, with leaves along their
+/// upper half.
+fn hazel(b: &mut Builder) {
+    let stems = 5 + (b.rand() * 4.0) as usize;
+    for k in 0..stems {
+        let angle = std::f32::consts::TAU * (k as f32 + b.rand()) / stems as f32;
+        let lean = 3.0 + 6.0 * b.rand();
+        let height = 16.0 + 10.0 * b.rand();
+        let foot = [angle.cos() * 1.2, 0.0, angle.sin() * 1.2];
+        let end = [angle.cos() * lean, height, angle.sin() * lean];
+        b.branch(foot, end, 0.6, Material::Wood);
+        let r = 3.5 + 2.0 * b.rand();
+        let middle = [end[0] * 0.75, height * 0.7, end[2] * 0.75];
+        b.blob(middle, r, r * 0.8, Material::Leaves);
+        b.blob(end, r * 0.8, r * 0.6, Material::Leaves);
+    }
+}
+
 fn bush(b: &mut Builder) {
     let r = 10.0 + 4.0 * b.rand();
     b.blob([0.0, r * 0.5, 0.0], r, r * 0.6, Material::Leaves);
@@ -952,7 +1020,7 @@ fn bush(b: &mut Builder) {
 mod tests {
     use super::*;
 
-    const KINDS: [Plant; 15] = Plant::ALL;
+    const KINDS: [Plant; 17] = Plant::ALL;
 
     #[test]
     fn every_model_has_matter_and_stands_on_its_anchor() {

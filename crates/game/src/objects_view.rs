@@ -139,6 +139,18 @@ fn model(matter: Matter) -> Grid {
             g.fill([0, 2], [0, 2], [0, 3], Material::BarkDark);
             g
         }
+        Matter::Acorn => {
+            let mut g = Grid::new(3, 4, 3);
+            g.fill([0, 3], [0, 3], [0, 3], Material::PalmTrunk);
+            g.fill([0, 3], [2, 4], [0, 3], Material::Wood);
+            g
+        }
+        Matter::Hazelnut => {
+            let mut g = Grid::new(3, 3, 3);
+            g.fill([0, 3], [0, 3], [0, 3], Material::Wood);
+            g.fill([1, 2], [2, 3], [1, 2], Material::DryGrass);
+            g
+        }
         Matter::GreenWood => {
             let mut g = Grid::new(8, 2, 3);
             g.fill([0, 8], [0, 1], [1, 2], Material::Wood);
@@ -234,6 +246,8 @@ fn all_matters() -> Vec<Matter> {
         Matter::Chips,
         Matter::GreenWood,
         Matter::Antler,
+        Matter::Acorn,
+        Matter::Hazelnut,
         Matter::Ash,
         Matter::Mushroom { spotted: false },
         Matter::Mushroom { spotted: true },

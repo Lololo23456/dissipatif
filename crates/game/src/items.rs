@@ -76,6 +76,10 @@ pub enum Matter {
     /// An antler a stag shed at the end of winter: bone, hard yet a little springy (a soft
     /// hammer to retouch an edge, a handle, a tool).
     Antler,
+    /// An acorn: food, but bitter with tannins unless soaked a long time in water.
+    Acorn,
+    /// A hazelnut: rich food.
+    Hazelnut,
 }
 
 /// Cuts a knife makes before its grass binding gives way.
@@ -239,6 +243,19 @@ impl Matter {
                 },
                 ..base
             },
+            Matter::Acorn => Properties {
+                mass: 0.005,
+                hardness: 0.3,
+                nutrition: 0.02,
+                toxicity: 0.15,
+                ..base
+            },
+            Matter::Hazelnut => Properties {
+                mass: 0.003,
+                hardness: 0.5,
+                nutrition: 0.03,
+                ..base
+            },
             Matter::Mushroom { spotted } => Properties {
                 mass: 0.06,
                 fragility: 0.8,
@@ -285,6 +302,8 @@ impl Matter {
             Matter::Knife { .. } => "Couteau emmanché",
             Matter::GreenWood => "Bois vert",
             Matter::Antler => "Bois de cerf",
+            Matter::Acorn => "Gland",
+            Matter::Hazelnut => "Noisette",
         }
     }
 
@@ -320,7 +339,7 @@ pub fn harvest(plant: &PlantInstance) -> Option<Harvest> {
         })),
         Plant::DryShrub => Some(Harvest::Whole(Matter::DeadTwigs)),
         // A bush only gives way to a blade (see `GameState`): green wood.
-        Plant::Bush => Some(Harvest::NeedsBlade(Matter::GreenWood)),
+        Plant::Bush | Plant::Hazel => Some(Harvest::NeedsBlade(Matter::GreenWood)),
         Plant::Grass => Some(Harvest::Whole(Matter::GrassFibre)),
         Plant::Fern => Some(Harvest::Whole(Matter::Frond)),
         Plant::Flower => Some(Harvest::Whole(Matter::Flower(
@@ -439,6 +458,8 @@ impl crate::save::Persist for Matter {
             Matter::Knife { uses } => (15, uses, None),
             Matter::GreenWood => (16, 0, None),
             Matter::Antler => (17, 0, None),
+            Matter::Acorn => (18, 0, None),
+            Matter::Hazelnut => (19, 0, None),
         };
         w.put(&tag);
         w.put(&a);
@@ -477,6 +498,8 @@ impl crate::save::Persist for Matter {
             15 => Matter::Knife { uses: a },
             16 => Matter::GreenWood,
             17 => Matter::Antler,
+            18 => Matter::Acorn,
+            19 => Matter::Hazelnut,
             _ => return Err("matière inconnue".into()),
         })
     }

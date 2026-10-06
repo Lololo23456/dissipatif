@@ -186,6 +186,8 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
         actions.push("V  Reprendre forme humaine".to_owned());
     } else if input.state.notebook_in_reach(input.me) {
         actions.push("E  Ramasser : un carnet".to_owned());
+    } else if input.state.cache_in_reach(input.me) {
+        actions.push("E  Déterrer : de la terre remuée".to_owned());
     } else if let Some(i) = input.state.object_in_reach(input.me) {
         let matter = objects.placed()[i].matter;
         if objects.handleable(i) {

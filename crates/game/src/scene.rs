@@ -433,6 +433,8 @@ fn flexibility(plant: Plant) -> f32 {
         Plant::Palm => 0.7,
         Plant::Pine => 0.6,
         Plant::Bush => 0.5,
+        Plant::Oak => 0.75,
+        Plant::Hazel => 0.8,
         Plant::DeadTree => 0.2,
         Plant::Grass => 4.0,
         Plant::Flower => 3.5,
@@ -448,19 +450,17 @@ fn yielding(plant: Plant) -> f32 {
     match plant {
         Plant::Grass | Plant::Flower => 1.0,
         Plant::Fern => 0.8,
-        Plant::Bush | Plant::DryShrub => 0.3,
+        Plant::Bush | Plant::DryShrub | Plant::Hazel => 0.3,
         _ => 0.0,
     }
 }
 
 /// Seed offset of the foliage shades.
 const TINT_SEED: u64 = 0x7147;
-/// Share of broadleaf trees already turning orange.
-const AUTUMN_SHARE: f32 = 0.07;
 
 /// Colour multiplier of a plant's foliage: each plant its own shade. Brightness and warmth
-/// (from blue-green to yellow-green) vary; a few broadleaf trees have turned orange. Conifers
-/// stay in cooler, darker greens.
+/// (from blue-green to yellow-green) vary; oaks are darker. Conifers stay in cooler, darker
+/// greens. (Autumn colours come with the season, in the shader.)
 fn foliage_tint(
     plant: Plant,
     biome: Biome,
@@ -476,13 +476,9 @@ fn foliage_tint(
         let b = 0.9 + 0.2 * draw(4);
         return [1.25 * b, 1.05 * b, 0.55 * b];
     }
-    if plant == Plant::Broadleaf && draw(0) < AUTUMN_SHARE {
-        // Late-summer turn: from golden to burnt orange.
-        let t = draw(1);
-        return [1.45 + 0.15 * t, 1.0 - 0.15 * t, 0.45];
-    }
     let (brightness, warmth) = match plant {
         Plant::Pine => (0.8 + 0.25 * draw(2), -draw(3)),
+        Plant::Oak => (0.72 + 0.2 * draw(2), -0.5 * draw(3)),
         _ => (0.85 + 0.27 * draw(2), 2.0 * draw(3) - 1.0),
     };
     [

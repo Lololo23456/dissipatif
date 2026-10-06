@@ -306,3 +306,10 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Corrections trouvées en simulant une année** : sans ces réglages, l'hiver faisait basculer la prairie en désert et tuait la harde ; et l'irréversibilité du surpâturage venait en partie du plafond de plantes. Le suintement latéral de l'eau est ramené à 0,1/jour : une tache nue d'une parcelle se referme, une étendue de plusieurs parcelles reste nue (testé avec les vraies plantes).
 - **Cerfs** : rut et brame à l'automne (un cerf rejoint la harde), conception pendant le rut, naissances à la fin du printemps (un faon par biche au plus), faons adultes en un an, métabolisme ralenti l'hiver (−40 %, comme le cerf réel), réserves qui tiennent ~2 semaines de jeûne, bois tombés à la fin de l'hiver (nouvel objet, à ramasser). Mesuré sur une année : la harde passe l'hiver amaigrie, 3 faons au printemps, prairie vivante.
 - Sauvegarde : version 3 (année dans le moment, banque de graines, cerfs gestants).
+
+## 2026-10-06 — Écureuils, chênes et noisetiers
+- **Chêne et noisetier** ajoutés au monde (forêts, un peu les prairies). Le chêne a des glands lourds qui tombent sous lui : il ne se répand loin que par les animaux.
+- **Écureuils** (`game/squirrels.rs`, dans l'état du jeu) : 8 écureuils vivent autour des chênes les plus proches du départ. Comportement réel : diurnes, enterrent les noix une par une à 4–18 cases (dispersion), retrouvent leurs caches par la mémoire (85 %) ou l'odorat (1,5 case, y compris celles des autres), mangent trois noix par jour dans les mois maigres, fuient vers leur arbre à l'approche. Une récolte par an tirée au hasard (années de glandée). Au début du printemps, les caches restantes passent dans la banque de graines : des chênes et des noisetiers poussent là où les écureuils les ont oubliés.
+- Le joueur peut déterrer une cache (« terre remuée » quand il est dessus) : gland (amer, tanins) ou noisette. Le carnet note un écureuil qui enterre, et un qui retrouve.
+- Le modèle est légèrement agrandi (×1,4) pour être vu de la caméra haute.
+- Sauvegarde : version 4.

@@ -23,7 +23,7 @@ Objectif : qu'on puisse **vivre** longtemps au même endroit.
 
 - ✅ **Sauvegarde** : le monde (creusé, brûlé, poussé), les plantes, le sol, la harde, les objets, le carnet et ses croquis, le joueur. Automatique toutes les 2 minutes et à la fermeture ; reprise au lancement (`--new` pour recommencer).
 - ✅ **Saisons et années** : calendrier (4 saisons de deux lunes), température, neige qui tombe, tient et fond, lacs gelés, feuillus qui jaunissent puis se dénudent, herbe qui sèche, plantes qui poussent au printemps et dorment l'hiver, banque de graines, petite faune saisonnière. (À faire : longueur du jour selon la saison ; marcher sur la glace.)
-- ⬜ **Écureuils** : caches de glands à l'automne, recherche l'hiver, caches oubliées qui germent en chênes ; ajout du chêne et du noisetier. Premier animal qui plante.
+- ✅ **Écureuils** : caches de glands et de noisettes à l'automne (années de glandée), recherche l'hiver par la mémoire et l'odorat (vols de caches), caches oubliées qui passent dans la banque de graines et germent au printemps ; chêne et noisetier ajoutés ; le joueur peut déterrer une cache.
 - 🔨 **Chaque animal vit au rythme des saisons** (fait pour les cerfs, les papillons, les lucioles et les oiseaux), d'après son calendrier réel (voir le tableau dans `catalogue/animaux.md`) : reproduction à sa saison seulement, mues, réserves, repos d'hiver.
   - Cerfs : le rut et le brame à l'automne, les naissances à la fin du printemps (environ huit mois de gestation), les bois qui tombent à la fin de l'hiver (un objet à ramasser), une harde qui s'amaigrit l'hiver. Remplace les naissances « toute l'année » actuelles.
   - Oiseaux : nids et chant au printemps, envols des jeunes en été.

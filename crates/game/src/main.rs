@@ -32,6 +32,8 @@ mod season;
 mod sketch;
 mod soil;
 mod sound;
+mod squirrel_view;
+mod squirrels;
 mod state;
 mod traces;
 mod trample;
@@ -152,6 +154,7 @@ struct App {
     /// Seconds since start, as of the last frame.
     now: f32,
     deer_view: DeerView,
+    squirrel_view: squirrel_view::SquirrelView,
     /// The notebook is open (N), at this page.
     notebook_open: bool,
     page: usize,
@@ -242,6 +245,12 @@ impl App {
                 if let Some((ring, cover)) = home {
                     state.add_herd(deer::Herd::new(ring, cover, &world, seed ^ 0xdee5));
                 }
+                state.add_squirrels(squirrels::Squirrels::new(
+                    world.plants(),
+                    &world,
+                    glam::Vec2::new(spawn.x, spawn.z),
+                    seed ^ 0x5c1,
+                ));
                 state.join(spawn);
                 // The notebook, glowing on the grass just in front.
                 let book = glam::Vec2::new(spawn.x, spawn.z + 1.4);
@@ -311,6 +320,7 @@ impl App {
             gesture: None,
             now: 0.0,
             deer_view: DeerView::new(),
+            squirrel_view: squirrel_view::SquirrelView::new(),
             notebook_open: false,
             page: 0,
             sketches,
@@ -692,6 +702,10 @@ impl App {
             self.naturalist.pose(renderer, motion);
         }
         self.deer_view.draw(renderer, &deer);
+        if let Some(squirrels) = self.state.squirrels() {
+            self.squirrel_view
+                .draw(renderer, &squirrels.squirrels, time);
+        }
         self.naturalist
             .pose_book(renderer, self.state.notebook_lying(), time);
     }
@@ -1042,6 +1056,7 @@ impl ApplicationHandler for App {
         self.weather.install(&mut renderer);
         self.objects_view.install(&mut renderer);
         self.deer_view.install(&mut renderer);
+        self.squirrel_view.install(&mut renderer);
         self.graphics = Some(Graphics { window, renderer });
         match Audio::start(0x5eed) {
             Ok(audio) => self.audio = Some(audio),
@@ -1676,6 +1691,12 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
                 d.position, d.activity, d.head, d.lying
             );
         }
+        if let Some(squirrels) = app.state.squirrels() {
+            for q in &squirrels.squirrels {
+                eprintln!("écureuil {:?} {:?}", q.position, q.doing);
+            }
+            eprintln!("caches : {}", squirrels.caches.len());
+        }
         eprintln!(
             "cercle {:?} lueur {:.2} vent vers {:?}",
             herd.ring,
@@ -1698,6 +1719,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     app.data.install(&mut renderer);
     app.naturalist.install(&mut renderer);
     app.deer_view.install(&mut renderer);
+    app.squirrel_view.install(&mut renderer);
     let mut motion = app.state.body(app.me).motion(time);
     motion.gesture = match options.pose {
         Some(kind) => Some(Gesture { kind, amount: 1.0 }),
