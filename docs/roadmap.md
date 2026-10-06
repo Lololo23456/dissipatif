@@ -23,6 +23,7 @@ Objectif : qu'on puisse **vivre** longtemps au même endroit.
 
 - ⬜ **Sauvegarde** : le monde (creusé, brûlé, poussé), les plantes, le sol, la harde, le carnet, le joueur. Indispensable avant tout le reste.
 - ⬜ **Saisons et années** : calendrier (4 saisons), température, neige et gel des lacs l'hiver, couleurs de la végétation, plantes qui fleurissent, fructifient et dorment.
+- ⬜ **Écureuils** : caches de glands à l'automne, recherche l'hiver, caches oubliées qui germent en chênes ; ajout du chêne et du noisetier. Premier animal qui plante.
 - ⬜ **La harde au fil des saisons** : naissances au printemps, brame des cerfs mâles à l'automne, chute des bois à la fin de l'hiver (un objet à ramasser).
 - ⬜ **Le sol se voit** : un sol épuisé change de couleur, l'anneau du rituel s'efface s'il n'est plus foulé.
 - ⬜ **La planète se referme** : bords du monde raccordés (on fait le tour), carte plus grande.
@@ -57,6 +58,7 @@ C'est fini quand : soigner un lieu fait, un jour, naître une anomalie qu'on n'a
 
 Objectif : chaque sort ouvre une manière de percevoir qui mène au suivant.
 
+- ⬜ La **roue des sorts** (maintenir, viser, relâcher).
 - ⬜ Deuxième sort, débloqué grâce à la Forme du cerf.
 - ⬜ Trois ou quatre sorts et formes reliés (voir `catalogue/sorts-et-anomalies.md`).
 - ⬜ Chaque sort agit par la vraie physique (feu, eau, croissance), avec un coût ailleurs.
@@ -78,6 +80,7 @@ C'est fini quand : on a envie de rentrer chez soi le soir.
 Objectif : un écosystème complet, avec des prédateurs et des chaînes de causes.
 
 - ⬜ Les espèces prioritaires de `catalogue/animaux.md` : chouette, renard, campagnols, étourneaux, castor.
+- ⬜ Chaque animal agit sur la terre (voir le principe dans `catalogue/animaux.md`) : il transporte, retire, ajoute, transforme.
 - ⬜ Chaînes trophiques : prédateurs qui régulent, cascades (le castor crée un marais, le marais une anomalie).
 
 C'est fini quand : une cause lointaine (chasser les loups, abattre un barrage de castor) change un lieu qui n'a rien à voir en apparence.

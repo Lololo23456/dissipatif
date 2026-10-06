@@ -17,7 +17,8 @@ Cette page est la boussole du projet (décidée en octobre 2026, « vision B »)
 2. **Le joueur est la cause sans le vouloir.** Observer dérange, agir abîme : les écosystèmes basculent (hystérésis), et une anomalie meurt avec son lieu.
 3. **La magie naît de la vie.** Les anomalies apparaissent là où un écosystème est sain depuis longtemps, et disparaissent quand il se dégrade. Soigner un lieu peut en faire naître une.
 4. **La fonction naît de la physique.** Pas de recettes : la matière a des propriétés et garde son histoire.
-5. **Tout est procédural.** Aucune texture, aucun modèle dessiné : l'apparence découle de l'état du monde.
+5. **Chaque animal façonne la terre.** Aucun animal n'est un décor : chacun transporte, creuse, plante, broute, piétine, bâtit, et le paysage en garde la trace. L'écureuil enterre ses glands à l'automne pour l'hiver ; ceux qu'il ne retrouve pas deviennent des chênes. La forêt est plantée par les bêtes.
+6. **Tout est procédural.** Aucune texture, aucun modèle dessiné : l'apparence découle de l'état du monde.
 
 ## Le monde
 

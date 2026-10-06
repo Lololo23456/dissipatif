@@ -20,7 +20,7 @@ Elles s'apparentent à des **structures dissipatives** réelles : synchronisatio
 
 ## Comment fonctionne un sort
 
-- On le lance (touche V, puis un choix quand on en connaît plusieurs).
+- On le lance avec une **roue des sorts** : on maintient la touche, une roue s'ouvre avec les sorts connus, on vise et on relâche. Les sorts y sont dessinés (les signes du carnet), pas écrits.
 - Il agit par la **vraie physique** du monde (feu, eau, croissance, lumière), et toujours avec un **coût ailleurs** : une pluie appelée assèche une autre vallée, une croissance forcée épuise le sol.
 - Les **formes** (cerf, chouette, nuée…) sont des sorts qui durent, sans les mains.
 - **Chaque forme apprise efface une part des mots du carnet**, changés en signes. En partie réversible : rester humain longtemps rend des mots.
@@ -86,4 +86,4 @@ L'arbre n'est pas figé : plusieurs chemins peuvent mener au même sort, pour qu
 
 - Combien de sorts au total ? Une dizaine bien reliés plutôt que des dizaines.
 - Peut-on oublier un sort ? (Une anomalie morte enlève-t-elle le sort appris ? Probablement non, mais elle empêche de le transmettre.)
-- Le choix du sort à lancer : une roue, le carnet, ou un geste ?
+- ~~Le choix du sort à lancer~~ : décidé, une roue.

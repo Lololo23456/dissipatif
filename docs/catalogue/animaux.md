@@ -4,6 +4,27 @@ Chaque animal a d'abord **un comportement réel**, qui fait vivre le monde et su
 
 Pour chaque espèce : ce qu'elle fait vraiment, son rôle dans l'écosystème, comment elle perçoit le joueur, son anomalie, ce qu'elle apprend. Statut : ✅ en jeu · 🔨 partiel · ⬜ à faire. Priorité : ★★★ prochaine étape, ★★ ensuite, ★ plus tard.
 
+## Principe : chaque animal façonne la terre
+
+Aucun animal n'est un décor. Chacun agit sur le monde, et le paysage en garde la trace : c'est ce qui rend l'écosystème vivant, et ce qui donne aux anomalies leurs conditions. Dans le code, un animal ne fait pas que se déplacer : il **transporte** (graines, matière), **retire** (broute, mange), **ajoute** (cache, dépose, bâtit) et **transforme** (creuse, piétine, inonde), et ces actions passent par l'écologie et le sol.
+
+| Animal | Ce qu'il fait à la terre | Conséquence dans le monde |
+|---|---|---|
+| Écureuil roux | cache des glands et des noisettes à l'automne, un par un, dans le sol ; les cherche en hiver (mémoire et odorat) | les caches oubliées germent : **il plante des chênes et des noisetiers**, loin de l'arbre parent |
+| Geai des chênes | cache des centaines de glands, jusqu'à des kilomètres de l'arbre | le principal planteur de chênes d'Europe : des chênes qui apparaissent en pleine prairie |
+| Cerf ✅ | broute l'herbe et les jeunes arbres ; piétine des coulées ; frotte ses bois sur les troncs (à faire) | garde la prairie ouverte ; sentiers tracés par l'usage ; arbres écorcés |
+| Sanglier | retourne le sol à la recherche de racines et de vers | terre nue où les graines germent mieux ; dégâts si trop nombreux |
+| Castor | abat des arbres, bâtit des barrages | inonde une vallée : un marais naît, la forêt meurt, d'autres espèces arrivent |
+| Taupe | creuse des galeries, pousse des taupinières | aère le sol, remonte de la terre fine |
+| Oiseaux frugivores (merle, grive) | mangent les baies, rejettent les graines plus loin | sureaux, ronces, sorbiers qui poussent sous les perchoirs |
+| Abeilles | pollinisent | sans elles, peu de fruits ni de graines chez les plantes à fleurs |
+| Chouette, renard | mangent les campagnols | moins de campagnols, plus de graines et de jeunes pousses qui survivent |
+| Campagnol | mange graines et herbe, creuse des galeries | ses pullulations dévastent la prairie, ses effondrements la libèrent |
+| Fourmis | transportent des graines (certaines plantes leur offrent une récompense pour cela) | des fleurs qui poussent le long des fourmilières |
+| Vers de terre | mangent la litière, brassent le sol | l'humus se forme plus vite (variable lente du sol) |
+
+Le joueur peut **lire ces traces** (caches creusées, taupinières, coulées, troncs écorcés, barrages) : ce sont les premiers indices de toute enquête.
+
 ## En jeu
 
 ### Cerf élaphe ✅
@@ -33,6 +54,18 @@ Pour chaque espèce : ce qu'elle fait vraiment, son rôle dans l'écosystème, c
 - **Apprend** : le Chœur des lucioles (une lumière qu'on appelle, qu'on envoie, qui guide).
 
 ## À venir
+
+### Écureuil roux ⬜ ★★★
+- **Comportement réel** : diurne, arboricole ; à l'automne, il **cache des glands et des noisettes un par un** dans le sol, en dispersant ses caches (s'il en perd une, il n'a pas tout perdu). En hiver, il les **retrouve par la mémoire des lieux et par l'odorat** ; il en oublie une part, et vole parfois celles des autres. Il ne s'endort pas l'hiver, mais sort peu par grand froid.
+- **Rôle** : planteur de chênes et de noisetiers (les caches oubliées germent au printemps) ; proie de la martre et des rapaces.
+- **Dans le jeu** : chaque cache est un vrai objet dans le sol, à un endroit précis. En hiver, l'écureuil cherche, creuse, trouve ou non. Ce qui reste au printemps germe, si le sol le permet. Les années de forte production de glands (comme dans la réalité), il y a plus de caches, donc plus de chênes plus tard.
+- **Ce que le joueur voit** : l'écureuil qui enterre à l'automne, les petits trous creusés dans la neige en hiver, des chênes qui poussent là où aucun chêne n'est tombé.
+- **Le joueur peut** déterrer des caches pour manger, et priver l'écureuil (et la future forêt).
+- **Anomalie** : à décider. Une piste : un écureuil qui enterre ses glands en suivant un dessin, toujours le même, et dont les chênes, des années plus tard, forment un cercle.
+
+### Geai des chênes ⬜ ★★
+- **Comportement réel** : cache des milliers de glands chaque automne, parfois à des kilomètres, et s'en souvient très bien ; imite les cris des autres oiseaux, et même des rapaces.
+- **Rôle** : le grand planteur des chênaies.
 
 ### Chouette hulotte ⬜ ★★★
 - **Comportement réel** : nocturne ; chasse à l'oreille, au vol silencieux (plumes frangées) ; reste immobile sur une branche des heures ; territoriale, le cri en duo mâle-femelle (« hou-hou » et « kiwitt »).

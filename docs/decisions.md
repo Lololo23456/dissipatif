@@ -284,3 +284,7 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Monde** : une planète finie qui se referme sur elle-même (remplace le monde infini : dans un monde infini, on fuit les conséquences). D'autres planètes peut-être plus tard.
 - **Anomalies émergentes** : elles naissent là où un milieu est sain depuis longtemps et meurent quand il se dégrade.
 - Feuille de route et catalogues créés : `docs/roadmap.md`, `docs/catalogue/`.
+
+## 2026-10-06 — Chaque animal façonne la terre ; la roue des sorts
+- **Actées** : aucun animal n'est un décor ; chacun transporte, retire, ajoute ou transforme quelque chose du monde, et ces actions passent par l'écologie et le sol (écureuils et geais qui plantent les chênes avec leurs caches oubliées, sangliers qui retournent la terre, castors qui inondent…). Table dans `catalogue/animaux.md`.
+- **Les sorts se choisissent sur une roue** (maintenir, viser, relâcher), dessinés en signes.
