@@ -8,13 +8,23 @@ Un jeu d'exploration contemplative dans un monde procédural très vivant. Le jo
 
 Le cœur du jeu est un **va-et-vient entre le monde et le laboratoire** : on prélève dehors, on fait réagir dans la verrerie, on voit naître des structures dissipatives (spirales de Belooussov-Jabotinski, anneaux de Liesegang, cristaux, bandes de Turing dans un gel), on comprend, et on retourne dehors avec une hypothèse.
 
-## Critère d'authenticité
+## Critère d'authenticité (assoupli)
 
-**Tout ce que le joueur voit existe vraiment dans la réalité.** Pas de créature inventée ni de phénomène imaginaire : les structures étranges sont de vraies structures dissipatives, observables dans un laboratoire ou dans la nature (anneaux de Liesegang dans les grès, cristaux, motifs de végétation). L'étrangeté vient du réel bien filmé, pas de la fiction. Toute nouvelle idée passe ce filtre.
+**Le monde physique est réel** : matières, feu, chaleur, réactions, écologie suivent de vraies lois, et les structures dissipatives sont de vraies structures (Belooussov-Jabotinski, Liesegang, Turing). **Par-dessus, une part de surnaturel** : les sorts (voir « Les comportements étranges et les sorts »). Ce n'est plus « tout ce que le joueur voit existe vraiment » : la règle devient « le monde obéit à ses lois ; le surnaturel est rare, cohérent, et se mérite par l'observation ».
 
-Le jeu mise d'abord sur l'**ambiance** : une lumière soignée qui change au fil de la journée, un ciel étoilé la nuit, un monde qui bouge et qui respire.
+## Le noyau
 
-Chaque comportement du monde est un vrai phénomène (nuées, cycles prédateurs-proies, structures dissipatives), si bien que comprendre le monde, c'est développer une intuition des systèmes vivants et de la thermodynamique de Prigogine.
+Un jeu de terrain où le joueur comprend un monde fragile en reproduisant ses structures dans une verrerie. La boucle : prélever dehors, reproduire au labo, déduire, retourner dehors. Le moment fort : reconnaître le même motif dans le gel et dans le paysage.
+
+**La raison d'avancer, c'est l'écologie** : une structure dissipative meurt quand son flux est coupé, et rétablir les conditions d'avant ne la ramène pas (hystérésis). La disparition n'est pas scénarisée, elle découle de la thermodynamique.
+
+**Le verbe central : le joueur est la cause, sans le vouloir.** Prélever, expérimenter, faire du feu altèrent le monde : comprendre a un coût. Chaque prélèvement pèse. Cela rejoint « la nature amplifie les petites actions du joueur ».
+
+## Les comportements étranges et les sorts
+
+Les animaux (puis les plantes, les arbres, les rivières) ont parfois des **comportements anormaux**, autour de certaines choses ou à certains moments. Le joueur qui les **observe assez longtemps** gagne un **sort** lié à cette anomalie de comportement. Observer est le seul moyen d'en obtenir : la patience du naturaliste est récompensée.
+
+À trancher : la nature des sorts, et s'ils obéissent eux aussi à la grammaire des flux (un sort qui déplace de la chaleur, de l'eau, de la lumière, et donc a un coût et des conséquences écologiques) pour rester cohérents avec le reste du monde.
 
 ## Piliers
 
@@ -179,7 +189,6 @@ Le jeu sert aussi de laboratoire : les régimes d'anomalies découverts (paramè
 
 ## À trancher
 
-- **Le verbe central, ce que le joueur cherche au fond** : comprendre les anomalies, les protéger, les cultiver, ou simplement les observer. C'est ce qui donnera le fil du jeu. (Le principe directeur cadre la réponse : quel qu'il soit, ce verbe pousse sans commander.)
 - La place exacte des mécaniques héritées (flux, bifurcations, hystérésis, culture) dans le rapport aux anomalies.
 - Particules purement visuelles ou porteuses de matière (conservation).
 - La forme des anomalies dans le monde : motifs dans le sol, êtres qui se déplacent, les deux.

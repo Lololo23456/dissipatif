@@ -206,3 +206,9 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Le feu ne passait d'un objet à l'autre qu'au contact (tout ou rien : 1,5 s à 4 cm d'écart, jamais à 8 cm). Le panache a désormais un volume : il décroît sur ~12 cm d'écart (jusqu'à 45 cm) et favorise le haut (×3 au-dessus, ×0,5 en dessous). Mesuré entre deux fagots : 1,5 s au contact, 6 s à 40 cm entre centres, 15 s à 50 cm.
 - Hystérésis de la flamme : une flamme allumée s'entretient jusqu'à 60 K sous son seuil et brûle au moins à mi-régime (ses gaz chauffent le solide). Sans elle, une petite flamme qui chauffait ses voisins s'éteignait d'elle-même.
 - Prélever le sol laisse un creux (plus profond si l'on creuse au même endroit), visible, devant soi (80 cm) ou à l'endroit visé par la souris (clic droit). Le creux fait partie de l'état partagé.
+
+## 2026-10-06 — Sorts et verbe central (décisions de l'utilisateur)
+- **Actée** : de vrais sorts. Observer assez longtemps un comportement anormal (animaux d'abord, puis plantes, arbres, rivières) donne un sort lié à cette anomalie. **Conséquence** : le critère « tout ce que le joueur voit existe vraiment » est abandonné ; il devient « le monde physique obéit à de vraies lois, le surnaturel est rare, cohérent et se mérite par l'observation ». Claude avait recommandé des savoirs réels à la place (prévoir la pluie, trouver l'eau, lire le sol) ; l'utilisateur a choisi les sorts.
+- **Actée** : verbe central, le joueur est la **cause sans le vouloir** de la disparition : prélever et expérimenter altèrent le monde, comprendre a un coût.
+- Noyau retenu (`design.md`) : comprendre un monde fragile en reproduisant ses structures dans une verrerie ; boucle prélever → labo → déduire → dehors ; l'écologie donne la raison d'avancer.
+- À trancher : la nature des sorts et leur coût (suggestion : qu'ils obéissent à la grammaire des flux).
