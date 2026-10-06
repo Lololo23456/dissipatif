@@ -22,8 +22,9 @@ struct Atmosphere {
     sun_color: vec4<f32>,      // offset 16
     sky_color: vec4<f32>,      // offset 32, w = wind towards x
     ground_color: vec4<f32>,   // offset 48, w = wind towards z
-    fog_color: vec4<f32>,      // offset 64
+    fog_color: vec4<f32>,      // offset 64, w = grass dried by the season (0 to 1)
     fog: vec4<f32>,            // offset 80: start, end, max, w = stars (0 to 1)
+    season: vec4<f32>,         // offset 96: leaves turned, leaves fallen, snow, ice (0 to 1)
 }
 
 // Rust side: `MaterialsUniform` in src/palette.rs. Indexed by material id.
@@ -116,6 +117,27 @@ fn is_foliage(id: u32) -> bool {
     return id == MATERIAL_LEAVES || id == MATERIAL_PINE_NEEDLES || id == MATERIAL_TALL_GRASS
         || id == MATERIAL_FERN || id == MATERIAL_BIRCH_LEAVES || id == MATERIAL_PALM_LEAVES
         || id == MATERIAL_WILLOW_LEAVES;
+}
+
+const MATERIAL_GRASS: u32 = 1u;
+const MATERIAL_FOREST_FLOOR: u32 = 2u;
+
+// Leaves that turn and fall in autumn (the conifers and palms keep theirs).
+fn is_deciduous(id: u32) -> bool {
+    return id == MATERIAL_LEAVES || id == MATERIAL_BIRCH_LEAVES || id == MATERIAL_WILLOW_LEAVES;
+}
+
+// Autumn colour of a leaf voxel, `grain` its own random number: birch gold, willow yellow,
+// the broadleaf from yellow through orange to russet.
+fn autumn_leaf(id: u32, grain: f32) -> vec3<f32> {
+    if (id == MATERIAL_BIRCH_LEAVES) {
+        return mix(vec3<f32>(0.78, 0.55, 0.06), vec3<f32>(0.9, 0.7, 0.12), grain);
+    }
+    if (id == MATERIAL_WILLOW_LEAVES) {
+        return mix(vec3<f32>(0.62, 0.6, 0.1), vec3<f32>(0.8, 0.68, 0.16), grain);
+    }
+    let warm = mix(vec3<f32>(0.85, 0.55, 0.06), vec3<f32>(0.7, 0.2, 0.04), grain);
+    return mix(warm, vec3<f32>(0.35, 0.16, 0.06), smoothstep(0.75, 1.0, grain));
 }
 
 // Wind on plants, after "Vegetation Procedural Animation and Shading in Crysis" (GPU Gems 3,
@@ -440,8 +462,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if ((direct || volume.base_range.z > 0.5) && is_foliage(id)) {
         albedo *= in.tint;
     }
-
     let n = normalize(in.normal);
+
+    // The season. Each voxel has its own random number (its brightness variation), so a
+    // voxel turns, falls or whitens as a whole.
+    let materials_drawn = direct || volume.base_range.z > 0.5;
+    let grain = fract(value * 0.999 + 0.37);
+    if (materials_drawn && is_deciduous(id)) {
+        // Fallen: the voxel is gone, the earlier the lower its number.
+        if (grain < atmosphere.season.y * 1.02) {
+            discard;
+        }
+        albedo = mix(albedo, autumn_leaf(id, fract(grain * 7.13)), atmosphere.season.x);
+    }
+    if (materials_drawn && (id == MATERIAL_GRASS || id == MATERIAL_TALL_GRASS)) {
+        let straw = vec3<f32>(0.62, 0.55, 0.3) * (0.85 + 0.3 * grain);
+        albedo = mix(albedo, straw, atmosphere.fog_color.w * 0.85);
+    }
+    // Snow on what faces the sky: patchy while thin, a white sheet once deep.
+    let snow_cover = atmosphere.season.z;
+    if (snow_cover > 0.0 && materials_drawn && n.y > 0.5) {
+        let patchy = smoothstep(grain - 0.15, grain + 0.15, snow_cover * 1.3);
+        let snowy = patchy * smoothstep(0.5, 0.85, n.y);
+        albedo = mix(albedo, vec3<f32>(0.9, 0.92, 0.95), snowy);
+    }
     // Footprints in sand and snow: the hollow is darker, its rim a little lighter.
     if (!direct && volume.base_range.z > 0.5 && n.y > 0.5
         && (id == MATERIAL_SAND || id == MATERIAL_DESERT_SAND || id == MATERIAL_SNOW)) {
@@ -460,6 +504,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color += atmosphere.sky_color.rgb * sheen * wet + atmosphere.sun_color.rgb * pow(max(dot(mirrored, to_eye), 0.0), 64.0) * wet * sunlit;
     }
     return vec4<f32>(haze(color, in.world_position), 1.0);
+}
+
+// 1 on a face turned up, 0 on the sides.
+fn top_face_of(normal: vec3<f32>) -> f32 {
+    return step(0.5, normal.y);
 }
 
 // ---------- Transparent water ----------
@@ -585,6 +634,12 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
         n = normalize(vec3<f32>(tilt.x, 1.0, tilt.y));
     }
     var color = shade(albedo, n, 1.0, sunlit);
+    // Ice: an opaque, pale, still surface (snow on it once it holds).
+    let ice = atmosphere.season.w * top_face_of(in.normal);
+    if (ice > 0.0) {
+        let frozen = mix(vec3<f32>(0.62, 0.74, 0.82), vec3<f32>(0.9, 0.92, 0.95), atmosphere.season.z);
+        color = mix(color, shade(frozen, normalize(in.normal), 1.0, sunlit), ice);
+    }
 
     // Mirror: the surface reflects the sky, more at grazing angles (Fresnel), and at night the
     // stars. The reflected direction picks a star in a grid laid over the sky.
@@ -615,8 +670,8 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // Crests of the rings catch the light of the sky.
     color += atmosphere.sky_color.rgb * crest * 0.5;
 
-    // Shallow water lets the ground show through; deep water and foam hide it.
-    let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.4 * foam, 0.0, 1.0);
+    // Shallow water lets the ground show through; deep water, foam and ice hide it.
+    let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.4 * foam + ice, 0.0, 1.0);
     return vec4<f32>(haze(color, in.world_position), alpha);
 }
 

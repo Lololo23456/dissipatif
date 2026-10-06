@@ -76,6 +76,7 @@ impl Clock {
             moon: self.moon_phase(),
             rain,
             wind: crate::wind::direction(self.days),
+            year: crate::season::year(self.days),
         }
     }
 

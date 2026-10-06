@@ -44,6 +44,8 @@ pub enum Entry {
     Calf,
     /// A deer dead of hunger.
     Starved,
+    /// The stag belling in the rut.
+    Bell,
     /// All of them walking the circle under the full moon.
     Rite,
     /// A spell understood.
@@ -67,6 +69,7 @@ impl Entry {
             ],
             Entry::Turning => &["Seule, en pleine nuit."],
             Entry::Calf => &["Un faon de plus."],
+            Entry::Bell => &["Le brame, au loin."],
             Entry::Starved => &["Une biche morte.", "Les côtes saillantes."],
             Entry::Learnt(Spell::DeerForm) => &["Je sais marcher", "comme elles."],
         }
@@ -182,6 +185,7 @@ impl crate::save::Persist for Entry {
             Entry::Starved => (7, None, None),
             Entry::Rite => (8, None, None),
             Entry::Learnt(s) => (9, None, Some(s)),
+            Entry::Bell => (10, None, None),
         };
         w.put(&tag);
         w.put(&cause);
@@ -202,6 +206,7 @@ impl crate::save::Persist for Entry {
             7 => Entry::Starved,
             8 => Entry::Rite,
             9 => Entry::Learnt(spell.ok_or("sort manquant")?),
+            10 => Entry::Bell,
             _ => return Err("page inconnue".into()),
         })
     }

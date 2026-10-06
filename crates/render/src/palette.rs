@@ -197,8 +197,9 @@ pub fn golden_hour() -> Atmosphere {
 ///     sun_color: vec4<f32>,      // offset 16
 ///     sky_color: vec4<f32>,      // offset 32, w = wind towards x
 ///     ground_color: vec4<f32>,   // offset 48, w = wind towards z
-///     fog_color: vec4<f32>,      // offset 64
+///     fog_color: vec4<f32>,      // offset 64, w = grass dried by the season (0 to 1)
 ///     fog: vec4<f32>,            // offset 80: start, end, max, stars (0 to 1)
+///     season: vec4<f32>,         // offset 96: leaves turned, leaves fallen, snow, ice (0 to 1)
 /// }
 /// ```
 #[repr(C)]
@@ -210,9 +211,18 @@ pub struct AtmosphereUniform {
     pub ground_color: [f32; 4],
     pub fog_color: [f32; 4],
     pub fog: [f32; 4],
+    pub season: [f32; 4],
 }
 
 impl AtmosphereUniform {
+    /// The season: leaves turned and fallen, snow cover, ice on the water, grass dried (each
+    /// 0 to 1).
+    pub fn with_season(mut self, season: [f32; 4], dry: f32) -> Self {
+        self.season = season;
+        self.fog_color[3] = dry;
+        self
+    }
+
     /// Direction the wind blows towards, on the ground plane (x, z), unit.
     pub fn with_wind(mut self, wind: [f32; 2]) -> Self {
         self.sky_color[3] = wind[0];
@@ -255,6 +265,7 @@ impl AtmosphereUniform {
                 atmosphere.fog_max,
                 stars,
             ],
+            season: [0.0; 4],
         }
     }
 }
@@ -290,7 +301,8 @@ mod tests {
 
     #[test]
     fn atmosphere_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<AtmosphereUniform>(), 96);
+        assert_eq!(std::mem::size_of::<AtmosphereUniform>(), 112);
+        assert_eq!(std::mem::offset_of!(AtmosphereUniform, season), 96);
         assert_eq!(std::mem::offset_of!(AtmosphereUniform, fog), 80);
     }
 

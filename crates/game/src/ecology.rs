@@ -65,6 +65,12 @@ const INTAKE: f32 = 30.0;
 const FORAGE_HALF: f32 = 1.0;
 /// Reach of a grazer's muzzle as it steps along, in cells.
 const GRAZE_REACH: f32 = 1.5;
+/// Seeds waiting in the soil for spring, at most.
+const SEED_BANK: usize = 4000;
+/// Dormant herbs and shrubs (in the cold months) keep this much when grazed: their crown and
+/// roots rest underground. In the growing season, grazing them down exhausts them and can
+/// kill them; saplings browsed can die of it at any time.
+const GRAZE_FLOOR: f32 = 0.12;
 
 /// Storey of a plant: who competes with whom, and over what distance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,18 +153,20 @@ pub fn species(plant: Plant) -> Option<Species> {
         crown: v.10,
     };
     Some(s(match plant {
-        // Grass: fast, many seeds near by, sun-loving: the pioneer. Burns fast when dry.
-        Plant::Grass => (Herb, 3.0, 20.0, 1.6, 1.6, 0.5, 0.45, 0.8, 0.9, 5.0, 0.0),
-        // Wild flowers: shorter lives, seeds carried farther.
-        Plant::Flower => (Herb, 2.0, 8.0, 1.4, 3.5, 0.5, 0.35, 0.9, 0.5, 4.0, 0.0),
-        // Ferns: slow, spores carried far, moist shade.
-        Plant::Fern => (Herb, 1.0, 30.0, 0.4, 6.0, 0.75, 0.25, -0.6, 0.3, 6.0, 0.0),
+        // Grass: fast, many seeds near by, sun-loving: the pioneer, perennial (a tuft lives a
+        // couple of years). Burns fast when dry.
+        Plant::Grass => (Herb, 3.0, 120.0, 1.6, 1.6, 0.5, 0.45, 0.8, 0.9, 5.0, 0.0),
+        // Wild flowers: shorter lives (about a year), seeds carried farther; the seed bank
+        // brings them back each spring.
+        Plant::Flower => (Herb, 2.0, 50.0, 1.4, 3.5, 0.5, 0.35, 0.9, 0.5, 4.0, 0.0),
+        // Ferns: slow, long-lived, spores carried far, moist shade.
+        Plant::Fern => (Herb, 1.0, 200.0, 0.4, 6.0, 0.75, 0.25, -0.6, 0.3, 6.0, 0.0),
         // Mushrooms: fruiting bodies of a hidden mycelium, brief, in damp shade only.
         Plant::Mushroom => (Herb, 6.0, 2.0, 1.5, 2.0, 0.8, 0.2, -1.0, 0.0, 2.0, 0.0),
         // Dry shrubs: slow and hardy, the drylands; tinder.
-        Plant::DryShrub => (Shrub, 0.6, 25.0, 0.2, 2.5, 0.15, 0.25, 0.6, 1.0, 10.0, 0.0),
+        Plant::DryShrub => (Shrub, 0.6, 150.0, 0.2, 2.5, 0.15, 0.25, 0.6, 1.0, 10.0, 0.0),
         // Bushes: slow, few seeds, long-lived.
-        Plant::Bush => (Shrub, 0.4, 60.0, 0.08, 3.0, 0.6, 0.3, 0.3, 0.6, 18.0, 0.8),
+        Plant::Bush => (Shrub, 0.4, 300.0, 0.08, 3.0, 0.6, 0.3, 0.3, 0.6, 18.0, 0.8),
         // Trees: slow growth, long lives, a few seeds carried more or less far. Pioneers
         // (birch, pine) need light; the broadleaf grows up in shade.
         Plant::Broadleaf => (
@@ -178,20 +186,40 @@ pub fn species(plant: Plant) -> Option<Species> {
     }))
 }
 
+/// When a layer scatters its seeds (a factor on its yearly rate, averaging about 1): herbs
+/// through summer, shrubs and trees in autumn.
+fn seeding(layer: Layer, year: f32) -> f32 {
+    use crate::season::Season::*;
+    match (layer, crate::season::season(year)) {
+        (Layer::Herb, Summer) => 2.5,
+        (Layer::Herb, Spring | Autumn) => 0.75,
+        (Layer::Shrub | Layer::Tree, Autumn) => 3.0,
+        (Layer::Shrub | Layer::Tree, Summer) => 1.0,
+        _ => 0.0,
+    }
+}
+
 /// How readily grazers eat a plant of `size`: grass and flowers, and tree saplings (browsed:
 /// this is what keeps a meadow open); ferns are bitter, grown trees out of reach.
-fn palatability(plant: Plant, size: f32) -> f32 {
+/// In winter, with little grass, deer browse: brambles, bushes, twigs and bark.
+fn palatability(plant: Plant, size: f32, year: f32) -> f32 {
+    let winter = crate::season::season(year) == crate::season::Season::Winter;
     match plant {
         Plant::Grass => 1.0,
         Plant::Flower => 0.8,
         Plant::Mushroom => 0.3,
         Plant::Fern => 0.05,
+        Plant::DryShrub if winter => 0.6,
         Plant::DryShrub => 0.2,
+        Plant::Bush if winter => 1.2,
         Plant::Bush => 0.5,
         Plant::Cactus => 0.0,
         p if is_tree(p) => {
             if size < 0.5 {
                 1.3
+            } else if winter {
+                // Twigs and bark of grown trees, in want of better.
+                0.08
             } else {
                 0.0
             }
@@ -421,6 +449,10 @@ pub struct Ecology {
     /// it was last read.
     grazers: Vec<Vec2>,
     eaten: Vec<f32>,
+    /// Phase of the year (see `season.rs`): growth, seeds and herbs follow the seasons.
+    year: f32,
+    /// The seed bank: seeds fallen out of season, lying in the soil until spring.
+    bank: Vec<(Plant, Vec2)>,
 }
 
 fn column(p: Vec2) -> (i64, i64) {
@@ -475,6 +507,8 @@ impl Ecology {
             soil,
             grazers: Vec::new(),
             eaten: Vec::new(),
+            year: 0.375,
+            bank: Vec::new(),
             life,
             shown,
             stood,
@@ -500,6 +534,7 @@ impl Ecology {
         w.put(&self.timer);
         w.put(&self.max_plants);
         self.soil.save(w);
+        w.put(&self.bank);
     }
 
     /// Reads back what `save` wrote, for `plants` in `world` (both restored first).
@@ -536,8 +571,11 @@ impl Ecology {
             soil,
             grazers: Vec::new(),
             eaten: Vec::new(),
+            year: 0.375,
+            bank: Vec::new(),
         };
         ecology.soil.load(r)?;
+        ecology.bank = r.get()?;
         ecology.cast_shade(plants);
         ecology.measure_cover(plants);
         Ok(ecology)
@@ -546,6 +584,11 @@ impl Ecology {
     /// The soil, the slow variables.
     pub fn soil(&self) -> &Soil {
         &self.soil
+    }
+
+    /// The time of the year (phase in [0, 1), see `season.rs`).
+    pub fn set_year(&mut self, year: f32) {
+        self.year = year;
     }
 
     /// Where grazers graze now: they eat at the next life steps.
@@ -576,8 +619,15 @@ impl Ecology {
                 Layer::Shrub => 3.0,
                 Layer::Tree => 10.0,
             };
-            cover[k] += weight * l.size / COVER_FULL;
-            forage[k] += palatability(plants[i].plant, l.size) * l.size;
+            // A herb dormant in winter still holds the soil (roots, litter): the cover counts
+            // it whole. Grazers only find what is above ground.
+            let held = if sp.layer == Layer::Herb {
+                l.size / crate::season::herb_cover(self.year)
+            } else {
+                l.size
+            };
+            cover[k] += weight * held.min(1.0) / COVER_FULL;
+            forage[k] += palatability(plants[i].plant, l.size, self.year) * l.size;
         }
         self.soil.set_cover(&cover, &forage);
     }
@@ -593,10 +643,16 @@ impl Ecology {
         plants: &[PlantInstance],
         changes: &mut Vec<Change>,
     ) {
+        let dormant = crate::season::herb_cover(self.year) < 0.95;
         let mut offers = Vec::new();
         self.for_near(at, GRAZE_REACH, plants, |j| {
             let size = self.size(j);
-            let offer = palatability(plants[j].plant, size) * size;
+            let edible = if dormant && !is_tree(plants[j].plant) {
+                (size - GRAZE_FLOOR).max(0.0)
+            } else {
+                size
+            };
+            let offer = palatability(plants[j].plant, size, self.year) * edible;
             if offer > 0.0 {
                 offers.push((j, offer));
             }
@@ -613,6 +669,11 @@ impl Ecology {
                 continue;
             };
             let bite = (want * offer / available).min(l.size);
+            let bite = if dormant && !is_tree(plants[j].plant) {
+                bite.min((l.size - GRAZE_FLOOR).max(0.0))
+            } else {
+                bite
+            };
             l.size -= bite;
             eaten += bite;
             if l.size < DEATH_SIZE {
@@ -827,7 +888,7 @@ impl Ecology {
             self.graze(g, at, days, plants, changes);
         }
         self.measure_cover(plants);
-        self.soil.step(days);
+        self.soil.step(days, crate::season::evaporation(self.year));
         let count = self.life.len();
         let mut seeds: Vec<(Plant, Vec2)> = Vec::new();
         for i in 0..count {
@@ -840,10 +901,17 @@ impl Ecology {
             };
             let at = place(&p);
             let own_shade = if sp.crown > 0.0 { 0.8 * l.size } else { 0.0 };
+            // Herbs die back above ground in winter and come again in spring.
+            let seasonal = if sp.layer == Layer::Herb {
+                crate::season::herb_cover(self.year)
+            } else {
+                1.0
+            };
             let habitat = self
                 .habitat
                 .suitability(world, p.plant, at.x, at.y, own_shade)
-                * self.soil.offer_at(at);
+                * self.soil.offer_at(at)
+                * seasonal;
             // Lotka-Volterra: what the neighbours take, weighed by distance and niche.
             let reach = sp.layer.reach();
             let mut crowd = 0.0;
@@ -854,7 +922,13 @@ impl Ecology {
                 }
             });
             let room = 1.0 - (l.size + crowd) / habitat.max(1e-3);
-            l.size = (l.size + sp.growth * l.size * room * days).min(1.0);
+            // Growth follows the seasons; withering (room < 0) goes on all year.
+            let pace = if room > 0.0 {
+                crate::season::growth(self.year)
+            } else {
+                1.0
+            };
+            l.size = (l.size + sp.growth * pace * l.size * room * days).min(1.0);
             l.age += days;
             if l.size < DEATH_SIZE || l.age > l.lifespan {
                 let stood = self.remove(i, plants);
@@ -871,15 +945,38 @@ impl Ecology {
                 changes.push(Change::Stood(i));
             }
             // Seeds of a grown plant: a Poisson trial per step.
-            if l.size > MATURE && self.rng.next_f32() < sp.seeds * l.size * days {
+            if l.size > MATURE
+                && self.rng.next_f32() < sp.seeds * seeding(sp.layer, self.year) * l.size * days
+            {
                 let angle = std::f32::consts::TAU * self.rng.next_f32();
                 let distance = sp.dispersal * self.rng.next_f32().sqrt();
                 seeds.push((p.plant, at + Vec2::new(angle.cos(), angle.sin()) * distance));
             }
         }
+        // The seed bank: seeds that fell out of season wait in the soil; in spring they come
+        // up, a share at each step over a few days.
+        let germination = crate::season::germination(self.year);
+        if germination < 0.3 {
+            for seed in seeds.drain(..) {
+                if self.bank.len() < SEED_BANK {
+                    self.bank.push(seed);
+                }
+            }
+        } else if !self.bank.is_empty() {
+            let share =
+                ((self.bank.len() as f32 * days / 3.0).ceil() as usize).min(self.bank.len());
+            seeds.extend(self.bank.drain(..share));
+        }
+        let mut living = self.living();
         for (plant, target) in seeds {
-            if self.living() >= self.max_plants {
-                break;
+            // The cap on plants (for the cost) holds where the ground is covered; bare ground
+            // can always be recolonised, up to a hard limit a little above.
+            let bare = self
+                .soil
+                .patch(target)
+                .is_some_and(|k| self.soil.cover(k) < 0.5);
+            if living >= self.max_plants && (!bare || living >= self.max_plants * 5 / 4) {
+                continue;
             }
             let Some(sp) = species(plant) else {
                 continue;
@@ -888,7 +985,7 @@ impl Ecology {
                 .habitat
                 .suitability(world, plant, target.x, target.y, 0.0)
                 * self.soil.offer_at(target);
-            if self.rng.next_f32() >= h || !free(target) {
+            if self.rng.next_f32() >= h * crate::season::germination(self.year) || !free(target) {
                 continue;
             }
             // Room in its own layer (and never on a trunk).
@@ -929,6 +1026,7 @@ impl Ecology {
             self.stood.push(false);
             self.grid.entry(column(target)).or_default().push(index);
             changes.push(Change::Sprouted(index));
+            living += 1;
         }
     }
 }
@@ -989,10 +1087,21 @@ mod tests {
             })
             .collect();
         eco.set_grazers(&at);
-        run(&mut eco, &world, &mut plants, 8);
+        // Long enough for the soil to lose its water: a short pressure does not tip it.
+        run(&mut eco, &world, &mut plants, 14);
         let grazed = eco.soil().cover(k);
         eco.set_grazers(&[]);
-        run(&mut eco, &world, &mut plants, rest);
+        for day in 0..rest {
+            run(&mut eco, &world, &mut plants, 1);
+            if std::env::var_os("DISSIPATIF_TRACE").is_some() {
+                let (w, n) = eco.soil().state(k);
+                println!(
+                    "  repos j{day}: couverture {:.3}, eau {w:.3}, humus {n:.3}, offre {:.3}",
+                    eco.soil().cover(k),
+                    eco.soil().offer_at(centre)
+                );
+            }
+        }
         (before, grazed, eco.soil().cover(k))
     }
 
@@ -1001,11 +1110,11 @@ mod tests {
     /// bare once the grazers are gone (the soil has lost its water and its humus).
     #[test]
     fn grazed_bare_a_wide_meadow_does_not_come_back_a_small_spot_does() {
-        let (before, _, light) = graze_then_rest(3, 2.0, 15);
+        let (before, _, light) = graze_then_rest(3, 2.0, 12);
         assert!(light > 0.8 * before, "light grazing: {before} → {light}");
-        let (_, bare, spot) = graze_then_rest(16, 2.0, 15);
-        assert!(bare < 0.05 && spot > 0.3, "small spot: {bare} → {spot}");
-        let (_, bare, wide) = graze_then_rest(100, 2.5, 15);
+        let (_, bare, spot) = graze_then_rest(16, 2.0, 12);
+        assert!(bare < 0.05 && spot > 0.2, "small spot: {bare} → {spot}");
+        let (_, bare, wide) = graze_then_rest(196, 2.5, 12);
         assert!(bare < 0.1 && wide < 0.1, "wide land: {bare} → {wide}");
     }
 

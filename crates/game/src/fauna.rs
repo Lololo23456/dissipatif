@@ -77,6 +77,9 @@ pub struct Fauna {
     rng: SplitMix64,
     birds: Vec<Bird>,
     butterflies: Vec<Butterfly>,
+    /// Phase of the year (see `season.rs`): butterflies and fireflies only in the warm
+    /// months, fewer birds in winter.
+    pub year: f32,
     fish: Vec<Fish>,
     fireflies: Vec<Firefly>,
     meshes: Option<Meshes>,
@@ -116,6 +119,7 @@ impl Fauna {
             rng: SplitMix64::new(seed),
             birds: Vec::with_capacity(BIRDS),
             butterflies: Vec::with_capacity(BUTTERFLIES),
+            year: 0.375,
             fish: Vec::with_capacity(FISH),
             fireflies: Vec::with_capacity(FIREFLIES),
             meshes: None,
@@ -158,6 +162,19 @@ impl Fauna {
         } else {
             self.fireflies.clear();
         }
+        // The season: what is about, and how many (the rest are reborn when it comes).
+        use crate::season::Season::*;
+        let (birds, butterflies, fireflies) = match crate::season::season(self.year) {
+            Spring => (1.0, 0.5, 0.0),
+            Summer => (1.0, 1.0, 1.0),
+            Autumn => (0.8, 0.2, 0.0),
+            Winter => (0.5, 0.0, 0.0),
+        };
+        self.birds.truncate((BIRDS as f32 * birds) as usize);
+        self.butterflies
+            .truncate((BUTTERFLIES as f32 * butterflies) as usize);
+        self.fireflies
+            .truncate((FIREFLIES as f32 * fireflies) as usize);
         self.particles.clear();
         let strength = ((night - 0.4) / 0.4).clamp(0.0, 1.0);
         let [r, g, b] = self.firefly_color;

@@ -28,6 +28,7 @@ mod obstacles;
 mod player;
 mod save;
 mod scene;
+mod season;
 mod sketch;
 mod soil;
 mod sound;
@@ -348,11 +349,24 @@ impl App {
         let wind = wind::direction(self.clock.days()).to_array();
         self.ambient.wind = wind;
         self.weather.wind = wind;
+        // The air where the naturalist is: rain or snow, ice on the water.
+        let feet_now = self.state.body(self.me).position;
+        let year = season::year(self.clock.days());
+        self.weather.temperature = needs::temperature(
+            &self.world,
+            feet_now,
+            self.clock.hour(),
+            self.weather.rain(),
+            year,
+        );
+        let speed = if self.clock.fast { 60.0 } else { 1.0 };
+        self.weather.seasons(dt * speed * 24.0 / clock::DAY_SECONDS);
         self.ambient.update(dt, time, around, &self.world);
         let hour = self.clock.hour();
         self.weather.update(dt, hour, feet, &self.world);
         let night = render::sky::sky(hour).night;
         let rain = self.weather.rain();
+        self.fauna.year = year;
         self.fauna.update(dt, time, feet, night, rain, &self.world);
         self.particles.clear();
         self.particles.extend_from_slice(self.ambient.instances());
@@ -643,10 +657,15 @@ impl App {
             .state
             .herd()
             .map(|h| {
+                // The hinds, and the stag of the rut in autumn.
                 h.deer
                     .iter()
                     .enumerate()
                     .map(|(i, d)| DeerPose::of(d, i, time))
+                    .chain(h.stag.iter().map(|d| DeerPose {
+                        stag: true,
+                        ..DeerPose::of(d, 99, time)
+                    }))
                     .collect()
             })
             .unwrap_or_default();
@@ -1412,6 +1431,7 @@ fn draw_hud(
             hour: clock.hour(),
             day: clock.day(),
             moon_phase: clock.moon_phase(),
+            season: season::season(season::year(clock.days())).name(),
             wind: wind::direction(clock.days()),
             camera_yaw,
             message: message.as_ref().map(|(text, left)| (text.as_str(), *left)),
@@ -1469,7 +1489,7 @@ fn set_sky(clock: &Clock, weather: &Weather, feet: Vec3, renderer: &mut Renderer
     let hour = clock.hour();
     let mut sky = render::sky::sky(hour).with_moon(clock.moon_light());
     sky.wind = crate::wind::direction(clock.days()).to_array();
-    weather.apply(&mut sky, hour);
+    weather.apply(&mut sky, hour, season::look(season::year(clock.days())));
     renderer.set_sky(&sky);
     // Mist lies a little below the naturalist: in the hollows around and over the water.
     renderer.set_weather(weather.mist(hour), weather.wet(), feet.y - 2.0);
@@ -1516,6 +1536,8 @@ struct CaptureOptions {
     notebook: bool,
     /// The naturalist knows the deer's shape and takes it (to look at it).
     deer: bool,
+    /// Snow lying on the ground (and ice on the water), 0 to 1.
+    snow: f32,
 }
 
 impl Options {
@@ -1580,6 +1602,7 @@ impl Options {
                     day: number("--day")?.unwrap_or(1.0) as u32,
                     notebook: args.iter().any(|a| a == "--notebook"),
                     deer: args.iter().any(|a| a == "--deer"),
+                    snow: number("--snow")?.unwrap_or(0.0),
                 })
             }
             None => None,
@@ -1659,6 +1682,9 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
             herd.glow,
             wind::direction(app.clock.days())
         );
+    }
+    if options.snow > 0.0 {
+        app.weather.set_cover(options.snow, options.snow);
     }
     // `--at` overrides the follow camera.
     if let Some((x, z)) = options.at {

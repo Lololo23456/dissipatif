@@ -39,6 +39,10 @@ pub struct Sky {
     pub moon: f32,
     /// Direction the wind blows towards, (x, z), unit.
     pub wind: [f32; 2],
+    /// The season: leaves turned, leaves fallen, snow on the ground, ice on the water (each
+    /// 0 to 1), and grass dried.
+    pub season: [f32; 4],
+    pub dry: f32,
 }
 
 impl Sky {
@@ -267,6 +271,8 @@ pub fn sky(hour: f32) -> Sky {
         moonlit,
         moon: 1.0,
         wind: [0.89, 0.45],
+        season: [0.0; 4],
+        dry: 0.0,
     }
 }
 

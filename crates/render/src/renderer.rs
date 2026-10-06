@@ -402,7 +402,8 @@ impl Renderer {
         let atmosphere = &sky.atmosphere;
         let uniform = AtmosphereUniform::new(atmosphere, sky.stars)
             .with_moon(sky.moon)
-            .with_wind(sky.wind);
+            .with_wind(sky.wind)
+            .with_season(sky.season, sky.dry);
         self.gpu
             .queue()
             .write_buffer(&self.atmosphere_buffer, 0, bytemuck::bytes_of(&uniform));

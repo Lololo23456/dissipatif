@@ -101,6 +101,10 @@ pub enum HerdEvent {
     Born,
     /// A deer starved.
     Starved,
+    /// The stag bells (the rut, in autumn).
+    Bell,
+    /// A stag shed an antler there (the end of winter).
+    AntlerShed { at: Vec2 },
 }
 
 pub struct Deer {
@@ -129,21 +133,37 @@ pub struct Deer {
     scanning: f32,
     /// Reserves, 0 (starving) to 1 (well fed): grazing fills them, living spends them.
     pub energy: f32,
+    /// With calf since the rut.
+    pub pregnant: bool,
 }
 
+/// The year of a red deer (phases, see `season.rs`): the rut at the heart of autumn, calves
+/// born at the end of spring (eight months later), antlers shed at the end of winter.
+const RUT: std::ops::Range<f32> = 0.54..0.68;
+const CALVING: std::ops::Range<f32> = 0.17..0.27;
+const SHEDDING: f32 = 0.93;
+/// Chance per game day for a pregnant hind to give birth in the calving season (most do), and
+/// for a well-fed hind to conceive in the rut.
+const BIRTH_RATE: f32 = 0.4;
+const CONCEPTION_RATE: f32 = 0.5;
+/// Seconds between two bellings of the stag.
 /// Reserves a deer spends in a game day (a grown hind; a calf less), and what a unit of
 /// forage eaten gives back: about five grown grass tufts a day keep a hind.
-const METABOLISM: f32 = 1.0;
-const ENERGY_PER_BITE: f32 = 0.2;
-/// Births: chance per game day for each grown, well-fed hind (above `FED`), fewer as the herd
-/// nears `CROWDED` (fecundity falls with density, as in real deer), at most `MAX_HERD`.
-/// Calves grow to full size in about thirty days.
-const BIRTHS: f32 = 0.08;
+/// A full reserve (fat) lasts about eight days of fasting, fourteen in winter: a deer lives
+/// through the lean months on what it put on in autumn.
+const METABOLISM: f32 = 0.12;
+const ENERGY_PER_BITE: f32 = 0.024;
+const BELL_EVERY: f32 = 25.0;
+/// Conception: hinds above `FED`, fewer as the herd nears `CROWDED` (fecundity falls with
+/// density, as in real deer), the herd at most `MAX_HERD`. Calves grow to full size in a year.
 const CROWDED: f32 = 9.0;
-const FED: f32 = 0.75;
+const FED: f32 = 0.6;
 const MAX_HERD: usize = 12;
-const CALF: f32 = 0.55;
-const GROWTH_PER_DAY: f32 = 0.015;
+const CALF: f32 = 0.5;
+const GROWTH_PER_DAY: f32 = 0.45 / crate::season::YEAR_DAYS;
+/// Winter: the reserves are spent more slowly (red deer lower their metabolism by about
+/// 40 % in the cold months).
+const WINTER_METABOLISM: f32 = 0.6;
 
 impl Deer {
     fn new(position: Vec3, size: f32, rng: &mut SplitMix64) -> Self {
@@ -163,6 +183,7 @@ impl Deer {
             timer: rng.next_f32() * 3.0,
             scanning: 0.0,
             energy: 0.7,
+            pregnant: false,
         }
     }
 }
@@ -214,6 +235,12 @@ pub struct Herd {
     pasture: Vec2,
     /// Which deer were grazing when the grazers were last asked for (see `grazers`).
     grazing: Vec<usize>,
+    /// The stag that joins the hinds for the rut, while it lasts.
+    pub stag: Option<Deer>,
+    /// Seconds until it bells again.
+    bell_in: f32,
+    /// The last year (count since the start) antlers were shed.
+    shed_year: i64,
 }
 
 /// Lit share of the moon at a phase (0 new, 0.5 full).
@@ -289,6 +316,9 @@ impl Herd {
             rite: None,
             pasture: ring,
             grazing: Vec::new(),
+            stag: None,
+            bell_in: BELL_EVERY,
+            shed_year: -1,
         }
     }
 
@@ -365,24 +395,51 @@ impl Herd {
         }
     }
 
-    /// Reserves spent, calves growing, births and deaths, over `dt` seconds.
-    fn live(&mut self, dt: f32, world: &World, events: &mut Vec<HerdEvent>) {
+    /// Reserves spent, calves growing, conceptions in the rut, births at the end of spring,
+    /// deaths, over `dt` seconds.
+    fn live(&mut self, dt: f32, world: &World, now: &Conditions, events: &mut Vec<HerdEvent>) {
         let days = dt / crate::clock::DAY_SECONDS;
+        let year = now.year;
         let mut births = Vec::new();
         let room = self.deer.len() < MAX_HERD;
         let fecundity = (1.0 - self.deer.len() as f32 / CROWDED).max(0.0);
+        let rut = RUT.contains(&year) && self.stag.is_some();
+        let calving = CALVING.contains(&year);
+        let metabolism = if crate::season::season(year) == crate::season::Season::Winter {
+            METABOLISM * WINTER_METABOLISM
+        } else {
+            METABOLISM
+        };
         for d in &mut self.deer {
-            d.energy -= METABOLISM * d.size * days;
+            d.energy -= metabolism * d.size * days;
             if d.size < 0.95 {
                 d.size += GROWTH_PER_DAY * days;
             }
-            if room
+            if rut
+                && !d.pregnant
                 && d.size > 0.9
                 && d.energy > FED
-                && self.rng.next_f32() < BIRTHS * fecundity * days
+                && self.rng.next_f32() < CONCEPTION_RATE * fecundity * days
             {
+                d.pregnant = true;
+            }
+            if calving && d.pregnant && room && self.rng.next_f32() < BIRTH_RATE * days {
+                d.pregnant = false;
                 births.push(d.position);
             }
+            // A calf lost when the season has passed.
+            if d.pregnant && (0.3..0.5).contains(&year) {
+                d.pregnant = false;
+            }
+        }
+        // Antlers shed at the end of winter, once a year, in the wood where stags winter.
+        let year_count = (now.days / crate::season::YEAR_DAYS as f64).floor() as i64;
+        if year >= SHEDDING && self.shed_year < year_count {
+            self.shed_year = year_count;
+            let angle = self.rng.next_f32() * std::f32::consts::TAU;
+            let at = self.cover
+                + Vec2::new(angle.cos(), angle.sin()) * (3.0 + 5.0 * self.rng.next_f32());
+            events.push(HerdEvent::AntlerShed { at });
         }
         let before = self.deer.len();
         self.deer.retain(|d| d.energy > 0.0);
@@ -404,6 +461,54 @@ impl Herd {
         }
     }
 
+    /// The rut: a stag comes from the wood, keeps near the hinds and bells; it leaves when
+    /// the season is over.
+    fn rut(&mut self, dt: f32, world: &World, now: &Conditions, events: &mut Vec<HerdEvent>) {
+        let rut = RUT.contains(&now.year) && !self.deer.is_empty();
+        match (&mut self.stag, rut) {
+            (None, true) => {
+                let mut stag = Deer::new(ground(world, self.cover), 1.2, &mut self.rng);
+                stag.lying = 0.0;
+                stag.energy = 1.0;
+                self.stag = Some(stag);
+            }
+            (Some(_), false) => self.stag = None,
+            (Some(stag), true) => {
+                // Near the herd, a little apart; head up and neck stretched as it bells.
+                let centre = self.deer[0].position;
+                let centre = Vec2::new(centre.x, centre.z);
+                let here = Vec2::new(stag.position.x, stag.position.z);
+                let goal = centre + (here - centre).normalize_or(Vec2::X) * 4.0;
+                let fleeing = self.flight.map(|(from, _, _)| from);
+                let (goal, speed) = match fleeing {
+                    Some(from) => (
+                        here + (here - from).normalize_or(Vec2::X) * 10.0,
+                        GALLOP_SPEED,
+                    ),
+                    None if here.distance(goal) > 1.0 => (goal, WALK_SPEED),
+                    None => (goal, 0.0),
+                };
+                move_towards(stag, world, goal, speed, dt);
+                stag.activity = if speed > 0.0 {
+                    Activity::Walking
+                } else {
+                    Activity::Vigilant
+                };
+                self.bell_in -= dt;
+                if self.bell_in <= 0.0 {
+                    self.bell_in = BELL_EVERY * (0.7 + 0.6 * self.rng.next_f32());
+                    stag.stamp = 0.0;
+                    events.push(HerdEvent::Bell);
+                }
+                // Belling: the head raised for three seconds.
+                let belling = self.bell_in > BELL_EVERY * 0.7 - 3.0;
+                let head = if belling { 1.5 } else { 0.6 };
+                stag.head += (head - stag.head) * (1.0 - (-dt * 4.0).exp());
+            }
+            (None, false) => {}
+        }
+    }
+
     /// One step of `dt` seconds. `fires`: where something burns.
     pub fn update(
         &mut self,
@@ -414,7 +519,8 @@ impl Herd {
         fires: &[Vec2],
         events: &mut Vec<HerdEvent>,
     ) {
-        self.live(dt, world, events);
+        self.live(dt, world, now, events);
+        self.rut(dt, world, now, events);
         if self.deer.is_empty() {
             self.glow = 0.0;
             self.rite = None;
@@ -992,6 +1098,7 @@ crate::save::persist_struct!(Deer {
     timer,
     scanning,
     energy,
+    pregnant,
 });
 
 impl crate::save::Persist for Herd {
@@ -1007,9 +1114,12 @@ impl crate::save::Persist for Herd {
         w.put(&self.glow);
         w.put(&self.rite);
         w.put(&self.pasture);
+        w.put(&self.shed_year);
     }
     fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
         Ok(Self {
+            stag: None,
+            bell_in: BELL_EVERY,
             deer: r.get()?,
             ring: r.get()?,
             cover: r.get()?,
@@ -1022,6 +1132,7 @@ impl crate::save::Persist for Herd {
             rite: r.get()?,
             pasture: r.get()?,
             grazing: Vec::new(),
+            shed_year: r.get()?,
         })
     }
 }
@@ -1047,6 +1158,7 @@ mod tests {
             moon,
             rain: 0.0,
             wind,
+            year: 0.375,
         }
     }
 
@@ -1213,6 +1325,68 @@ mod tests {
             herd.deer[1..]
                 .iter()
                 .all(|d| d.activity != Activity::Circling)
+        );
+    }
+
+    /// A year of the herd: a stag comes for the rut in autumn, the hinds conceive, calves are
+    /// born at the end of spring and none at other times, antlers are shed at the end of
+    /// winter.
+    #[test]
+    fn the_herd_lives_its_year() {
+        let (world, mut herd) = setup();
+        let mut events = Vec::new();
+        let mut births_by_season = [0usize; 4];
+        let mut stag_seen_in = Vec::new();
+        let day = crate::clock::DAY_SECONDS;
+        // Through a year, a step of a game hour (well fed: the grazing is not simulated here).
+        let steps = (crate::season::YEAR_DAYS * 24.0) as usize;
+        for k in 0..steps {
+            let days = k as f64 / 24.0;
+            let now = Conditions {
+                hour: (k % 24) as f32,
+                days,
+                moon: 0.25,
+                rain: 0.0,
+                wind: Vec2::X,
+                year: crate::season::year(days),
+            };
+            for d in &mut herd.deer {
+                d.energy = 0.9;
+            }
+            let before = events.len();
+            herd.live(day / 24.0, &world, &now, &mut events);
+            herd.rut(day / 24.0, &world, &now, &mut events);
+            for e in &events[before..] {
+                if *e == HerdEvent::Born {
+                    births_by_season[crate::season::season(now.year) as usize] += 1;
+                }
+            }
+            if herd.stag.is_some() {
+                stag_seen_in.push(crate::season::season(now.year));
+            }
+        }
+        assert!(
+            births_by_season[0] + births_by_season[1] >= 2,
+            "{births_by_season:?}"
+        );
+        assert_eq!(
+            births_by_season[2] + births_by_season[3],
+            0,
+            "{births_by_season:?}"
+        );
+        assert!(!stag_seen_in.is_empty());
+        assert!(
+            stag_seen_in
+                .iter()
+                .all(|&s| s == crate::season::Season::Autumn)
+        );
+        assert!(events.contains(&HerdEvent::Bell));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, HerdEvent::AntlerShed { .. }))
+                .count(),
+            1
         );
     }
 }

@@ -225,6 +225,8 @@ pub struct Conditions {
     pub rain: f32,
     /// Direction the wind blows towards, unit.
     pub wind: Vec2,
+    /// Phase of the year in [0, 1): 0 spring, 0.25 summer, 0.5 autumn, 0.75 winter.
+    pub year: f32,
 }
 
 impl Conditions {
@@ -237,6 +239,7 @@ impl Conditions {
             moon: 0.5,
             rain: 0.0,
             wind: Vec2::new(0.89, 0.45),
+            year: 0.375,
         }
     }
 }
@@ -316,6 +319,7 @@ impl GameState {
                 moon: 0.0,
                 rain: 0.0,
                 wind: Vec2::X,
+                year: 0.375,
             },
         }
     }
@@ -1047,7 +1051,7 @@ impl GameState {
         slot: usize,
         at: Vec3,
     ) -> Option<Event> {
-        let air = KELVIN + needs::temperature(world, at, 12.0, self.rain);
+        let air = KELVIN + needs::temperature(world, at, 12.0, self.rain, self.now.year);
         let matter = self.player_mut(player)?.inventory.take(slot)?;
         self.objects.lay(matter, at, air);
         // Laying something clears the low plants around it (as one clears a spot
@@ -1213,7 +1217,7 @@ impl GameState {
         self.rain = rain;
         // Objects' physics, in the air around the first player (the objects lie near them).
         let around = self.players.first().map_or(Vec3::ZERO, |p| p.body.position);
-        let air = KELVIN + needs::temperature(world, around, hour, rain);
+        let air = KELVIN + needs::temperature(world, around, hour, rain, now.year);
         // Blowing (the drill key held over something glowing): fresh air for this step.
         for p in &self.players {
             if p.controls.rub {
@@ -1253,6 +1257,7 @@ impl GameState {
                 .iter()
                 .all(|o| Vec2::new(o.base.x, o.base.z).distance(p) > 0.3)
         };
+        self.ecology.set_year(now.year);
         // The deer graze the plants they stand among; what they eat feeds them.
         if let Some(herd) = self.herd.as_mut() {
             self.ecology.set_grazers(&herd.grazers());
@@ -1303,7 +1308,7 @@ impl GameState {
             let feet = p.body.position;
             let fire = self.objects.warmth(feet.x, feet.z, 3.0);
             let exposure = Exposure {
-                temperature: needs::temperature(world, feet, hour, rain) + fire,
+                temperature: needs::temperature(world, feet, hour, rain, now.year) + fire,
                 running: p.controls.run && moving,
                 in_water: p.body.in_water(),
             };
@@ -1373,6 +1378,15 @@ impl GameState {
             herd.update(STEP, world, now, &observers, &fires, &mut self.herd_events);
         }
 
+        // Shed antlers lie in the wood until someone finds them.
+        for &event in &self.herd_events {
+            if let HerdEvent::AntlerShed { at } = event {
+                let base = Vec3::new(at.x, world.surface_height(at.x, at.y), at.y);
+                let air = KELVIN + needs::temperature(world, base, now.hour, now.rain, now.year);
+                self.objects.lay(Matter::Antler, base, air);
+            }
+        }
+
         let herd = &*herd;
         let light = deer::daylight(now.hour).max(crate::clock::moon_light(now.moon) * 0.8);
         for p in &mut self.players {
@@ -1388,13 +1402,20 @@ impl GameState {
                 entries.push(Entry::Herd);
             }
             for &event in &self.herd_events {
+                let entry = match event {
+                    HerdEvent::Alarm { .. } => Entry::Alarm,
+                    HerdEvent::Fled { cause } => Entry::Fled(cause),
+                    HerdEvent::Born => Entry::Calf,
+                    HerdEvent::Starved => Entry::Starved,
+                    // The bell carries far.
+                    HerdEvent::Bell if nearest < 70.0 => {
+                        entries.push(Entry::Bell);
+                        continue;
+                    }
+                    HerdEvent::Bell | HerdEvent::AntlerShed { .. } => continue,
+                };
                 if nearest < 35.0 {
-                    entries.push(match event {
-                        HerdEvent::Alarm { .. } => Entry::Alarm,
-                        HerdEvent::Fled { cause } => Entry::Fled(cause),
-                        HerdEvent::Born => Entry::Calf,
-                        HerdEvent::Starved => Entry::Starved,
-                    });
+                    entries.push(entry);
                 }
             }
             let to_ring = feet.distance(herd.ring);
@@ -1544,7 +1565,8 @@ crate::save::persist_struct!(Conditions {
     days,
     moon,
     rain,
-    wind
+    wind,
+    year
 });
 
 impl crate::save::Persist for PlayerState {
@@ -2000,7 +2022,7 @@ mod tests {
         clock.fast = true;
         state.time_scale = 60.0;
         let patch = state.ecology.soil().patch(ring).expect("in the world");
-        for day in 1..=40 {
+        for day in 1..=66 {
             for _ in 0..20 * 60 {
                 clock.advance(STEP);
                 state.step(&world, &clock.conditions(0.0));
@@ -2010,14 +2032,15 @@ mod tests {
                 herd.deer.iter().map(|d| d.energy).sum::<f32>() / herd.deer.len().max(1) as f32;
             let soil = state.ecology.soil();
             println!(
-                "jour {day:2} : {} cerfs, énergie {energy:.2}, prairie : couverture {:.2}, fourrage {:.1}, eau/humus {:?}, pâture {:?}",
+                "jour {day:2} ({:?}) : {} cerfs, énergie {energy:.2}, prairie : couverture {:.2}, fourrage {:.1}, eau/humus {:?}, pâture {:?}",
+                crate::season::season(clock.conditions(0.0).year),
                 herd.deer.len(),
                 soil.cover(patch),
                 soil.forage(patch),
                 soil.state(patch),
                 herd.pasture()
             );
-            if day % 4 != 0 {
+            if day % 6 != 0 {
                 continue;
             }
             println!(
@@ -2050,10 +2073,10 @@ mod tests {
         state.time_scale = 60.0;
         let mut clock = crate::clock::Clock::on_day(1, 18.0);
         clock.fast = true;
-        let mut run = |state: &mut GameState,
-                       world: &mut World,
-                       clock: &mut crate::clock::Clock,
-                       steps: usize| {
+        let run = |state: &mut GameState,
+                   world: &mut World,
+                   clock: &mut crate::clock::Clock,
+                   steps: usize| {
             for _ in 0..steps {
                 clock.advance(STEP);
                 state.step(world, &clock.conditions(0.0));
@@ -2077,7 +2100,11 @@ mod tests {
             let mut w = crate::save::header(1);
             w.put(&world.state());
             state.save(&mut w);
-            println!("sauvegarde : {} Ko en {:?}", w.bytes.len() / 1024, start.elapsed());
+            println!(
+                "sauvegarde : {} Ko en {:?}",
+                w.bytes.len() / 1024,
+                start.elapsed()
+            );
         }
         let (mut again, ..) = setup();
         let mut r = crate::save::open(&bytes, 1).expect("our save");

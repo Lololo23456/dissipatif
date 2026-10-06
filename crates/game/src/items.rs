@@ -73,6 +73,9 @@ pub enum Matter {
     },
     /// Green wood cut from a living bush: heavy with sap, it burns badly until dried.
     GreenWood,
+    /// An antler a stag shed at the end of winter: bone, hard yet a little springy (a soft
+    /// hammer to retouch an edge, a handle, a tool).
+    Antler,
 }
 
 /// Cuts a knife makes before its grass binding gives way.
@@ -142,6 +145,13 @@ impl Matter {
                 sharpness: 0.85,
                 fragility: 0.4,
                 flammability: 0.4,
+                ..base
+            },
+            Matter::Antler => Properties {
+                mass: 0.9,
+                hardness: 0.7,
+                flexibility: 0.3,
+                fragility: 0.1,
                 ..base
             },
             Matter::GreenWood => Properties {
@@ -274,6 +284,7 @@ impl Matter {
             Matter::Chips => "Débris de pierre",
             Matter::Knife { .. } => "Couteau emmanché",
             Matter::GreenWood => "Bois vert",
+            Matter::Antler => "Bois de cerf",
         }
     }
 
@@ -427,6 +438,7 @@ impl crate::save::Persist for Matter {
             Matter::Chips => (14, 0, None),
             Matter::Knife { uses } => (15, uses, None),
             Matter::GreenWood => (16, 0, None),
+            Matter::Antler => (17, 0, None),
         };
         w.put(&tag);
         w.put(&a);
@@ -464,6 +476,7 @@ impl crate::save::Persist for Matter {
             14 => Matter::Chips,
             15 => Matter::Knife { uses: a },
             16 => Matter::GreenWood,
+            17 => Matter::Antler,
             _ => return Err("matière inconnue".into()),
         })
     }

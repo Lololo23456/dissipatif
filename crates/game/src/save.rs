@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use glam::{Vec2, Vec3};
 
 /// Bumped whenever the layout changes: older saves are then ignored.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 3;
 const MAGIC: &[u8; 4] = b"DSPF";
 
 #[derive(Default)]

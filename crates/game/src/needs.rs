@@ -57,7 +57,8 @@ pub struct Exposure {
 /// Air temperature (°C) at `feet`: the biome's climate, colder with altitude (6.5 °C per
 /// 1000 m, a cell being a metre, exaggerated ×10 for such small mountains), a daily swing
 /// (wide in the desert), cooler under rain.
-pub fn temperature(world: &World, feet: Vec3, hour: f32, rain: f32) -> f32 {
+/// `year`: phase of the year (see `season.rs`); the means above are those of high summer.
+pub fn temperature(world: &World, feet: Vec3, hour: f32, rain: f32, year: f32) -> f32 {
     let dims = world.dims();
     let (x, z) = (
         (feet.x.max(0.0) as usize).min(dims.nx - 1),
@@ -76,7 +77,7 @@ pub fn temperature(world: &World, feet: Vec3, hour: f32, rain: f32) -> f32 {
     let altitude = (feet.y - world.config.sea_level).max(0.0);
     // Warmest at about 15:00, coldest before dawn.
     let daily = (std::f32::consts::TAU * (hour - 9.0) / 24.0).sin();
-    mean + swing * daily - altitude * 0.065 - 4.0 * rain
+    mean + swing * daily - altitude * 0.065 - 4.0 * rain + crate::season::cooling(year)
 }
 
 impl Needs {
@@ -207,11 +208,11 @@ mod tests {
             }
         }
         if let Some(d) = desert {
-            assert!(temperature(&world, d, 15.0, 0.0) > 30.0);
-            assert!(temperature(&world, d, 3.0, 0.0) < 20.0);
+            assert!(temperature(&world, d, 15.0, 0.0, 0.375) > 30.0);
+            assert!(temperature(&world, d, 3.0, 0.0, 0.375) < 20.0);
         }
         if let Some(p) = peak {
-            assert!(temperature(&world, p, 15.0, 0.0) < 5.0);
+            assert!(temperature(&world, p, 15.0, 0.0, 0.375) < 5.0);
         }
     }
 }

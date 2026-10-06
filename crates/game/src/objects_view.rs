@@ -128,6 +128,17 @@ fn model(matter: Matter) -> Grid {
             g.fill([7, 10], [0, 1], [0, 2], Material::Rock);
             g
         }
+        Matter::Antler => {
+            // A beam with its tines, lying on its side.
+            let mut g = Grid::new(12, 2, 7);
+            g.fill([0, 12], [0, 1], [1, 2], Material::DeadWood);
+            g.fill([2, 3], [0, 1], [2, 5], Material::DeadWood);
+            g.fill([6, 7], [0, 1], [2, 6], Material::DeadWood);
+            g.fill([10, 12], [0, 1], [2, 4], Material::DeadWood);
+            g.fill([11, 12], [1, 2], [4, 7], Material::DeadWood);
+            g.fill([0, 2], [0, 2], [0, 3], Material::BarkDark);
+            g
+        }
         Matter::GreenWood => {
             let mut g = Grid::new(8, 2, 3);
             g.fill([0, 8], [0, 1], [1, 2], Material::Wood);
@@ -222,6 +233,7 @@ fn all_matters() -> Vec<Matter> {
         Matter::Flake,
         Matter::Chips,
         Matter::GreenWood,
+        Matter::Antler,
         Matter::Ash,
         Matter::Mushroom { spotted: false },
         Matter::Mushroom { spotted: true },

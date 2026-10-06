@@ -23,6 +23,8 @@ pub struct HudInput<'a> {
     /// Day number and moon phase (0 new, 0.5 full).
     pub day: u32,
     pub moon_phase: f32,
+    /// The season, in words.
+    pub season: &'static str,
     /// The current message and the seconds it still stays.
     pub message: Option<(&'a str, f32)>,
     /// The bag is open.
@@ -311,7 +313,8 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     // ---- Hour ----
     let hour = input.hour.rem_euclid(24.0);
     let clock = format!(
-        "Jour {} - {:02} h {:02} - {}",
+        "{} - jour {} - {:02} h {:02} - {}",
+        input.season,
         input.day,
         hour as u32,
         (hour.fract() * 60.0) as u32,

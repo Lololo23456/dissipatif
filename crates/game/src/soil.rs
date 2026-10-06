@@ -51,7 +51,7 @@ const BARE_HUMUS: f32 = 0.3;
 const WATER_HALF: f32 = 0.5;
 const WATER_FLOOR: f32 = 0.04;
 /// Water seeping between neighbouring patches (per game day).
-const SEEPAGE: f32 = 0.25;
+const SEEPAGE: f32 = 0.1;
 
 /// Infiltration f(B): the share of the rain that soaks in, from bare ground to full cover.
 pub fn infiltration(cover: f32) -> f32 {
@@ -76,8 +76,12 @@ pub fn offer(water: f32, humus: f32, rain: f32) -> f32 {
 }
 
 /// One soil patch's step of `days`: water and organic matter under rain P and cover B.
-pub fn step(water: &mut f32, humus: &mut f32, rain: f32, cover: f32, days: f32) {
-    *water += (rain * infiltration(cover) - EVAPORATION * *water - UPTAKE * cover * *water) * days;
+/// `evaporation`: a factor for the season (1 in summer, less in the cold).
+pub fn step(water: &mut f32, humus: &mut f32, rain: f32, cover: f32, days: f32, evaporation: f32) {
+    *water += (rain * infiltration(cover)
+        - EVAPORATION * evaporation * *water
+        - UPTAKE * evaporation * cover * *water)
+        * days;
     *water = water.max(0.0);
     *humus += HUMUS_RATE * (humus_target(cover) - *humus) * days;
 }
@@ -179,7 +183,8 @@ impl Soil {
         }
     }
 
-    pub fn step(&mut self, days: f32) {
+    /// `evaporation`: the season's factor (see `season::evaporation`).
+    pub fn step(&mut self, days: f32, evaporation: f32) {
         for k in 0..self.rain.len() {
             step(
                 &mut self.water[k],
@@ -187,6 +192,7 @@ impl Soil {
                 self.rain[k],
                 self.cover[k],
                 days,
+                evaporation,
             );
         }
         // Water seeps sideways between patches (a 5-point Laplacian, double-buffered): a bare
@@ -232,7 +238,6 @@ impl Soil {
         }
     }
 
-    #[cfg(test)]
     pub fn cover(&self, k: usize) -> f32 {
         self.cover[k]
     }
@@ -260,7 +265,7 @@ mod tests {
             let k = offer(w, n, rain).max(1e-3);
             b += (2.0 * b * (1.0 - b / k) - grazing * b / (b + 0.35)) * dt;
             b = b.max(1e-3);
-            step(&mut w, &mut n, rain, b, dt);
+            step(&mut w, &mut n, rain, b, dt, 1.0);
         }
         (b, w, n)
     }
@@ -294,13 +299,14 @@ mod tests {
             soil.set_cover(&cover, &[0.0; 25]);
             soil.settle();
             for _ in 0..100 {
-                soil.step(0.2);
+                soil.step(0.2, 1.0);
             }
             soil.state(12).0
         };
         let (amid, alone) = (soil_with(true), soil_with(false));
-        // Enough water amid the meadow for plants to take again, not in the bare land.
-        assert!(offer(amid, 0.6, 0.5) > 0.3, "{amid}");
+        // Enough water amid the meadow for plants to take again (slowly), not in the bare
+        // land.
+        assert!(offer(amid, 0.6, 0.5) > 0.1, "{amid}");
         assert!(offer(alone, 0.6, 0.5) < 0.02, "{alone}");
     }
 

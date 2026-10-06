@@ -76,6 +76,8 @@ fn body(matter: Matter, base: Vec3, air: f32) -> Body {
         // Green wood: full of sap (water), it must dry before it burns.
         Matter::GreenWood => (0.07, 0.01, 1700.0, 0.12, Some(wood(0.18, 300.0, 0.05, 0.2))),
         Matter::Ash => (0.03, 0.05, 800.0, 0.0, None),
+        // Bone: dense, does not burn here.
+        Matter::Antler => (0.08, 0.9, 1300.0, 0.0, None),
         Matter::Flower(_) | Matter::Mushroom { .. } => (0.03, 0.03, 3000.0, 0.02, None),
     };
     Body {
