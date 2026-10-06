@@ -288,3 +288,6 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 ## 2026-10-06 — Chaque animal façonne la terre ; la roue des sorts
 - **Actées** : aucun animal n'est un décor ; chacun transporte, retire, ajoute ou transforme quelque chose du monde, et ces actions passent par l'écologie et le sol (écureuils et geais qui plantent les chênes avec leurs caches oubliées, sangliers qui retournent la terre, castors qui inondent…). Table dans `catalogue/animaux.md`.
 - **Les sorts se choisissent sur une roue** (maintenir, viser, relâcher), dessinés en signes.
+
+## 2026-10-06 — Les animaux vivent au rythme des saisons
+- **Actée** : chaque espèce suit son calendrier réel ; elle ne se reproduit qu'à sa saison (les faons naissent à la fin du printemps après le rut d'automne). Tableau dans `catalogue/animaux.md`, inscrit à l'étape 1 de la feuille de route. Les naissances « toute l'année » de la harde sont provisoires.

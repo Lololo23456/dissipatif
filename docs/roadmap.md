@@ -24,7 +24,12 @@ Objectif : qu'on puisse **vivre** longtemps au même endroit.
 - ⬜ **Sauvegarde** : le monde (creusé, brûlé, poussé), les plantes, le sol, la harde, le carnet, le joueur. Indispensable avant tout le reste.
 - ⬜ **Saisons et années** : calendrier (4 saisons), température, neige et gel des lacs l'hiver, couleurs de la végétation, plantes qui fleurissent, fructifient et dorment.
 - ⬜ **Écureuils** : caches de glands à l'automne, recherche l'hiver, caches oubliées qui germent en chênes ; ajout du chêne et du noisetier. Premier animal qui plante.
-- ⬜ **La harde au fil des saisons** : naissances au printemps, brame des cerfs mâles à l'automne, chute des bois à la fin de l'hiver (un objet à ramasser).
+- ⬜ **Chaque animal vit au rythme des saisons**, d'après son calendrier réel (voir le tableau dans `catalogue/animaux.md`) : reproduction à sa saison seulement, mues, réserves, repos d'hiver.
+  - Cerfs : le rut et le brame à l'automne, les naissances à la fin du printemps (environ huit mois de gestation), les bois qui tombent à la fin de l'hiver (un objet à ramasser), une harde qui s'amaigrit l'hiver. Remplace les naissances « toute l'année » actuelles.
+  - Oiseaux : nids et chant au printemps, envols des jeunes en été.
+  - Lucioles et papillons : seulement aux beaux jours ; chenilles et chrysalides avant.
+  - Poissons : remontée des rivières pour frayer.
+  - Écureuils : caches à l'automne, recherche l'hiver, petits au printemps.
 - ⬜ **Le sol se voit** : un sol épuisé change de couleur, l'anneau du rituel s'efface s'il n'est plus foulé.
 - ⬜ **La planète se referme** : bords du monde raccordés (on fait le tour), carte plus grande.
 - ⬜ **Sons de la harde** : aboiement d'alarme, coup de sabot, brame.

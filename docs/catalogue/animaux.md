@@ -23,6 +23,28 @@ Aucun animal n'est un décor. Chacun agit sur le monde, et le paysage en garde l
 | Fourmis | transportent des graines (certaines plantes leur offrent une récompense pour cela) | des fleurs qui poussent le long des fourmilières |
 | Vers de terre | mangent la litière, brassent le sol | l'humus se forme plus vite (variable lente du sol) |
 
+## Calendrier des saisons
+
+Chaque espèce suit son calendrier réel : elle ne se reproduit qu'à sa saison, et son comportement change au fil de l'année. Le monde ne se ressemble jamais d'une saison à l'autre.
+
+| Animal | Printemps | Été | Automne | Hiver |
+|---|---|---|---|---|
+| Cerf | naissances des faons (fin du printemps) ; repousse des bois en velours | faons cachés dans l'herbe ; bois qui durcissent | **rut et brame** des mâles, combats | bois qui tombent (fin d'hiver) ; harde amaigrie, broute écorce et ronces |
+| Écureuil | petits au nid | jeunes qui sortent ; fruits | **caches** de glands et de noisettes | **recherche** des caches ; peu actif par grand froid |
+| Geai | nids | jeunes | **caches** de glands | recherche des caches |
+| Petits oiseaux | **nids**, chœur de l'aube | envol des jeunes | migrations de certains | troupes mêlées, mangeoires naturelles (baies) |
+| Chouette hulotte | jeunes au nid (dès la fin de l'hiver) | jeunes qui quémandent la nuit | jeunes chassés du territoire | **cris en duo**, couples qui se forment |
+| Renard | renardeaux au terrier | renardeaux qui jouent | jeunes qui se dispersent | **rut**, cris la nuit ; mulotage dans la neige |
+| Campagnol | reproduction | reproduction | reproduction | sous la neige ; pullulations certaines années |
+| Castor | petits | barrages entretenus | **réserves** de branches sous l'eau | dans la hutte, sous la glace |
+| Grenouilles | **migration vers les mares**, chœurs, pontes | têtards qui deviennent grenouilles | — | enfouies, en sommeil |
+| Poissons | frai de certaines espèces | eaux chaudes, à l'ombre | frai des truites (remontée des rivières) | au fond, lents |
+| Étourneau | nids | jeunes | **murmurations** | **murmurations** |
+| Lucioles | larves | **lumières** (nuits chaudes) | — | larves dans le sol |
+| Papillons | sortie des chrysalides | vol | dernières générations | œufs ou chrysalides |
+| Abeilles | essaimage | récolte | réserves | grappe dans la ruche |
+| Sanglier | marcassins | fouille | **glandée** (mange les glands) | rut |
+
 Le joueur peut **lire ces traces** (caches creusées, taupinières, coulées, troncs écorcés, barrages) : ce sont les premiers indices de toute enquête.
 
 ## En jeu
