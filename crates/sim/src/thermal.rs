@@ -21,7 +21,9 @@
 //!   d'un facteur 5.
 //! - **Panache** : un corps qui brûle chauffe directement les corps qui le touchent avec une
 //!   part de sa puissance (les gaz de la flamme les lèchent), répartie selon la surface que
-//!   chacun expose : c'est ce qui propage un feu.
+//!   chacun expose et sa position : la flamme a un volume, elle atteint les corps proches
+//!   (décroissance sur ~12 cm d'écart) et monte (un corps au-dessus en reçoit trois fois plus,
+//!   un corps en dessous deux fois moins). C'est ce qui propage un feu.
 //! - e_i : **enfermement** du corps (0 à l'air libre, 1 entièrement entouré) : la somme des
 //!   angles solides sous lesquels il voit ses voisins. Il garde la chaleur (moins de pertes vers l'air)… mais il étouffe aussi la
 //!   combustion (moins d'air) : un four doit garder une ouverture.
@@ -62,6 +64,15 @@ const CONTACT: f32 = 0.4;
 const TOUCH: f32 = 0.05;
 /// Distance (m) au-delà de laquelle on néglige les échanges.
 const REACH: f32 = 1.5;
+/// Une flamme allumée tient jusqu'à cet écart sous la température d'allumage (K).
+const SUSTAIN: f32 = 60.0;
+/// Longueur sur laquelle le panache faiblit avec l'écart entre deux corps (m), et écart
+/// au-delà duquel il ne compte plus.
+const FLAME_LENGTH: f32 = 0.12;
+const FLAME_REACH: f32 = 0.45;
+/// Surface de référence (m², celle d'un fagot) : un voisin seul et proche reçoit tout le
+/// panache, un voisin seul et lointain seulement sa part.
+const PLUME_AREA: f32 = 0.08;
 /// Part de la puissance qui va aux corps touchant celui qui brûle (le panache des gaz chauds,
 /// ou le contact d'une braise) ; le reste part avec la fumée.
 const PLUME: f32 = 0.4;
@@ -149,12 +160,13 @@ impl Body {
 struct Link {
     i: usize,
     j: usize,
-    /// Se touchent : contact, et panache si l'un brûle.
-    touching: bool,
     /// Conductance de contact (W/K), 0 s'ils ne se touchent pas.
     contact: f32,
     /// Coefficient de rayonnement k_ij (W/K⁴).
     radiation: f32,
+    /// Poids du panache de i vers j et de j vers i (surface × proximité × hauteur).
+    plume_to_j: f32,
+    plume_to_i: f32,
 }
 
 /// Le réseau : des corps et l'air autour.
@@ -165,8 +177,8 @@ pub struct Thermal {
     /// Flux net reçu par chaque corps pendant un sous-pas (W). Tampon réutilisé : aucune
     /// allocation pendant les pas.
     flow: Vec<f32>,
-    /// Surface totale des corps qui touchent chaque corps (m²) : le panache se répartit entre
-    /// eux au prorata de leur surface.
+    /// Somme des poids de panache des voisins de chaque corps : le panache se répartit entre
+    /// eux au prorata de leur poids.
     touching_area: Vec<f32>,
 }
 
@@ -222,16 +234,27 @@ impl Thermal {
                 let radiation = 0.5
                     * STEFAN_BOLTZMANN
                     * (a.emissivity * a.area() * view(b) + b.emissivity * b.area() * view(a));
-                if touching {
-                    self.touching_area[i] += b.area();
-                    self.touching_area[j] += a.area();
-                }
+                // Panache : proximité, puis hauteur du receveur par rapport à la flamme.
+                let near = if gap > FLAME_REACH {
+                    0.0
+                } else {
+                    (-(gap - TOUCH).max(0.0) / FLAME_LENGTH).exp()
+                };
+                let lift = |dy: f32| {
+                    1.0 + 2.0 * (dy / 0.3).clamp(0.0, 1.0) - 0.5 * (-dy / 0.3).clamp(0.0, 1.0)
+                };
+                let dy = b.position[1] - a.position[1];
+                let plume_to_j = b.area() * near * lift(dy);
+                let plume_to_i = a.area() * near * lift(-dy);
+                self.touching_area[i] += plume_to_j;
+                self.touching_area[j] += plume_to_i;
                 self.links.push(Link {
                     i,
                     j,
-                    touching,
                     contact: if touching { CONTACT } else { 0.0 },
                     radiation,
+                    plume_to_j,
+                    plume_to_i,
                 });
                 // Un voisin masque la part du ciel sous laquelle on le voit : l'angle solide
                 // d'une sphère de rayon r à la distance d, Ω/4π = (1 − cos θ)/2 avec
@@ -278,7 +301,7 @@ impl Thermal {
 
     fn substep(&mut self, h: f32, air: f32) {
         // 1. Échanges entre corps : contact G (T_j − T_i), rayonnement k (T_j⁴ − T_i⁴), et
-        //    panache d'un corps qui brûlait au pas précédent vers ceux qui le touchent.
+        //    panache d'un corps qui brûlait au pas précédent vers ses voisins proches.
         self.flow.iter_mut().for_each(|f| *f = 0.0);
         for link in &self.links {
             let (a, b) = (&self.bodies[link.i], &self.bodies[link.j]);
@@ -286,17 +309,15 @@ impl Thermal {
             let q = link.contact * (tb - ta) + link.radiation * (tb.powi(4) - ta.powi(4));
             self.flow[link.i] += q;
             self.flow[link.j] -= q;
-            if link.touching {
-                // Écart à la température des gaz, ramené à 1 pour un corps froid.
-                let driving = |t: f32| ((FLAME_GAS - t) / (FLAME_GAS - 300.0)).clamp(0.0, 1.0);
-                if a.power > 0.0 {
-                    let share = b.area() / self.touching_area[link.i].max(1e-6);
-                    self.flow[link.j] += PLUME * a.power * share * driving(tb);
-                }
-                if b.power > 0.0 {
-                    let share = a.area() / self.touching_area[link.j].max(1e-6);
-                    self.flow[link.i] += PLUME * b.power * share * driving(ta);
-                }
+            // Écart à la température des gaz, ramené à 1 pour un corps froid.
+            let driving = |t: f32| ((FLAME_GAS - t) / (FLAME_GAS - 300.0)).clamp(0.0, 1.0);
+            if a.power > 0.0 && link.plume_to_j > 0.0 {
+                let share = link.plume_to_j / self.touching_area[link.i].max(PLUME_AREA);
+                self.flow[link.j] += PLUME * a.power * share * driving(tb);
+            }
+            if b.power > 0.0 && link.plume_to_i > 0.0 {
+                let share = link.plume_to_i / self.touching_area[link.j].max(PLUME_AREA);
+                self.flow[link.i] += PLUME * b.power * share * driving(ta);
             }
         }
         for (i, b) in self.bodies.iter_mut().enumerate() {
@@ -313,14 +334,27 @@ impl Thermal {
 
             // 3. Combustion : au-dessus du seuil, si l'air arrive (un corps très enfermé
             //    s'étouffe). Vitesse en rampe sur 150 K au-dessus de l'allumage.
+            // Hystérésis : une flamme déjà allumée s'entretient (ses gaz brûlent et chauffent le
+            // solide) ; elle tient jusqu'à SUSTAIN sous le seuil et brûle au moins à mi-régime.
+            let was_burning = b.burning;
             b.burning = false;
             b.power = 0.0;
+            let threshold = |ignition: f32| {
+                if was_burning {
+                    ignition - SUSTAIN
+                } else {
+                    ignition
+                }
+            };
             if let Some(fuel) = &mut b.fuel
                 && fuel.mass > 0.0
-                && b.temperature > fuel.ignition
+                && b.temperature > threshold(fuel.ignition)
                 && b.water < 1e-4
             {
-                let ramp = ((b.temperature - fuel.ignition) / 150.0).min(1.0);
+                let mut ramp = ((b.temperature - fuel.ignition) / 150.0).clamp(0.0, 1.0);
+                if was_burning {
+                    ramp = ramp.max(0.5);
+                }
                 let air_supply = (1.0 - b.enclosure * 1.1).max(b.draft);
                 let blown = 1.0 + 2.0 * b.draft;
                 let burnt = (fuel.burn_rate * area * ramp * air_supply * blown * h).min(fuel.mass);

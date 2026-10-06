@@ -489,4 +489,29 @@ mod tests {
         assert!(twigs > 0.0, "the twigs never caught");
         assert!(twigs < 90.0, "caught only after {twigs} s");
     }
+
+    /// A fire spreads to fuel laid nearby, sooner the closer, and never to fuel far away.
+    #[test]
+    fn fire_spreads_gradually_with_distance() {
+        let caught = |gap: f32| {
+            let mut o = Objects::default();
+            o.lay(Matter::DeadTwigs, Vec3::ZERO, AIR);
+            o.lay(Matter::DeadTwigs, Vec3::new(gap, 0.0, 0.0), AIR);
+            o.thermal.bodies[0].temperature = KELVIN + 700.0;
+            let mut changes = Vec::new();
+            for k in 0..4 * 60 {
+                o.step(0.25, AIR, &mut changes);
+                if o.body(1).burning {
+                    return Some(k as f32 / 4.0);
+                }
+            }
+            None
+        };
+        let (near, mid, far) = (caught(0.2), caught(0.4), caught(1.2));
+        assert!(
+            near.is_some() && mid.is_some() && far.is_none(),
+            "{near:?} {mid:?} {far:?}"
+        );
+        assert!(near < mid);
+    }
 }

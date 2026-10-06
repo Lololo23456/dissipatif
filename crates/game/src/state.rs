@@ -36,6 +36,8 @@ pub const RUB_SECONDS: f32 = 8.0;
 const LAY_DISTANCE: f32 = 0.8;
 /// How far from the feet the hands reach when pointing (cells).
 pub const ARM_REACH: f32 = 2.2;
+/// Hollows remembered at once.
+const MAX_DUG: usize = 96;
 /// Lumps of clay a dish takes.
 const CLAY_PER_DISH: u32 = 2;
 
@@ -158,6 +160,9 @@ pub struct GameState {
     events: Vec<Event>,
     /// Scratch list of the objects' changes (reused: no allocation per step).
     changes: Vec<(Vec3, Matter, Matter)>,
+    /// Hollows left where handfuls of ground were taken (centre, depth in [0, 1]); the oldest
+    /// go when there are too many.
+    dug: Vec<(Vec3, f32)>,
 }
 
 impl GameState {
@@ -183,7 +188,13 @@ impl GameState {
             rain: 0.0,
             events: Vec::new(),
             changes: Vec::new(),
+            dug: Vec::new(),
         }
+    }
+
+    /// Hollows left by taking handfuls of ground.
+    pub fn dug(&self) -> &[(Vec3, f32)] {
+        &self.dug
     }
 
     pub fn objects(&self) -> &Objects {
@@ -355,7 +366,23 @@ impl GameState {
     /// What player `id` could take from the ground under their feet: clay on a river bank or
     /// in a clay soil, sand on a beach or in the desert.
     pub fn ground_sample(&self, world: &World, id: PlayerId) -> Option<Matter> {
-        let feet = self.player(id)?.body.position;
+        self.ground_sample_at(world, self.dig_point(id)?)
+    }
+
+    /// Where player `id` digs a handful: on the ground in front, where things are laid.
+    pub fn dig_point(&self, id: PlayerId) -> Option<Vec2> {
+        let body = &self.player(id)?.body;
+        let facing = body.facing();
+        Some(
+            Vec2::new(body.position.x, body.position.z)
+                + Vec2::new(facing.sin(), facing.cos()) * LAY_DISTANCE,
+        )
+    }
+
+    /// What a handful of the ground at `at` would be: clay on a river bank or in a clay
+    /// soil, sand on a beach or in the desert.
+    pub fn ground_sample_at(&self, world: &World, at: Vec2) -> Option<Matter> {
+        let feet = Vec3::new(at.x, 0.0, at.y);
         let dims = world.dims();
         let (x, z) = (feet.x.floor(), feet.z.floor());
         if x < 1.0 || z < 1.0 || x >= dims.nx as f32 - 1.0 || z >= dims.nz as f32 - 1.0 {
@@ -538,6 +565,8 @@ impl GameState {
                             failure: Failure::Bag(refusal),
                         });
                     }
+                    let at = self.dig_point(player)?;
+                    self.dig(at);
                     return Some(Event::Picked {
                         player,
                         matter,
@@ -582,6 +611,21 @@ impl GameState {
                 }
                 if let Some((plant, matter)) = self.plant_at(world, at) {
                     return self.gather(world, player, plant, matter);
+                }
+                if let Some(matter) = self.ground_sample_at(world, at) {
+                    let p = self.player_mut(player)?;
+                    if let Err(refusal) = p.inventory.add(matter) {
+                        return Some(Event::Failed {
+                            player,
+                            failure: Failure::Bag(refusal),
+                        });
+                    }
+                    self.dig(at);
+                    return Some(Event::Picked {
+                        player,
+                        matter,
+                        removed: None,
+                    });
                 }
                 Some(Event::Failed {
                     player,
@@ -666,6 +710,20 @@ impl GameState {
             }
         }
         Some(Event::Laid { player, matter })
+    }
+
+    /// Leaves a hollow at `at`, deeper if dug again at the same place.
+    fn dig(&mut self, at: Vec2) {
+        let spot = Vec3::new(at.x, 0.0, at.y);
+        match self.dug.iter_mut().find(|(c, _)| c.distance(spot) < 0.3) {
+            Some((_, depth)) => *depth = (*depth + 0.34).min(1.0),
+            None => {
+                if self.dug.len() >= MAX_DUG {
+                    self.dug.remove(0);
+                }
+                self.dug.push((spot, 0.34));
+            }
+        }
     }
 
     /// Takes laid object `i` back into player's bag, unless too hot.

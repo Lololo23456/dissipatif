@@ -220,6 +220,21 @@ impl App {
         self.particles.extend_from_slice(self.fauna.particles());
         self.particles.extend_from_slice(self.traces.instances());
         self.particles.extend_from_slice(self.weather.particles());
+        // Hollows where handfuls of ground were taken: a patch of the darker, damp layer
+        // under the surface, sunk so that only its top shows.
+        let colors = render::palette::materials();
+        for &(centre, depth) in self.state.dug() {
+            let (x, z) = (centre.x as usize, centre.z as usize);
+            let top = self.world.ground_top(x, z);
+            let material = self.world.block(x, top.saturating_sub(1), z);
+            let [r, g, b] = colors[material.id() as usize];
+            let shade = 0.78 - 0.18 * depth;
+            let size = 0.32 + 0.12 * depth;
+            self.particles.push(render::ParticleInstance {
+                centre_size: [centre.x, top as f32 - size * 0.5 + 0.012, centre.z, size],
+                color: [r * shade, g * shade, b * shade, 0.0],
+            });
+        }
         self.update_sound(dt, time);
         // Plants pushed aside by the body, springing back once free.
         let data = &mut self.data;
