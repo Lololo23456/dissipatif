@@ -2,11 +2,13 @@
 
 Version de travail. Les choix encore ouverts sont marqués « à trancher » et suivis dans `decisions.md`.
 
+> **Direction actuelle (octobre 2026) : `vision.md`.** Elle prime sur ce document là où ils divergent : un druide apprend la magie d'une planète vivante et y vit longtemps ; le laboratoire n'est plus le moteur ; la planète est finie. Étapes : `roadmap.md`. Contenus : `catalogue/` (animaux, objets, sorts et anomalies, plantes et milieux).
+
 ## Vision
 
 Un jeu d'exploration contemplative dans un monde procédural très vivant. Le joueur est un naturaliste : il arrive dans un monde inconnu, l'observe, et cherche à comprendre ce qui l'entoure. La faune et la flore ont des comportements crédibles, et même les plantes semblent vivantes.
 
-Le cœur du jeu est un **va-et-vient entre le monde et le laboratoire** : on prélève dehors, on fait réagir dans la verrerie, on voit naître des structures dissipatives (spirales de Belooussov-Jabotinski, anneaux de Liesegang, cristaux, bandes de Turing dans un gel), on comprend, et on retourne dehors avec une hypothèse.
+*(Version précédente, remplacée par `vision.md`.)* Le cœur du jeu était un **va-et-vient entre le monde et le laboratoire** : on prélève dehors, on fait réagir dans la verrerie, on voit naître des structures dissipatives (spirales de Belooussov-Jabotinski, anneaux de Liesegang, cristaux, bandes de Turing dans un gel), on comprend, et on retourne dehors avec une hypothèse.
 
 ## Critère d'authenticité (assoupli)
 
@@ -124,7 +126,9 @@ Le seul geste « de fabrication » est celui des mains : **modeler** une matièr
 
 Ce qui existe déjà y sert : la survie, le sac et le ramassage servent à rapporter des échantillons.
 
-## Le laboratoire
+## Le laboratoire (abandonné comme moteur, voir `vision.md`)
+
+Son esprit reste : on reconnaît dans le paysage les motifs de la chimie (une spirale de Belooussov-Jabotinski dans un marais), et `crates/sim` anime les anomalies.
 
 - **Une petite île de contrôle** dans un monde plus fort que le joueur : on y règle ce qu'on peut, mais les réactions restent sensibles et capricieuses, et les matières premières viennent du dehors.
 - **La progression, c'est le labo** : verre, creuset, filtre, balance, source de chaleur… chaque instrument ouvre de nouvelles expériences, jamais de la puissance.

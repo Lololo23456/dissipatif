@@ -5,7 +5,7 @@ un monde procédural très vivant (faune, flore animée, jour et nuit, ciel éto
 forme de vie, les anomalies : des structures dissipatives (réaction-diffusion, systèmes loin de l'équilibre).
 Priorité actuelle : l'ambiance. Tout l'art est procédural : aucune texture, aucun asset dessiné,
 l'apparence découle de l'état du monde.
-Le game design complet est dans `docs/design.md` : lis-le seulement quand une tâche touche au gameplay.
+La direction du jeu est dans `docs/vision.md` (une page) ; les étapes dans `docs/roadmap.md` ; les contenus prévus (animaux, objets, sorts et anomalies, plantes et milieux) dans `docs/catalogue/`. Le game design détaillé est dans `docs/design.md` : lis-le seulement quand une tâche touche au gameplay.
 Les décisions passées et les choix encore provisoires sont dans `docs/decisions.md`. Consulte-le avant de remettre en cause un choix d'architecture.
 
 ## Stack (versions épinglées, ne pas changer sans décision dans docs/decisions.md)

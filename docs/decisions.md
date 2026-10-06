@@ -275,3 +275,12 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - Le carnet note un faon né et une biche morte de faim.
 - **Rituel raccourci** : rassemblement à 21 h 40, incantation de 22 h à 22 h 36 ; sort compris au sommet, après 10 s d'observation sans être vu.
 - Fiche : `docs/reactions/ecologie.md`.
+
+## 2026-10-06 — Direction : la vision B, le druide sur une planète vivante
+- **Actées** (discussion avec l'utilisateur) : un druide apprend la magie d'une planète vivante en observant ceux qui la pratiquent, et y vit longtemps (jouer longtemps, comme un monde où l'on vit, plutôt que recommencer souvent). Résumé dans `docs/vision.md`.
+- **Transformation** : chaque forme apprise change une part des mots du carnet en signes ; en partie réversible ; le joueur choisit jusqu'où aller.
+- **Source** : un grand cycle, une onde lente qui parcourt la planète ; les anomalies en sont des rides ; la grande marée est un rendez-vous qui revient, plus fort quand la planète est saine.
+- **Laboratoire** : abandonné comme moteur ; son esprit reste dans les motifs reconnus dans le paysage ; `crates/sim` anime les anomalies.
+- **Monde** : une planète finie qui se referme sur elle-même (remplace le monde infini : dans un monde infini, on fuit les conséquences). D'autres planètes peut-être plus tard.
+- **Anomalies émergentes** : elles naissent là où un milieu est sain depuis longtemps et meurent quand il se dégrade.
+- Feuille de route et catalogues créés : `docs/roadmap.md`, `docs/catalogue/`.
