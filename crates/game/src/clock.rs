@@ -28,6 +28,14 @@ impl Clock {
         }
     }
 
+    /// At `days` since the start (a saved game).
+    pub fn at_days(days: f64) -> Self {
+        Self {
+            days: days.max(0.0),
+            fast: false,
+        }
+    }
+
     /// At `hour` on day `day` (from 1).
     pub fn on_day(day: u32, hour: f32) -> Self {
         let mut clock = Self::new(hour);

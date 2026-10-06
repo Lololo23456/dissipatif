@@ -21,7 +21,7 @@ Un monde procédural vivant, et un naturaliste qui y vit.
 
 Objectif : qu'on puisse **vivre** longtemps au même endroit.
 
-- ⬜ **Sauvegarde** : le monde (creusé, brûlé, poussé), les plantes, le sol, la harde, le carnet, le joueur. Indispensable avant tout le reste.
+- ✅ **Sauvegarde** : le monde (creusé, brûlé, poussé), les plantes, le sol, la harde, les objets, le carnet et ses croquis, le joueur. Automatique toutes les 2 minutes et à la fermeture ; reprise au lancement (`--new` pour recommencer).
 - ⬜ **Saisons et années** : calendrier (4 saisons), température, neige et gel des lacs l'hiver, couleurs de la végétation, plantes qui fleurissent, fructifient et dorment.
 - ⬜ **Écureuils** : caches de glands à l'automne, recherche l'hiver, caches oubliées qui germent en chênes ; ajout du chêne et du noisetier. Premier animal qui plante.
 - ⬜ **Chaque animal vit au rythme des saisons**, d'après son calendrier réel (voir le tableau dans `catalogue/animaux.md`) : reproduction à sa saison seulement, mues, réserves, repos d'hiver.

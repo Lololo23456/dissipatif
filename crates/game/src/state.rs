@@ -320,6 +320,64 @@ impl GameState {
         }
     }
 
+    /// Saves everything that lives and changes (the world itself is saved apart).
+    pub fn save(&self, w: &mut crate::save::Writer) {
+        w.put(&self.players);
+        w.put(&self.plants);
+        w.put(&self.removed);
+        self.ecology.save(w);
+        w.put(&self.pebbles_taken);
+        w.put(&self.next_id);
+        w.put(&self.objects);
+        w.put(&self.rain);
+        w.put(&self.rng);
+        w.put(&self.herd);
+        w.put(&self.notebook_lying);
+        w.put(&self.now);
+    }
+
+    /// Reads back what `save` wrote, in `world` (restored first).
+    pub fn load(r: &mut crate::save::Reader, world: &World) -> crate::save::Result<Self> {
+        let players: Vec<PlayerState> = r.get()?;
+        let plants: Vec<world::PlantInstance> = r.get()?;
+        let removed: Vec<bool> = r.get()?;
+        if removed.len() != plants.len() {
+            return Err("plantes incohérentes".into());
+        }
+        let ecology = Ecology::load(r, world, &plants)?;
+        let mut state = Self::new(world);
+        state.players = players;
+        state.ecology = ecology;
+        state.pebbles_taken = r.get()?;
+        state.next_id = r.get()?;
+        state.objects = r.get()?;
+        state.rain = r.get()?;
+        state.rng = r.get()?;
+        state.herd = r.get()?;
+        state.notebook_lying = r.get()?;
+        state.now = r.get()?;
+        // What is rebuilt rather than saved: what can be picked, and the stones in the way.
+        state.pickables.clear();
+        for (i, p) in plants.iter().enumerate() {
+            if harvest(p).is_some() {
+                let (x, z) = position(p);
+                state
+                    .pickables
+                    .entry((x.floor() as i64, z.floor() as i64))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        for (i, &gone) in removed.iter().enumerate() {
+            if gone {
+                state.obstacles.remove(i);
+            }
+        }
+        state.plants = plants;
+        state.removed = removed;
+        Ok(state)
+    }
+
     /// Lets a herd of deer live in the world.
     pub fn add_herd(&mut self, herd: Herd) {
         self.herd = Some(herd);
@@ -673,7 +731,7 @@ impl GameState {
         }
     }
 
-    #[cfg(test)]
+    /// Whether plant `plant` is gone (taken, dead).
     pub fn is_removed(&self, plant: usize) -> bool {
         self.removed.get(plant).copied().unwrap_or(false)
     }
@@ -1481,6 +1539,40 @@ fn position(p: &world::PlantInstance) -> (f32, f32) {
     )
 }
 
+crate::save::persist_struct!(Conditions {
+    hour,
+    days,
+    moon,
+    rain,
+    wind
+});
+
+impl crate::save::Persist for PlayerState {
+    fn write(&self, w: &mut crate::save::Writer) {
+        w.put(&self.id);
+        w.put(&self.body);
+        w.put(&self.inventory);
+        w.put(&self.needs);
+        w.put(&self.notebook);
+        w.put(&self.spells);
+        w.put(&self.witnessed);
+    }
+    fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
+        Ok(Self {
+            id: r.get()?,
+            body: r.get()?,
+            inventory: r.get()?,
+            needs: r.get()?,
+            controls: Controls::default(),
+            camera_yaw: 0.0,
+            rubbing: 0.0,
+            notebook: r.get()?,
+            spells: r.get()?,
+            witnessed: r.get()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1936,5 +2028,84 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    /// A game saved and read back in a world generated again goes on exactly as the one that
+    /// was saved: same plants, same herd, same player, step after step.
+    #[test]
+    fn a_saved_game_goes_on_exactly_as_before() {
+        let setup = || {
+            let mut world = World::generate(WorldConfig::standard(1));
+            let spawn = crate::player::spawn_point(&world);
+            let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
+            deer::wear_ring(&mut world, ring, 1);
+            (world, spawn, ring, cover)
+        };
+        let (mut world, spawn, ring, cover) = setup();
+        let mut state = GameState::new(&world);
+        state.add_herd(Herd::new(ring, cover, &world, 7));
+        let me = state.join(spawn);
+        state.place_notebook(spawn + Vec3::new(0.0, 0.0, 0.5));
+        state.give_notebook(me);
+        state.time_scale = 60.0;
+        let mut clock = crate::clock::Clock::on_day(1, 18.0);
+        clock.fast = true;
+        let mut run = |state: &mut GameState,
+                       world: &mut World,
+                       clock: &mut crate::clock::Clock,
+                       steps: usize| {
+            for _ in 0..steps {
+                clock.advance(STEP);
+                state.step(world, &clock.conditions(0.0));
+                for event in state.drain_events().collect::<Vec<_>>() {
+                    if let Event::Dig { at } = event {
+                        world.dig(at.x, at.y);
+                    }
+                }
+            }
+        };
+        run(&mut state, &mut world, &mut clock, 600);
+        state.apply(&world, Command::Pick { player: me });
+        run(&mut state, &mut world, &mut clock, 60);
+
+        let mut w = crate::save::header(1);
+        w.put(&world.state());
+        state.save(&mut w);
+        let bytes = w.bytes;
+        if std::env::var_os("DISSIPATIF_SAVE_SIZE").is_some() {
+            let start = std::time::Instant::now();
+            let mut w = crate::save::header(1);
+            w.put(&world.state());
+            state.save(&mut w);
+            println!("sauvegarde : {} Ko en {:?}", w.bytes.len() / 1024, start.elapsed());
+        }
+        let (mut again, ..) = setup();
+        let mut r = crate::save::open(&bytes, 1).expect("our save");
+        again.restore(r.get().expect("world")).expect("same size");
+        let mut loaded = GameState::load(&mut r, &again).expect("state");
+        loaded.time_scale = 60.0;
+        let mut clock_again = crate::clock::Clock::at_days(clock.days());
+        clock_again.fast = true;
+
+        run(&mut state, &mut world, &mut clock, 300);
+        run(&mut loaded, &mut again, &mut clock_again, 300);
+        assert_eq!(state.plants().len(), loaded.plants().len());
+        for i in 0..state.plants().len() {
+            assert_eq!(state.plant_size(i), loaded.plant_size(i), "plant {i}");
+        }
+        let (a, b) = (state.herd().expect("herd"), loaded.herd().expect("herd"));
+        assert_eq!(a.deer.len(), b.deer.len());
+        for (x, y) in a.deer.iter().zip(&b.deer) {
+            assert_eq!(x.position, y.position);
+            assert_eq!(x.energy, y.energy);
+        }
+        assert_eq!(state.body(me).position, loaded.body(me).position);
+        let pages = |s: &GameState| {
+            s.player(me)
+                .and_then(|p| p.notebook.as_ref())
+                .map(|b| b.pages.len())
+        };
+        assert_eq!(pages(&state), pages(&loaded));
+        assert!(world.state().blocks == again.state().blocks);
     }
 }

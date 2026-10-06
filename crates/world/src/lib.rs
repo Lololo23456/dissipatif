@@ -74,6 +74,16 @@ pub struct World {
     micro: std::collections::HashMap<usize, [u8; MICRO_CELLS]>,
 }
 
+/// What play changes in a world (see `World::state`).
+pub struct WorldState {
+    pub ground: Vec<f32>,
+    pub water: Vec<f32>,
+    pub tops: Vec<usize>,
+    pub blocks: Vec<u8>,
+    pub micro: Vec<(usize, [u8; MICRO_CELLS])>,
+    pub plants: Vec<PlantInstance>,
+}
+
 /// Micro-voxels per cell along each axis, and per cell.
 pub const MICRO: usize = 4;
 pub const MICRO_CELLS: usize = MICRO * MICRO * MICRO;
@@ -228,6 +238,40 @@ impl World {
                 self.blocks[i] = Material::Air.id();
             }
         }
+    }
+
+    /// What play changes in a world, to save it: the ground and water heights, the voxels,
+    /// the dug cells, the plants of the grid.
+    pub fn state(&self) -> WorldState {
+        let mut micro: Vec<(usize, [u8; MICRO_CELLS])> =
+            self.micro.iter().map(|(&k, v)| (k, *v)).collect();
+        micro.sort_by_key(|&(k, _)| k);
+        WorldState {
+            ground: self.ground.data.clone(),
+            water: self.water.data.clone(),
+            tops: self.tops.clone(),
+            blocks: self.blocks.clone(),
+            micro,
+            plants: self.plants.clone(),
+        }
+    }
+
+    /// Lays a saved state back over this world (generated again from the same seed).
+    pub fn restore(&mut self, state: WorldState) -> Result<(), &'static str> {
+        if state.ground.len() != self.ground.data.len()
+            || state.water.len() != self.water.data.len()
+            || state.tops.len() != self.tops.len()
+            || state.blocks.len() != self.blocks.len()
+        {
+            return Err("taille du monde différente");
+        }
+        self.ground.data = state.ground;
+        self.water.data = state.water;
+        self.tops = state.tops;
+        self.blocks = state.blocks;
+        self.micro = state.micro.into_iter().collect();
+        self.plants = state.plants;
+        Ok(())
     }
 
     /// Wears the ground of column (x, z) bare, as a path trodden for years: grass and forest

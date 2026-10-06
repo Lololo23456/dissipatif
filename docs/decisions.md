@@ -291,3 +291,9 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 
 ## 2026-10-06 — Les animaux vivent au rythme des saisons
 - **Actée** : chaque espèce suit son calendrier réel ; elle ne se reproduit qu'à sa saison (les faons naissent à la fin du printemps après le rut d'automne). Tableau dans `catalogue/animaux.md`, inscrit à l'étape 1 de la feuille de route. Les naissances « toute l'année » de la harde sont provisoires.
+
+## 2026-10-06 — Sauvegarde
+- **Format maison, sans dépendance** (`game/save.rs`) : un écrivain et un lecteur binaires, un trait `Persist`, des macros pour les structures et les énumérations simples. En-tête `DSPF`, version, graine : une sauvegarde d'une autre version ou d'un autre monde est ignorée (nouvelle partie). Écrite dans un fichier temporaire puis renommée.
+- **Le monde est régénéré depuis sa graine**, puis ce qui a changé est restauré par-dessus : voxels (compressés par plages), hauteurs du sol et de l'eau, cellules creusées, plantes, vies des plantes et sol, harde, objets et leur thermique (les liens sont recalculés), joueurs, carnet et croquis, heure. Ce qui se recalcule (habitat, ombre, couverture, obstacles, ce qui se ramasse) n'est pas enregistré.
+- **Testé** : une partie sauvegardée puis rechargée continue exactement comme l'originale (déterminisme). Taille ~2,4 Mo, ~3,5 ms.
+- Sauvegarde automatique toutes les 2 minutes réelles et à la fermeture ; `--new` pour recommencer. Les captures ne lisent ni n'écrivent de sauvegarde.

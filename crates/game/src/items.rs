@@ -385,6 +385,90 @@ impl Inventory {
     }
 }
 
+crate::save::persist_enum!(Flower {
+    Daisy,
+    Poppy,
+    Lavender,
+    Buttercup
+});
+crate::save::persist_enum!(ClaySource { Bank, RedEarth });
+crate::save::persist_struct!(Stack { matter, count });
+crate::save::persist_struct!(Inventory { stacks });
+
+impl crate::save::Persist for Matter {
+    fn write(&self, w: &mut crate::save::Writer) {
+        let (tag, a, b): (u8, u8, Option<ClaySource>) = match *self {
+            Matter::Pebble { dark } => (0, dark as u8, None),
+            Matter::DeadTwigs => (1, 0, None),
+            Matter::GrassFibre => (2, 0, None),
+            Matter::Frond => (3, 0, None),
+            Matter::Flower(f) => (
+                4,
+                [
+                    Flower::Daisy,
+                    Flower::Poppy,
+                    Flower::Lavender,
+                    Flower::Buttercup,
+                ]
+                .iter()
+                .position(|&x| x == f)
+                .unwrap_or(0) as u8,
+                None,
+            ),
+            Matter::Mushroom { spotted } => (5, spotted as u8, None),
+            Matter::Clay { source } => (6, 0, Some(source)),
+            Matter::Sand => (7, 0, None),
+            Matter::Ash => (8, 0, None),
+            Matter::RawDish { source } => (9, 0, Some(source)),
+            Matter::FiredDish { source } => (10, 0, Some(source)),
+            Matter::Shards => (11, 0, None),
+            Matter::Stick => (12, 0, None),
+            Matter::Flake => (13, 0, None),
+            Matter::Chips => (14, 0, None),
+            Matter::Knife { uses } => (15, uses, None),
+            Matter::GreenWood => (16, 0, None),
+        };
+        w.put(&tag);
+        w.put(&a);
+        w.put(&b);
+    }
+    fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
+        let tag: u8 = r.get()?;
+        let a: u8 = r.get()?;
+        let b: Option<ClaySource> = r.get()?;
+        let source = || b.ok_or_else(|| "argile sans origine".to_string());
+        Ok(match tag {
+            0 => Matter::Pebble { dark: a != 0 },
+            1 => Matter::DeadTwigs,
+            2 => Matter::GrassFibre,
+            3 => Matter::Frond,
+            4 => Matter::Flower(
+                *[
+                    Flower::Daisy,
+                    Flower::Poppy,
+                    Flower::Lavender,
+                    Flower::Buttercup,
+                ]
+                .get(a as usize)
+                .ok_or("fleur inconnue")?,
+            ),
+            5 => Matter::Mushroom { spotted: a != 0 },
+            6 => Matter::Clay { source: source()? },
+            7 => Matter::Sand,
+            8 => Matter::Ash,
+            9 => Matter::RawDish { source: source()? },
+            10 => Matter::FiredDish { source: source()? },
+            11 => Matter::Shards,
+            12 => Matter::Stick,
+            13 => Matter::Flake,
+            14 => Matter::Chips,
+            15 => Matter::Knife { uses: a },
+            16 => Matter::GreenWood,
+            _ => return Err("matière inconnue".into()),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

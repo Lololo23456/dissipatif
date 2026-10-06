@@ -127,6 +127,25 @@ impl Soil {
         }
     }
 
+    /// Saves what the soil remembers (water, organic matter, its starting offer).
+    pub fn save(&self, w: &mut crate::save::Writer) {
+        w.put(&self.water);
+        w.put(&self.humus);
+        w.put(&self.reference);
+    }
+
+    /// Reads back what `save` wrote, over a soil built for the same world.
+    pub fn load(&mut self, r: &mut crate::save::Reader) -> crate::save::Result<()> {
+        let (water, humus, reference): (Vec<f32>, Vec<f32>, Vec<f32>) =
+            (r.get()?, r.get()?, r.get()?);
+        let n = self.rain.len();
+        if water.len() != n || humus.len() != n || reference.len() != n {
+            return Err("sol de taille différente".into());
+        }
+        (self.water, self.humus, self.reference) = (water, humus, reference);
+        Ok(())
+    }
+
     pub fn patch(&self, at: Vec2) -> Option<usize> {
         let (x, z) = (at.x / PATCH as f32, at.y / PATCH as f32);
         (x >= 0.0 && z >= 0.0 && (x as usize) < self.nx && (z as usize) < self.nz)

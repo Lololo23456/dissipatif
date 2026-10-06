@@ -509,6 +509,22 @@ fn search_spawn(world: &World, accept: impl Fn(Biome) -> bool) -> Option<Vec3> {
     None
 }
 
+/// A body is saved by where it stands, where it faces and its shape; the rest (velocity,
+/// gait, glances) settles again within a step.
+impl crate::save::Persist for Player {
+    fn write(&self, w: &mut crate::save::Writer) {
+        w.put(&self.position);
+        w.put(&self.facing);
+        w.put(&self.deer);
+    }
+    fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
+        let mut player = Player::new(r.get()?);
+        player.facing = r.get()?;
+        player.deer = r.get()?;
+        Ok(player)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

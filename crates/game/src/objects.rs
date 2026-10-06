@@ -343,6 +343,43 @@ impl Objects {
     }
 }
 
+crate::save::persist_struct!(History {
+    hottest,
+    fired_seconds
+});
+crate::save::persist_struct!(Placed {
+    matter,
+    base,
+    history,
+    last_water
+});
+
+impl crate::save::Persist for Objects {
+    fn write(&self, w: &mut crate::save::Writer) {
+        w.put(&self.placed);
+        w.put(&self.thermal.bodies);
+        w.put(&self.embers);
+    }
+    fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
+        let placed: Vec<Placed> = r.get()?;
+        let bodies: Vec<Body> = r.get()?;
+        let embers: usize = r.get()?;
+        if bodies.len() != placed.len() + embers {
+            return Err("objets incohérents".into());
+        }
+        let mut thermal = Thermal::new();
+        for body in bodies {
+            thermal.add(body);
+        }
+        thermal.relink();
+        Ok(Self {
+            placed,
+            thermal,
+            embers,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

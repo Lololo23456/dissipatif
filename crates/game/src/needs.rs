@@ -125,6 +125,13 @@ impl Needs {
     }
 }
 
+crate::save::persist_struct!(Needs {
+    food,
+    water,
+    warmth,
+    sick
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -961,6 +961,71 @@ pub fn wear_ring(world: &mut World, ring: Vec2, seed: u64) {
     }
 }
 
+crate::save::persist_enum!(Cause {
+    Sight,
+    Sound,
+    Scent,
+    Fire
+});
+crate::save::persist_enum!(Activity {
+    Lying,
+    Grazing,
+    Walking,
+    Vigilant,
+    Alarmed,
+    Fleeing,
+    Circling
+});
+crate::save::persist_struct!(Deer {
+    position,
+    heading,
+    activity,
+    head,
+    lying,
+    stride,
+    speed,
+    size,
+    stamp,
+    suspicion,
+    noticed,
+    goal,
+    timer,
+    scanning,
+    energy,
+});
+
+impl crate::save::Persist for Herd {
+    fn write(&self, w: &mut crate::save::Writer) {
+        w.put(&self.deer);
+        w.put(&self.ring);
+        w.put(&self.cover);
+        w.put(&self.rng);
+        w.put(&self.flight);
+        w.put(&self.wary_until);
+        w.put(&self.refuge);
+        w.put(&self.turn);
+        w.put(&self.glow);
+        w.put(&self.rite);
+        w.put(&self.pasture);
+    }
+    fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
+        Ok(Self {
+            deer: r.get()?,
+            ring: r.get()?,
+            cover: r.get()?,
+            rng: r.get()?,
+            flight: r.get()?,
+            wary_until: r.get()?,
+            refuge: r.get()?,
+            turn: r.get()?,
+            glow: r.get()?,
+            rite: r.get()?,
+            pasture: r.get()?,
+            grazing: Vec::new(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -167,6 +167,56 @@ pub fn wind_words(towards: Vec2) -> String {
     format!("vent {article}{from}")
 }
 
+crate::save::persist_enum!(Spell { DeerForm });
+
+impl crate::save::Persist for Entry {
+    fn write(&self, w: &mut crate::save::Writer) {
+        let (tag, cause, spell) = match *self {
+            Entry::Found => (0u8, None, None),
+            Entry::Herd => (1, None, None),
+            Entry::Alarm => (2, None, None),
+            Entry::Fled(c) => (3, Some(c), None),
+            Entry::Ring => (4, None, None),
+            Entry::Turning => (5, None, None),
+            Entry::Calf => (6, None, None),
+            Entry::Starved => (7, None, None),
+            Entry::Rite => (8, None, None),
+            Entry::Learnt(s) => (9, None, Some(s)),
+        };
+        w.put(&tag);
+        w.put(&cause);
+        w.put(&spell);
+    }
+    fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
+        let tag: u8 = r.get()?;
+        let cause: Option<Cause> = r.get()?;
+        let spell: Option<Spell> = r.get()?;
+        Ok(match tag {
+            0 => Entry::Found,
+            1 => Entry::Herd,
+            2 => Entry::Alarm,
+            3 => Entry::Fled(cause.ok_or("cause manquante")?),
+            4 => Entry::Ring,
+            5 => Entry::Turning,
+            6 => Entry::Calf,
+            7 => Entry::Starved,
+            8 => Entry::Rite,
+            9 => Entry::Learnt(spell.ok_or("sort manquant")?),
+            _ => return Err("page inconnue".into()),
+        })
+    }
+}
+
+crate::save::persist_struct!(Page {
+    entry,
+    day,
+    hour,
+    moon,
+    wind,
+    at
+});
+crate::save::persist_struct!(Notebook { pages, found_at });
+
 #[cfg(test)]
 mod tests {
     use super::*;

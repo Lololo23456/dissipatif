@@ -490,6 +490,59 @@ impl Ecology {
         ecology
     }
 
+    /// Saves the plants' lives, the fires, the soil.
+    pub fn save(&self, w: &mut crate::save::Writer) {
+        w.put(&self.life);
+        w.put(&self.shown);
+        w.put(&self.stood);
+        w.put(&self.burning);
+        w.put(&self.rng);
+        w.put(&self.timer);
+        w.put(&self.max_plants);
+        self.soil.save(w);
+    }
+
+    /// Reads back what `save` wrote, for `plants` in `world` (both restored first).
+    pub fn load(
+        r: &mut crate::save::Reader,
+        world: &World,
+        plants: &[PlantInstance],
+    ) -> crate::save::Result<Self> {
+        let life: Vec<Option<Life>> = r.get()?;
+        if life.len() != plants.len() {
+            return Err("plantes incohérentes".into());
+        }
+        let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        for (i, l) in life.iter().enumerate() {
+            if l.is_some() {
+                grid.entry(column(place(&plants[i]))).or_default().push(i);
+            }
+        }
+        let habitat = Habitat::new(world);
+        let d = world.dims();
+        let soil = Soil::new(d.nx, d.nz, |x, z| {
+            habitat.moisture(x as f32 + 0.5, z as f32 + 0.5)
+        });
+        let mut ecology = Self {
+            habitat,
+            life,
+            shown: r.get()?,
+            stood: r.get()?,
+            grid,
+            burning: r.get()?,
+            rng: r.get()?,
+            timer: r.get()?,
+            max_plants: r.get()?,
+            soil,
+            grazers: Vec::new(),
+            eaten: Vec::new(),
+        };
+        ecology.soil.load(r)?;
+        ecology.cast_shade(plants);
+        ecology.measure_cover(plants);
+        Ok(ecology)
+    }
+
     /// The soil, the slow variables.
     pub fn soil(&self) -> &Soil {
         &self.soil
@@ -879,6 +932,13 @@ impl Ecology {
         }
     }
 }
+
+crate::save::persist_struct!(Life {
+    size,
+    age,
+    lifespan,
+    burning
+});
 
 #[cfg(test)]
 mod tests {

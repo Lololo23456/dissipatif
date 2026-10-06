@@ -26,6 +26,7 @@ mod objects;
 mod objects_view;
 mod obstacles;
 mod player;
+mod save;
 mod scene;
 mod sketch;
 mod soil;
@@ -161,19 +162,63 @@ struct App {
     cast_at: Option<f32>,
     /// Gait cycle of the naturalist in the shape of a deer (radians).
     deer_stride: f32,
+    /// Real seconds until the next automatic save.
+    save_in: f32,
+}
+
+/// The game saves itself this often (real seconds), and when the window closes.
+const AUTOSAVE_SECONDS: f32 = 120.0;
+
+/// What a save holds beyond the world: the game state, the time, the notebook's sketches.
+type Saved = (GameState, Clock, HashMap<usize, Sketch>);
+
+/// Reads the save of world `seed`, if there is one, restoring `world` from it.
+fn load_save(seed: u64, world: &mut World) -> save::Result<Option<Saved>> {
+    let Ok(bytes) = std::fs::read(save::path(seed)) else {
+        return Ok(None);
+    };
+    let mut r = save::open(&bytes, seed)?;
+    world.restore(r.get()?)?;
+    let state = GameState::load(&mut r, world)?;
+    let clock = Clock::at_days(r.get()?);
+    let sketches: Vec<(usize, Vec<u8>)> = r.get()?;
+    let sketches = sketches
+        .into_iter()
+        .filter(|(_, ink)| ink.len() == sketch::WIDTH * sketch::HEIGHT)
+        .map(|(page, ink)| (page, Sketch { ink }))
+        .collect();
+    Ok(Some((state, clock, sketches)))
 }
 
 impl App {
-    fn new(seed: u64) -> Self {
+    /// A game on the world of `seed`: the saved one if `resume` and there is one, else a new
+    /// one.
+    fn new(seed: u64, resume: bool) -> Self {
         let start = Instant::now();
-        let config = WorldConfig::standard(seed);
-        let mut world = World::generate(config);
-        // The deer's meadow, and the circle their rite has worn into it over the years.
-        let spawn = player::spawn_point(&world);
-        let home = deer::home(&world, glam::Vec2::new(spawn.x, spawn.z));
-        if let Some((ring, _)) = home {
-            deer::wear_ring(&mut world, ring, seed);
-        }
+        let generate = || {
+            let mut world = World::generate(WorldConfig::standard(seed));
+            // The deer's meadow, and the circle their rite has worn into it over the years.
+            let spawn = player::spawn_point(&world);
+            let home = deer::home(&world, glam::Vec2::new(spawn.x, spawn.z));
+            if let Some((ring, _)) = home {
+                deer::wear_ring(&mut world, ring, seed);
+            }
+            (world, spawn, home)
+        };
+        let (mut world, spawn, home) = generate();
+        let saved = if resume {
+            match load_save(seed, &mut world) {
+                Ok(saved) => saved,
+                Err(message) => {
+                    eprintln!("Sauvegarde illisible ({message}) : nouvelle partie.");
+                    // The world may have been half restored: start again from the seed.
+                    world = generate().0;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let generated = start.elapsed();
         let mut data = SceneData::build(&world);
         println!(
@@ -188,24 +233,47 @@ impl App {
             data.plant_model_faces(),
         );
         let ambient = Ambient::new(&world, seed ^ AMBIENT_SEED);
-        let mut state = GameState::new(&world);
-        if let Some((ring, cover)) = home {
-            state.add_herd(deer::Herd::new(ring, cover, &world, seed ^ 0xdee5));
+        let resumed = saved.is_some();
+        let (state, clock, sketches) = match saved {
+            Some(saved) => saved,
+            None => {
+                let mut state = GameState::new(&world);
+                if let Some((ring, cover)) = home {
+                    state.add_herd(deer::Herd::new(ring, cover, &world, seed ^ 0xdee5));
+                }
+                state.join(spawn);
+                // The notebook, glowing on the grass just in front.
+                let book = glam::Vec2::new(spawn.x, spawn.z + 1.4);
+                state.place_notebook(Vec3::new(
+                    book.x,
+                    world.surface_height(book.x, book.y),
+                    book.y,
+                ));
+                (state, Clock::new(clock::START_HOUR), HashMap::new())
+            }
+        };
+        // The local player is the first.
+        let me: PlayerId = 0;
+        let feet = state.body(me).position;
+        let camera = OrbitCamera::framing(feet + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
+        // Plants born since the world was made, and those gone; all drawn at their size.
+        let mut sprouted = Vec::new();
+        for i in world.plants().len()..state.plants().len() {
+            let plant = state.plants()[i];
+            sprouted.extend(data.add_plant(&world, &plant, state.plant_size(i)));
         }
-        let me = state.join(spawn);
-        // The notebook, glowing on the grass just in front.
-        let book = glam::Vec2::new(spawn.x, spawn.z + 1.4);
-        state.place_notebook(Vec3::new(
-            book.x,
-            world.surface_height(book.x, book.y),
-            book.y,
-        ));
-        let camera = OrbitCamera::framing(spawn + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
-        // Plants drawn at the size they have.
         for i in 0..state.plants().len() {
-            data.resize_plant(i, state.plant_size(i));
+            if state.is_removed(i) {
+                data.hide(i);
+            } else {
+                data.resize_plant(i, state.plant_size(i));
+            }
         }
-        let trample = Trample::new(data.pliable());
+        let mut trample = Trample::new(data.pliable());
+        for pliable in sprouted {
+            trample.add(pliable);
+        }
+        let message = resumed.then(|| (format!("Partie reprise : jour {}", clock.day()), 4.0));
         Self {
             graphics: None,
             world,
@@ -220,11 +288,11 @@ impl App {
             pending: Vec::new(),
             accumulator: 0.0,
             selected: 0,
-            message: None,
+            message,
             objects_view: ObjectsView::new(),
             trample,
             controls: Controls::default(),
-            clock: Clock::new(clock::START_HOUR),
+            clock,
             audio: None,
             listen_in: 0.0,
             last_stride_phase: 0.0,
@@ -244,7 +312,8 @@ impl App {
             deer_view: DeerView::new(),
             notebook_open: false,
             page: 0,
-            sketches: HashMap::new(),
+            sketches,
+            save_in: AUTOSAVE_SECONDS,
             sketch_pending: Vec::new(),
             cast_at: None,
             deer_stride: 0.0,
@@ -257,6 +326,13 @@ impl App {
     fn tick(&mut self, dt: f32, time: f32) {
         self.now = time;
         self.clock.advance(dt);
+        if self.graphics.is_some() {
+            self.save_in -= dt;
+            if self.save_in <= 0.0 {
+                self.save_in = AUTOSAVE_SECONDS;
+                self.save();
+            }
+        }
         self.run_steps(dt);
         if let Some((_, left)) = &mut self.message {
             *left -= dt;
@@ -328,6 +404,26 @@ impl App {
         let events: Vec<Event> = self.state.drain_events().collect();
         for event in events {
             self.on_event(event);
+        }
+    }
+
+    /// Saves the game (the world's changes, the state, the time, the sketches).
+    fn save(&self) {
+        let seed = self.world.config.seed;
+        let mut w = save::header(seed);
+        w.put(&self.world.state());
+        self.state.save(&mut w);
+        w.put(&self.clock.days());
+        let mut sketches: Vec<(usize, Vec<u8>)> = self
+            .sketches
+            .iter()
+            .map(|(&page, s)| (page, s.ink.clone()))
+            .collect();
+        sketches.sort_by_key(|&(page, _)| page);
+        w.put(&sketches);
+        let path = save::path(seed);
+        if let Err(e) = save::write_file(&path, &w.bytes) {
+            eprintln!("Sauvegarde impossible ({}) : {e}", path.display());
         }
     }
 
@@ -939,7 +1035,10 @@ impl ApplicationHandler for App {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save();
+                event_loop.exit();
+            }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 // Clamped: after a pause of the window (dragging, sleep), no huge jump.
@@ -1491,7 +1590,7 @@ impl Options {
 
 /// Generates the world, renders one frame offscreen, saves it as PNG.
 fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
-    let mut app = App::new(seed);
+    let mut app = App::new(seed, false);
     app.clock = Clock::on_day(options.day, options.hour);
     if options.notebook {
         app.state.give_notebook(app.me);
@@ -1669,7 +1768,8 @@ fn main() {
         return;
     }
     let event_loop = EventLoop::new().expect("création de la boucle d'événements");
-    let mut app = App::new(options.seed);
+    // `--new`: a new game (the save is overwritten at the next save).
+    let mut app = App::new(options.seed, !args.iter().any(|a| a == "--new"));
     if args.iter().any(|a| a == "--test") {
         sandbox(&mut app);
     }
