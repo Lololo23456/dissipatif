@@ -7,7 +7,9 @@ use render::ui::{LINE, Ui};
 
 use crate::items::{MAX_MASS, Matter, SLOTS};
 use crate::needs::Needs;
+use crate::notebook::{Notebook, wind_words};
 use crate::objects_view::icon;
+use crate::sketch::{self, Sketch};
 use crate::state::{GameState, PlayerId};
 use world::World;
 
@@ -18,10 +20,15 @@ pub struct HudInput<'a> {
     pub me: PlayerId,
     pub selected: usize,
     pub hour: f32,
+    /// Day number and moon phase (0 new, 0.5 full).
+    pub day: u32,
+    pub moon_phase: f32,
     /// The current message and the seconds it still stays.
     pub message: Option<(&'a str, f32)>,
     /// The bag is open.
     pub bag_open: bool,
+    /// The notebook is open at this page, with its sketch if drawn.
+    pub notebook_page: Option<(usize, Option<&'a Sketch>)>,
 }
 
 /// Scale of the interface: one font pixel per 400 screen lines, crisp, never tiny.
@@ -168,7 +175,12 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     line_y -= LINE * s + 2.0 * s;
     let mut actions = Vec::new();
     let objects = input.state.objects();
-    if let Some(i) = input.state.object_in_reach(input.me) {
+    let deer = me.body.deer;
+    if deer {
+        actions.push("V  Reprendre forme humaine".to_owned());
+    } else if input.state.notebook_in_reach(input.me) {
+        actions.push("E  Ramasser : un carnet".to_owned());
+    } else if let Some(i) = input.state.object_in_reach(input.me) {
         let matter = objects.placed()[i].matter;
         if objects.handleable(i) {
             actions.push(format!("E  Reprendre : {}", matter.name()));
@@ -180,15 +192,17 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     } else if let Some(matter) = input.state.ground_sample(input.world, input.me) {
         actions.push(format!("E  Prélever : {}", matter.name()));
     }
-    if let Some(stack) = stacks.get(input.selected)
+    if !deer
+        && let Some(stack) = stacks.get(input.selected)
         && input.state.lay_point(input.world, input.me).is_some()
     {
         actions.push(format!("P  Poser : {}", stack.matter.name()));
     }
-    if let Some(work) = input.state.work_plan(input.me, input.selected) {
+    if !deer && let Some(work) = input.state.work_plan(input.me, input.selected) {
         actions.push(format!("F  {}", work.describe()));
     }
-    if input.state.would_blow(input.me) {
+    if deer {
+    } else if input.state.would_blow(input.me) {
         actions.push("G (maintenir)  Souffler sur la braise".to_owned());
     } else if input.state.rub_target(input.me).is_some() {
         actions.push("G (maintenir)  Frotter pour une braise".to_owned());
@@ -266,12 +280,39 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
         ui.text_shadowed(px + (pw - hw) / 2.0, py + ph - 12.0 * s, help, s, faint);
     }
 
+    // ---- Notebook and spells, top left ----
+    let mut hy = 10.0 * s;
+    if let Some(book) = &me.notebook {
+        let pages = book.pages.len();
+        let line = format!(
+            "N  Carnet ({pages} page{})",
+            if pages > 1 { "s" } else { "" }
+        );
+        ui.text_shadowed(10.0 * s, hy, &line, s, faint);
+        hy += LINE * s;
+    }
+    if !deer {
+        for spell in &me.spells {
+            ui.text_shadowed(10.0 * s, hy, &format!("V  {}", spell.name()), s, faint);
+            hy += LINE * s;
+        }
+    }
+    if let (Some((page, sketch)), Some(book)) = (input.notebook_page, &me.notebook) {
+        notebook(ui, book, page, sketch, s);
+    }
+
     // ---- Needs ----
     needs(ui, &me.needs, 10.0 * s, height - 10.0 * s, s);
 
     // ---- Hour ----
     let hour = input.hour.rem_euclid(24.0);
-    let clock = format!("{:02} h {:02}", hour as u32, ((hour.fract()) * 60.0) as u32);
+    let clock = format!(
+        "Jour {} - {:02} h {:02} - {}",
+        input.day,
+        hour as u32,
+        (hour.fract() * 60.0) as u32,
+        crate::clock::moon_name(input.moon_phase)
+    );
     let w = Ui::text_width(&clock, s);
     ui.text_shadowed(width - w - 10.0 * s, 10.0 * s, &clock, s, faint);
 
@@ -313,4 +354,101 @@ fn needs(ui: &mut Ui, needs: &Needs, x: f32, bottom: f32, s: f32) {
         );
         y += 10.0 * s;
     }
+}
+
+/// The open notebook: a sketch on the left page, what was noted on the right.
+fn notebook(ui: &mut Ui, book: &Notebook, page: usize, sketch: Option<&Sketch>, s: f32) {
+    let (width, height) = ui.size();
+    let Some(p) = book.pages.get(page) else {
+        return;
+    };
+    let paper = rgba(0xe9dfc6, 0.97);
+    let ink = rgba(0x3a2f26, 1.0);
+    let faded = rgba(0x3a2f26, 0.6);
+    // Two pages, side by side, the spine between.
+    let dot = (2.0 * s).max(((width * 0.36) / sketch::WIDTH as f32).floor());
+    let page_w = sketch::WIDTH as f32 * dot + 16.0 * s;
+    let page_h = sketch::HEIGHT as f32 * dot + 40.0 * s;
+    let x0 = (width - 2.0 * page_w) / 2.0;
+    let y0 = (height - page_h) / 2.0;
+    ui.rect(
+        x0 - 4.0 * s,
+        y0 - 4.0 * s,
+        2.0 * page_w + 8.0 * s,
+        page_h + 8.0 * s,
+        rgba(0x6e2a20, 1.0),
+    );
+    ui.rect(x0, y0, 2.0 * page_w, page_h, paper);
+    ui.rect(x0 + page_w - s, y0, 2.0 * s, page_h, rgba(0xc9bc9c, 1.0));
+    // Left: the sketch, ink on the paper.
+    let (sx, sy) = (x0 + 8.0 * s, y0 + 12.0 * s);
+    match sketch {
+        Some(sketch) => {
+            for y in 0..sketch::HEIGHT {
+                for x in 0..sketch::WIDTH {
+                    let v = sketch.ink[y * sketch::WIDTH + x];
+                    if v > 24 {
+                        let a = v as f32 / 255.0 * 0.92;
+                        ui.rect(
+                            sx + x as f32 * dot,
+                            sy + y as f32 * dot,
+                            dot,
+                            dot,
+                            [ink[0], ink[1], ink[2], a],
+                        );
+                    }
+                }
+            }
+        }
+        None => {
+            let w = Ui::text_width("...", s);
+            ui.text(
+                sx + (sketch::WIDTH as f32 * dot - w) / 2.0,
+                sy + sketch::HEIGHT as f32 * dot / 2.0,
+                "...",
+                s,
+                faded,
+            );
+        }
+    }
+    // Right: the moment, the place, and the few words.
+    let (tx, mut ty) = (x0 + page_w + 12.0 * s, y0 + 12.0 * s);
+    let big = s * 1.5;
+    if let Some(title) = p.entry.title() {
+        ui.text(tx, ty, title, big, ink);
+        ty += LINE * big + 4.0 * s;
+    }
+    let header = [
+        format!(
+            "Jour {}, {:02} h {:02}",
+            p.day,
+            p.hour as u32,
+            (p.hour.fract() * 60.0) as u32
+        ),
+        crate::clock::moon_name(p.moon).to_owned(),
+        wind_words(p.wind),
+        book.place(p),
+    ];
+    for line in &header {
+        ui.text(tx, ty, line, s, faded);
+        ty += LINE * s;
+    }
+    ty += 6.0 * s;
+    for line in p.entry.words() {
+        ui.text(tx, ty, line, s, ink);
+        ty += LINE * s + s;
+    }
+    let footer = format!(
+        "{} / {}    flèches : tourner les pages",
+        page + 1,
+        book.pages.len()
+    );
+    let w = Ui::text_width(&footer, s);
+    ui.text(
+        x0 + 2.0 * page_w - w - 8.0 * s,
+        y0 + page_h - 10.0 * s,
+        &footer,
+        s,
+        faded,
+    );
 }

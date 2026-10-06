@@ -18,10 +18,10 @@ struct Camera {
 
 // Rust side: `AtmosphereUniform` in src/palette.rs. `w` unused unless stated.
 struct Atmosphere {
-    sun_direction: vec4<f32>,  // offset 0, towards the sun, normalised
+    sun_direction: vec4<f32>,  // offset 0, towards the sun, normalised; w = moon's lit share
     sun_color: vec4<f32>,      // offset 16
-    sky_color: vec4<f32>,      // offset 32
-    ground_color: vec4<f32>,   // offset 48
+    sky_color: vec4<f32>,      // offset 32, w = wind towards x
+    ground_color: vec4<f32>,   // offset 48, w = wind towards z
     fog_color: vec4<f32>,      // offset 64
     fog: vec4<f32>,            // offset 80: start, end, max, w = stars (0 to 1)
 }
@@ -121,10 +121,12 @@ fn is_foliage(id: u32) -> bool {
 // Wind on plants, after "Vegetation Procedural Animation and Shading in Crysis" (GPU Gems 3,
 // ch. 16): a main bending of the whole plant along the wind, and a detail bending of its crown.
 //
-// Wind, blowing towards +x and a bit +z (same as the particles in the air, game/ambient.rs).
-const WIND_DIRECTION: vec3<f32> = vec3<f32>(0.89, 0.0, 0.45);
-// Horizontal direction across the wind, for side-to-side motion.
-const ACROSS_WIND: vec3<f32> = vec3<f32>(-0.45, 0.0, 0.89);
+// The wind turns over the hours (game/wind.rs): the direction it blows towards, unit.
+fn wind_direction() -> vec3<f32> {
+    return vec3<f32>(atmosphere.sky_color.w, 0.0, atmosphere.ground_color.w);
+}
+// Clouds drift with the wind aloft, which keeps its direction.
+const CLOUD_DRIFT: vec2<f32> = vec2<f32>(0.89, 0.45);
 // Height (cells) used to normalise the bending: a plant this tall bends "fully".
 const PLANT_HEIGHT: f32 = 10.0;
 // Main bending: how far the top of a `PLANT_HEIGHT` plant moves at full wind, in cells.
@@ -143,7 +145,7 @@ fn smooth_triangle(x: f32) -> f32 {
 // Wind strength in [0, 1] at a plant: slow gusts (periods of 5 to 15 s) travelling with the
 // wind across the land, so trees bend one after the other, plus each plant's own small lag.
 fn wind_strength(base: vec3<f32>, t: f32, phase: f32) -> f32 {
-    let along = dot(base, WIND_DIRECTION) * 0.012;
+    let along = dot(base, wind_direction()) * 0.012;
     let gusts = 0.5 * smooth_triangle(t * 0.07 - along)
         + 0.3 * smooth_triangle(t * 0.13 - along * 1.7 + 0.31)
         + 0.2 * smooth_triangle(t * 0.21 + phase * 0.05);
@@ -169,7 +171,10 @@ fn wind(local: vec3<f32>, base: vec3<f32>, phase: f32, flexibility: f32) -> vec3
     bend = bend * bend - bend;
     // The plant leans with the wind and breathes around that lean, never past the vertical.
     let lean = strength * (0.75 + 0.25 * smooth_triangle(t * 0.31 + phase));
-    var moved = local + WIND_DIRECTION * (MAIN_BEND / 0.254 * flexibility * lean * bend);
+    let towards = wind_direction();
+    // Horizontal direction across the wind, for side-to-side motion.
+    let across = vec3<f32>(-towards.z, 0.0, towards.x);
+    var moved = local + towards * (MAIN_BEND / 0.254 * flexibility * lean * bend);
     // Keep the distance to the base: the top moves on an arc (slightly down when it bends)
     // instead of sliding sideways and stretching the plant.
     moved = normalize(moved) * length(local);
@@ -181,7 +186,7 @@ fn wind(local: vec3<f32>, base: vec3<f32>, phase: f32, flexibility: f32) -> vec3
     let clump = phase + dot(base + local, vec3<f32>(0.31, 0.23, 0.27));
     let side = smooth_triangle(t * 1.975 + clump) + smooth_triangle(t * 0.793 + clump * 1.3) - 1.0;
     let up = smooth_triangle(t * 0.375 + clump * 0.7) + smooth_triangle(t * 0.193 + clump * 1.7) - 1.0;
-    moved += ACROSS_WIND * (DETAIL_SIDE * crown * side);
+    moved += across * (DETAIL_SIDE * crown * side);
     moved.y += DETAIL_UP * crown * up;
     return base + moved;
 }
@@ -292,7 +297,7 @@ fn value_noise(p: vec2<f32>) -> f32 {
 fn cloud_light(p: vec3<f32>) -> f32 {
     let sun = atmosphere.sun_direction.xyz;
     let towards = p + sun * ((CLOUD_HEIGHT - p.y) / max(sun.y, 0.1));
-    var q = (towards.xz - WIND_DIRECTION.xz * CLOUD_SPEED * camera.time.x) * CLOUD_SCALE;
+    var q = (towards.xz - CLOUD_DRIFT * CLOUD_SPEED * camera.time.x) * CLOUD_SCALE;
     // Fractal noise: three octaves, each twice finer and half as strong.
     var n = 0.0;
     var amplitude = 0.5;
@@ -555,7 +560,7 @@ fn night_sky(d: vec3<f32>, pixel: f32) -> vec3<f32> {
     let facing = dot(d, atmosphere.sun_direction.xyz);
     let disc = smoothstep(MOON_SIZE - 0.0004, MOON_SIZE, facing);
     let glow = pow(smoothstep(MOON_GLOW, 1.0, facing), 2.0) * 0.3;
-    light += vec3<f32>(0.95, 0.95, 0.88) * (disc * 3.0 + glow);
+    light += vec3<f32>(0.95, 0.95, 0.88) * (disc * 3.0 + glow) * atmosphere.sun_direction.w;
     return light;
 }
 

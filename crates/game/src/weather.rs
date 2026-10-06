@@ -27,8 +27,6 @@ const DRYING: f32 = 150.0;
 const DROPS: usize = 450;
 const DROP_RADIUS: f32 = 13.0;
 const FALL_SPEED: f32 = 14.0;
-/// Horizontal push of the wind on the drops (same direction as everywhere).
-const WIND: [f32; 2] = [0.89, 0.45];
 const DROP_VOXEL: f32 = 0.022;
 
 struct RainDrop {
@@ -41,6 +39,8 @@ struct Splash {
 }
 
 pub struct Weather {
+    /// Direction the wind blows towards (x, z), unit: set each frame (see `wind.rs`).
+    pub wind: [f32; 2],
     rng: SplitMix64,
     /// Rain now, in [0, 1], and seconds left in the current shower (0 when dry).
     rain: f32,
@@ -63,6 +63,7 @@ impl Weather {
         let mut rng = SplitMix64::new(seed);
         let mistiness = rng.next_f32();
         Self {
+            wind: [0.89, 0.45],
             rng,
             rain: 0.0,
             shower_left: 0.0,
@@ -136,7 +137,8 @@ impl Weather {
             });
         }
         self.drops.truncate(wanted);
-        let fall = Vec3::new(WIND[0] * 2.5, -FALL_SPEED, WIND[1] * 2.5) * dt;
+        let wind = self.wind;
+        let fall = Vec3::new(wind[0] * 2.5, -FALL_SPEED, wind[1] * 2.5) * dt;
         for i in 0..self.drops.len() {
             self.drops[i].position += fall;
             let p = self.drops[i].position;
@@ -219,11 +221,12 @@ impl Weather {
     }
 
     pub fn draw(&self, renderer: &mut Renderer) {
+        let wind = self.wind;
         let Some(id) = self.drop_mesh else {
             return;
         };
         // Leaning with the wind: the streak follows the drop's path.
-        let lean = Mat4::from_rotation_z(-WIND[0] * 0.17) * Mat4::from_rotation_x(WIND[1] * 0.17);
+        let lean = Mat4::from_rotation_z(-wind[0] * 0.17) * Mat4::from_rotation_x(wind[1] * 0.17);
         let instances: Vec<PartInstance> = self
             .drops
             .iter()

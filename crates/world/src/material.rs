@@ -50,10 +50,15 @@ pub enum Material {
     Brass = 41,
     /// Dark furrows and cracks of bark (generated, part of the trees).
     BarkDark = 42,
+    // Animals (drawn, never generated in the grid).
+    /// A red deer's summer coat, its pale rump, its hooves and muzzle.
+    DeerCoat = 43,
+    DeerPale = 44,
+    Hoof = 45,
 }
 
 /// Number of materials, `Air` included: the size of the colour table.
-pub const MATERIAL_COUNT: usize = 43;
+pub const MATERIAL_COUNT: usize = 46;
 
 impl Material {
     /// Every material, in id order.
@@ -101,6 +106,9 @@ impl Material {
         Material::Eye,
         Material::Brass,
         Material::BarkDark,
+        Material::DeerCoat,
+        Material::DeerPale,
+        Material::Hoof,
     ];
 
     pub const fn id(self) -> u8 {

@@ -220,7 +220,7 @@ impl Post {
 }
 
 /// The scene image: drawn into by the main pass (RENDER_ATTACHMENT), then read by the post
-/// pass (TEXTURE_BINDING).
+/// pass (TEXTURE_BINDING); copied back to the CPU now and then for a sketch (COPY_SRC).
 fn create_scene_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("scene image"),
@@ -233,7 +233,9 @@ fn create_scene_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: SCENE_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     texture.create_view(&wgpu::TextureViewDescriptor::default())

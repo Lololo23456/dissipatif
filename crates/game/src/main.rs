@@ -12,6 +12,8 @@
 mod ambient;
 mod audio;
 mod clock;
+mod deer;
+mod deer_view;
 mod ecology;
 mod fauna;
 mod hud;
@@ -19,17 +21,21 @@ mod items;
 mod listen;
 mod naturalist;
 mod needs;
+mod notebook;
 mod objects;
 mod objects_view;
 mod obstacles;
 mod player;
 mod scene;
+mod sketch;
 mod sound;
 mod state;
 mod traces;
 mod trample;
 mod weather;
+mod wind;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -46,12 +52,16 @@ use world::{World, WorldConfig};
 use ambient::Ambient;
 use audio::Audio;
 use clock::Clock;
+use deer_view::{DeerPose, DeerView};
 use fauna::Fauna;
 use items::Matter;
+use naturalist::Motion;
 use naturalist::{Gesture, GestureKind, Naturalist};
 use objects_view::ObjectsView;
 use player::Controls;
+use render::palette::srgb_hex;
 use scene::SceneData;
+use sketch::Sketch;
 use state::{Command, Event, Failure, GameState, PlayerId};
 use traces::Traces;
 use trample::Trample;
@@ -138,13 +148,29 @@ struct App {
     gesture: Option<(GestureKind, f32)>,
     /// Seconds since start, as of the last frame.
     now: f32,
+    deer_view: DeerView,
+    /// The notebook is open (N), at this page.
+    notebook_open: bool,
+    page: usize,
+    /// Sketches of the notebook's pages, drawn from the screen when each was written; pages
+    /// waiting for theirs (drawn after the next frame).
+    sketches: HashMap<usize, Sketch>,
+    sketch_pending: Vec<usize>,
+    /// When a spell was last cast (seconds since start).
+    cast_at: Option<f32>,
 }
 
 impl App {
     fn new(seed: u64) -> Self {
         let start = Instant::now();
         let config = WorldConfig::standard(seed);
-        let world = World::generate(config);
+        let mut world = World::generate(config);
+        // The deer's meadow, and the circle their rite has worn into it over the years.
+        let spawn = player::spawn_point(&world);
+        let home = deer::home(&world, glam::Vec2::new(spawn.x, spawn.z));
+        if let Some((ring, _)) = home {
+            deer::wear_ring(&mut world, ring, seed);
+        }
         let generated = start.elapsed();
         let mut data = SceneData::build(&world);
         println!(
@@ -160,8 +186,17 @@ impl App {
         );
         let ambient = Ambient::new(&world, seed ^ AMBIENT_SEED);
         let mut state = GameState::new(&world);
-        let spawn = player::spawn_point(&world);
+        if let Some((ring, cover)) = home {
+            state.add_herd(deer::Herd::new(ring, cover, &world, seed ^ 0xdee5));
+        }
         let me = state.join(spawn);
+        // The notebook, glowing on the grass just in front.
+        let book = glam::Vec2::new(spawn.x, spawn.z + 1.4);
+        state.place_notebook(Vec3::new(
+            book.x,
+            world.surface_height(book.x, book.y),
+            book.y,
+        ));
         let camera = OrbitCamera::framing(spawn + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
         // Plants drawn at the size they have.
         for i in 0..state.plants().len() {
@@ -203,6 +238,12 @@ impl App {
             dug_cells: Vec::new(),
             gesture: None,
             now: 0.0,
+            deer_view: DeerView::new(),
+            notebook_open: false,
+            page: 0,
+            sketches: HashMap::new(),
+            sketch_pending: Vec::new(),
+            cast_at: None,
         }
     }
 }
@@ -224,6 +265,9 @@ impl App {
         let goal = body.shown_position() + Vec3::Y * LOOK_HEIGHT;
         self.camera.target += (goal - self.camera.target) * (1.0 - (-FOLLOW_EASING * dt).exp());
         let around = [feet.x, feet.z];
+        let wind = wind::direction(self.clock.days()).to_array();
+        self.ambient.wind = wind;
+        self.weather.wind = wind;
         self.ambient.update(dt, time, around, &self.world);
         let hour = self.clock.hour();
         self.weather.update(dt, hour, feet, &self.world);
@@ -239,6 +283,7 @@ impl App {
         for (k, (at, strength)) in self.state.burning_plants().into_iter().enumerate() {
             objects_view::plant_fire(at, strength, time, k as f32, &mut self.particles);
         }
+        self.magic(time);
         self.update_sound(dt, time);
         // Plants pushed aside by the body, springing back once free.
         let data = &mut self.data;
@@ -251,8 +296,7 @@ impl App {
     fn run_steps(&mut self, dt: f32) {
         // After a long pause, do not try to catch up more than a quarter of a second.
         self.accumulator = (self.accumulator + dt).min(0.25);
-        let hour = self.clock.hour();
-        let rain = self.weather.rain();
+        let now = self.clock.conditions(self.weather.rain());
         while self.accumulator >= state::STEP {
             self.accumulator -= state::STEP;
             let steer = Command::Steer {
@@ -269,7 +313,7 @@ impl App {
                 }
             }
             self.state.time_scale = if self.clock.fast { 60.0 } else { 1.0 };
-            self.state.step(&self.world, hour, rain);
+            self.state.step(&self.world, &now);
         }
         // What the physics did meanwhile (an ember, a dish fired or burst…).
         let events: Vec<Event> = self.state.drain_events().collect();
@@ -321,6 +365,27 @@ impl App {
             self.gesture = Some((kind, self.now));
         }
         let text = match event {
+            Event::Wrote { page, entry, .. } => {
+                self.sketch_pending.push(page);
+                match entry {
+                    notebook::Entry::Found => {
+                        "Un carnet. Il brillait. (N pour l'ouvrir)".to_owned()
+                    }
+                    notebook::Entry::Learnt(_) => return,
+                    _ => "Le carnet s'est rempli d'une page.".to_owned(),
+                }
+            }
+            Event::Learnt { spell, .. } => {
+                format!("Vous avez compris : {}. (V pour le lancer)", spell.name())
+            }
+            Event::Cast { on, .. } => {
+                self.cast_at = Some(self.now);
+                if on {
+                    "Vous prenez la forme du cerf.".to_owned()
+                } else {
+                    "Vous reprenez forme humaine.".to_owned()
+                }
+            }
             Event::Picked {
                 matter, removed, ..
             } => {
@@ -404,6 +469,7 @@ impl App {
                 Failure::CannotLay => "Impossible de poser ici.",
                 Failure::NothingToWork => "Rien à travailler avec ce que vous tenez.",
                 Failure::TooWet => "Le bois est trop humide : la friction ne donne rien.",
+                Failure::NoHands => "Pas de mains sous cette forme.",
             }
             .to_owned(),
         };
@@ -459,13 +525,185 @@ impl App {
         self.traces.update(dt, time);
     }
 
+    /// The naturalist (or the deer they turned into), the herd, the notebook lying there.
+    fn draw_creatures(&self, renderer: &mut Renderer, motion: &Motion, time: f32) {
+        let body = self.state.body(self.me);
+        let mut deer: Vec<DeerPose> = self
+            .state
+            .herd()
+            .map(|h| h.deer.iter().map(DeerPose::of).collect())
+            .unwrap_or_default();
+        if body.deer {
+            self.naturalist.hide(renderer);
+            let v = body.velocity();
+            deer.push(DeerPose {
+                position: motion.position,
+                heading: body.facing(),
+                head: 0.3,
+                lying: 0.0,
+                // A deer's stride is shorter than its gait suggests: the same distance, more steps.
+                stride: body.stride().0 * 1.4,
+                speed: glam::Vec2::new(v.x, v.z).length(),
+                size: 1.05,
+                stamp: 0.0,
+            });
+        } else {
+            self.naturalist.pose(renderer, motion);
+        }
+        self.deer_view.draw(renderer, &deer);
+        self.naturalist
+            .pose_book(renderer, self.state.notebook_lying(), time);
+    }
+
+    /// Sketches for the pages just written, from the frame just drawn.
+    fn take_sketches(&mut self, renderer: &Renderer) {
+        if self.sketch_pending.is_empty() {
+            return;
+        }
+        if let Some((width, height, pixels)) = renderer.snapshot() {
+            let sketch = sketch::draw(width, height, &pixels);
+            for page in self.sketch_pending.drain(..) {
+                self.sketches.insert(page, sketch.clone());
+            }
+        }
+    }
+
+    /// Light that is not of this world: the notebook glowing where it lies, the rite's motes
+    /// over the circle, a spell's swirl.
+    fn magic(&mut self, time: f32) {
+        let out = &mut self.particles;
+        if let Some(at) = self.state.notebook_lying() {
+            let gold = srgb_hex(0xffe3a0);
+            for i in 0..28 {
+                let phase = (time * 0.3 + i as f32 * 0.0357) % 1.0;
+                let angle = i as f32 * 2.399 + time * 0.5;
+                let r = 0.15 + 0.3 * phase;
+                out.push(render::ParticleInstance {
+                    centre_size: [
+                        at.x + angle.cos() * r,
+                        at.y + 0.12 + 0.9 * phase,
+                        at.z + angle.sin() * r,
+                        0.015 + 0.03 * (1.0 - phase),
+                    ],
+                    color: [gold[0], gold[1], gold[2], -4.0 * (1.0 - phase)],
+                });
+            }
+            out.push(render::ParticleInstance {
+                centre_size: [at.x, at.y + 0.45, at.z, 0.04],
+                color: [gold[0], gold[1], gold[2], -3.0],
+            });
+        }
+        if let Some(herd) = self.state.herd()
+            && herd.glow > 0.01
+        {
+            let silver = srgb_hex(0xd6e2ff);
+            let g = herd.glow;
+            let ring = herd.ring;
+            let ground = self.world.surface_height(ring.x, ring.y);
+            for i in 0..(48.0 * g) as usize {
+                let phase = (time * 0.1 + i as f32 * 0.618) % 1.0;
+                let angle = i as f32 * 2.399 + time * 0.05;
+                let r = deer::RING_RADIUS * (0.15 + 0.85 * ((i * 7 % 10) as f32 / 10.0));
+                out.push(render::ParticleInstance {
+                    centre_size: [
+                        ring.x + angle.cos() * r,
+                        ground + 0.2 + 5.0 * phase,
+                        ring.y + angle.sin() * r,
+                        0.01 + 0.03 * (1.0 - phase),
+                    ],
+                    color: [silver[0], silver[1], silver[2], -2.5 * g * (1.0 - phase)],
+                });
+            }
+            for k in 0..56 {
+                let angle = k as f32 / 56.0 * std::f32::consts::TAU;
+                let at = ring + glam::Vec2::new(angle.cos(), angle.sin()) * deer::RING_RADIUS;
+                let pulse = 0.5 + 0.5 * (time * 1.5 + k as f32 * 0.7).sin();
+                out.push(render::ParticleInstance {
+                    centre_size: [at.x, ground + 0.04, at.y, 0.035],
+                    color: [silver[0], silver[1], silver[2], -1.2 * g * pulse],
+                });
+            }
+        }
+        if let Some(start) = self.cast_at {
+            let t = time - start;
+            if (0.0..1.8).contains(&t) {
+                let feet = self.state.body(self.me).shown_position();
+                let green = srgb_hex(0xc8f0b0);
+                let fade = 1.0 - t / 1.8;
+                for i in 0..40 {
+                    let k = i as f32 / 40.0;
+                    let angle = k * std::f32::consts::TAU * 3.0 + t * 5.0;
+                    let r = 0.3 + 0.9 * (1.0 - fade) * (0.5 + 0.5 * k);
+                    out.push(render::ParticleInstance {
+                        centre_size: [
+                            feet.x + angle.cos() * r,
+                            feet.y + 0.1 + 1.8 * k * (0.4 + 0.6 * fade),
+                            feet.z + angle.sin() * r,
+                            0.02 + 0.03 * fade,
+                        ],
+                        color: [green[0], green[1], green[2], -2.5 * fade],
+                    });
+                }
+            }
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) {
         let pressed = event.state == ElementState::Pressed;
         // Physical keys: the same positions on every layout (Z Q S D on AZERTY).
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };
+        // The open notebook takes the arrows to turn its pages.
+        if self.notebook_open && pressed {
+            let pages = self
+                .state
+                .player(self.me)
+                .and_then(|p| p.notebook.as_ref())
+                .map_or(0, |b| b.pages.len());
+            match code {
+                KeyCode::ArrowLeft | KeyCode::KeyA => {
+                    self.page = self.page.saturating_sub(1);
+                    return;
+                }
+                KeyCode::ArrowRight | KeyCode::KeyD => {
+                    self.page = (self.page + 1).min(pages.saturating_sub(1));
+                    return;
+                }
+                KeyCode::Escape => {
+                    self.notebook_open = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match code {
+            // C (held): crouch.
+            KeyCode::KeyC => self.controls.crouch = pressed,
+            KeyCode::KeyN if pressed && !event.repeat => {
+                let pages = self
+                    .state
+                    .player(self.me)
+                    .and_then(|p| p.notebook.as_ref())
+                    .map(|b| b.pages.len());
+                if let Some(pages) = pages {
+                    self.notebook_open = !self.notebook_open;
+                    self.page = pages.saturating_sub(1);
+                }
+            }
+            // V: cast the spell known (the first; more to come).
+            KeyCode::KeyV if pressed && !event.repeat => {
+                let spell = self
+                    .state
+                    .player(self.me)
+                    .and_then(|p| p.spells.first().copied());
+                if let Some(spell) = spell {
+                    self.pending.push(Command::Cast {
+                        player: self.me,
+                        spell,
+                    });
+                }
+            }
             KeyCode::KeyW | KeyCode::ArrowUp => self.controls.forward = pressed,
             KeyCode::KeyS | KeyCode::ArrowDown => self.controls.back = pressed,
             KeyCode::KeyA | KeyCode::ArrowLeft => self.controls.left = pressed,
@@ -559,6 +797,7 @@ impl ApplicationHandler for App {
         self.fauna.install(&mut renderer);
         self.weather.install(&mut renderer);
         self.objects_view.install(&mut renderer);
+        self.deer_view.install(&mut renderer);
         self.graphics = Some(Graphics { window, renderer });
         match Audio::start(0x5eed) {
             Ok(audio) => self.audio = Some(audio),
@@ -581,9 +820,10 @@ impl ApplicationHandler for App {
                 self.tick(dt, time);
                 let mut motion = self.state.body(self.me).motion(time);
                 motion.gesture = self.current_gesture(time);
-                if let Some(graphics) = self.graphics.as_mut() {
+                // Out of `self` while drawing, so `self`'s methods can draw with it.
+                if let Some(mut graphics) = self.graphics.take() {
                     let renderer = &mut graphics.renderer;
-                    self.naturalist.pose(renderer, &motion);
+                    self.draw_creatures(renderer, &motion, time);
                     for (cell, flooded) in std::mem::take(&mut self.dug_cells) {
                         self.data
                             .ground_dug(&self.world, cell, flooded, Some(renderer));
@@ -608,9 +848,11 @@ impl ApplicationHandler for App {
                         &self.world,
                         self.me,
                         self.selected,
-                        self.clock.hour(),
+                        &self.clock,
                         &self.message,
                         self.bag_open,
+                        self.notebook_open
+                            .then(|| (self.page, self.sketches.get(&self.page))),
                         renderer,
                     );
                     let (ripples, prints) = self.traces.marks();
@@ -645,6 +887,8 @@ impl ApplicationHandler for App {
                     }
                     renderer.upload_particles(&self.particles);
                     renderer.render(&self.camera, time);
+                    self.take_sketches(renderer);
+                    self.graphics = Some(graphics);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(&event),
@@ -920,9 +1164,10 @@ fn draw_hud(
     world: &World,
     me: PlayerId,
     selected: usize,
-    hour: f32,
+    clock: &Clock,
     message: &Option<(String, f32)>,
     bag_open: bool,
+    notebook_page: Option<(usize, Option<&Sketch>)>,
     renderer: &mut Renderer,
 ) {
     let (width, height) = renderer.size();
@@ -934,9 +1179,12 @@ fn draw_hud(
             world,
             me,
             selected,
-            hour,
+            hour: clock.hour(),
+            day: clock.day(),
+            moon_phase: clock.moon_phase(),
             message: message.as_ref().map(|(text, left)| (text.as_str(), *left)),
             bag_open,
+            notebook_page,
         },
     );
     renderer.set_ui(ui.vertices());
@@ -987,7 +1235,8 @@ fn pointed_ground(
 /// Light and weather of the moment, to the renderer.
 fn set_sky(clock: &Clock, weather: &Weather, feet: Vec3, renderer: &mut Renderer) {
     let hour = clock.hour();
-    let mut sky = render::sky::sky(hour);
+    let mut sky = render::sky::sky(hour).with_moon(clock.moon_light());
+    sky.wind = crate::wind::direction(clock.days()).to_array();
     weather.apply(&mut sky, hour);
     renderer.set_sky(&sky);
     // Mist lies a little below the naturalist: in the hollows around and over the water.
@@ -1029,6 +1278,12 @@ struct CaptureOptions {
     bag: bool,
     /// Holds the naturalist in a gesture (`--pose rub|blow|reach|eat|drink|shape`).
     pose: Option<GestureKind>,
+    /// Day of the moon cycle to start on (from 1): the full moon is on the third night.
+    day: u32,
+    /// Shows the notebook open at its last page.
+    notebook: bool,
+    /// The naturalist knows the deer's shape and takes it (to look at it).
+    deer: bool,
 }
 
 impl Options {
@@ -1090,6 +1345,9 @@ impl Options {
                         Some("shape") => Some(GestureKind::Shape),
                         Some(other) => return Err(format!("--pose {other} : geste inconnu")),
                     },
+                    day: number("--day")?.unwrap_or(1.0) as u32,
+                    notebook: args.iter().any(|a| a == "--notebook"),
+                    deer: args.iter().any(|a| a == "--deer"),
                 })
             }
             None => None,
@@ -1101,7 +1359,17 @@ impl Options {
 /// Generates the world, renders one frame offscreen, saves it as PNG.
 fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     let mut app = App::new(seed);
-    app.clock = Clock::new(options.hour);
+    app.clock = Clock::on_day(options.day, options.hour);
+    if options.notebook {
+        app.state.give_notebook(app.me);
+    }
+    if options.deer {
+        app.state.teach(app.me, notebook::Spell::DeerForm);
+        app.pending.push(Command::Cast {
+            player: app.me,
+            spell: notebook::Spell::DeerForm,
+        });
+    }
     if let Some((x, z)) = options.start {
         let dims = app.world.dims();
         let (xi, zi) = (
@@ -1144,6 +1412,22 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.pending.push(Command::Pick { player: app.me });
         app.tick(CAPTURE_STEP, (still + walking) as f32 * CAPTURE_STEP);
     }
+    if std::env::var_os("DISSIPATIF_DEBUG_DEER").is_some()
+        && let Some(herd) = app.state.herd()
+    {
+        for d in &herd.deer {
+            eprintln!(
+                "cerf {:?} {:?} tête {:.2} couché {:.2}",
+                d.position, d.activity, d.head, d.lying
+            );
+        }
+        eprintln!(
+            "cercle {:?} lueur {:.2} vent vers {:?}",
+            herd.ring,
+            herd.glow,
+            wind::direction(app.clock.days())
+        );
+    }
     // `--at` overrides the follow camera.
     if let Some((x, z)) = options.at {
         app.camera.target = Vec3::new(x, app.camera.target.y, z);
@@ -1155,12 +1439,13 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     let mut renderer = Renderer::new(Gpu::offscreen(options.width, options.height));
     app.data.install(&mut renderer);
     app.naturalist.install(&mut renderer);
+    app.deer_view.install(&mut renderer);
     let mut motion = app.state.body(app.me).motion(time);
     motion.gesture = match options.pose {
         Some(kind) => Some(Gesture { kind, amount: 1.0 }),
         None => app.current_gesture(time),
     };
-    app.naturalist.pose(&mut renderer, &motion);
+    app.draw_creatures(&mut renderer, &motion, time);
     app.data.upload_changes(&mut renderer);
     app.weather.install(&mut renderer);
     app.weather.draw(&mut renderer);
@@ -1180,15 +1465,37 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         &app.world,
         app.me,
         app.selected,
-        app.clock.hour(),
+        &app.clock,
         &app.message,
         app.bag_open || options.bag,
+        None,
         &mut renderer,
     );
     let (ripples, prints) = app.traces.marks();
     renderer.set_marks(ripples, prints);
     renderer.upload_particles(&app.particles);
     renderer.render(&app.camera, time);
+    // The notebook's sketches come from this frame; `--notebook` shows it open, drawn again.
+    app.take_sketches(&renderer);
+    if options.notebook {
+        let page = app
+            .state
+            .player(app.me)
+            .and_then(|p| p.notebook.as_ref())
+            .map_or(0, |b| b.pages.len().saturating_sub(1));
+        draw_hud(
+            &app.state,
+            &app.world,
+            app.me,
+            app.selected,
+            &app.clock,
+            &app.message,
+            false,
+            Some((page, app.sketches.get(&page))),
+            &mut renderer,
+        );
+        renderer.render(&app.camera, time);
+    }
     let (width, height, pixels) = renderer
         .capture()
         .ok_or("pas d'image hors écran à relire")?;

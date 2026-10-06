@@ -35,8 +35,25 @@ Le joueur **enquête** sur les anomalies de la nature. La progression, c'est ce 
 - **Génération** : logique fixe (gabarits de causalité écrits à la main), incarnation générée (animaux, lieux, dates du monde).
 - **Le vieil homme de la forêt** (plus tard) dit voir des choses : des rumeurs, pas des réponses.
 
+### Les sorts : devenir druide
+De vrais sorts qu'on lance (touche V), chacun appris d'une anomalie de la nature, et qui passent par la vraie physique du monde. L'effet surprend mais **rappelle son origine**. Premier sort en jeu :
+- **Forme du cerf** (la harde qui tourne en cercle les nuits de pleine lune) : on devient cerf. La harde vous prend pour l'une des siennes, on court et bondit comme elle, mais on n'a plus de mains. Clé de l'arbre : approcher la faune de près.
+
+Pistes (à valider), chacune liée à un phénomène réel :
+- **Feu follet** (lueurs bleues sur le marais les nuits sans vent, le gaz des marais) : une flamme froide qu'on lance, qui dérive avec le vent et allume vraiment ce qu'elle touche.
+- **Chœur des lucioles** (lucioles qui finissent par clignoter ensemble, une synchronisation réelle) : un essaim qu'on appelle, qui éclaire et qu'on envoie.
+- **Appel de l'orage** (corbeaux qui tournent au-dessus d'un arbre foudroyé avant l'orage) : la foudre tombe où l'on veut ; elle fend un arbre et allume un incendie.
+- **Cercle des fées** (anneau de champignons qui s'élargit, front de mycélium, une vraie structure dissipative) : on lance un front vivant qui fait pousser à son passage et épuise le sol derrière lui.
+- **Œil de chouette** (chouettes qui chassent en silence dans le noir complet) : voir la nuit, entendre ce qui bouge.
+- **Souffle des eaux** (bancs de poissons en tourbillon au fond du lac à la nouvelle lune) : respirer et marcher sous l'eau.
+
+L'arbre caché relie ces sorts : la Forme du cerf permet d'approcher sans fuite ; l'Œil de chouette permet de voir les anomalies nocturnes ; le Souffle des eaux, celles du fond des lacs.
+
 ### Les animaux
 **Hors anomalies, leur comportement suit la réalité** : rythmes d'activité (le cerf est crépusculaire), alimentation, vie en groupe, vigilance, perception (vue sensible au mouvement, ouïe, odorat porté par le vent), distance de fuite. L'étrange n'existe que par contraste avec ce comportement réel.
+
+### La harde de cerfs (en jeu)
+Des biches et leurs faons, menées par une meneuse. Elles broutent à l'aube et au crépuscule dans leur prairie, ruminent couchées en lisière le jour, passent de l'une à l'autre en file indienne, lèvent la tête pour guetter. Elles voient le mouvement (moins si l'on est accroupi, lent, dans les fougères), entendent les pas (plus sur le gravier, en courant ; la pluie couvre), sentent l'odeur portée par le vent jusqu'à 45 cases. L'alarme : une biche fixe, frappe du pied, aboie ; la harde fuit au galop puis reste méfiante quelques heures. Les indices de l'anomalie : un anneau de terre foulée dans leur prairie, et, les nuits de lune gibbeuse, la meneuse qui tourne seule. La nuit de pleine lune, toutes marchent le cercle ; l'observer sans être repéré une trentaine de secondes apprend la Forme du cerf.
 
 ### Le carnet
 Posé devant le joueur au départ, **il brille seulement à ce moment-là** ; personne ne sait d'où il vient. **Il se remplit tout seul** de ce que le joueur a vu (images, parfois quelques mots), avec le lieu, le jour, l'heure, la phase de lune et le vent : c'est un **outil d'hypothèses**. Le joueur relie les pages ; il pourra peut-être plus tard les marquer.

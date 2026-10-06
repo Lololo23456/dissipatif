@@ -18,8 +18,6 @@ const MOTE_GLOW_BASE: f32 = 0.25;
 /// Leaves torn off per second around the target, at full gust (fewer when the wind drops).
 const LEAF_RATE: f32 = 7.0;
 const MAX_LEAVES: usize = 200;
-/// Wind, in cells per second (same direction as the plants bend in the shader: +x, +z).
-const WIND: [f32; 2] = [0.89, 0.45];
 /// Speed of the wind carrying leaves and motes, at full gust, in cells per second.
 const WIND_SPEED: f32 = 2.2;
 
@@ -35,6 +33,8 @@ struct Particle {
 }
 
 pub struct Ambient {
+    /// Direction the wind blows towards (x, z), unit: set each frame (see `wind.rs`).
+    pub wind: [f32; 2],
     rng: SplitMix64,
     motes: Vec<Particle>,
     leaves: Vec<Particle>,
@@ -61,6 +61,7 @@ impl Ambient {
             }
         }
         Self {
+            wind: [0.89, 0.45],
             rng: SplitMix64::new(seed),
             motes: Vec::with_capacity(MOTES),
             leaves: Vec::with_capacity(MAX_LEAVES),
@@ -109,6 +110,7 @@ impl Ambient {
     }
 
     fn update_motes(&mut self, dt: f32, time: f32, gust: f32, target: [f32; 2], world: &World) {
+        let wind = self.wind;
         while self.motes.len() < MOTES {
             let (x, z) = self.random_around(target);
             let Some(floor) = surface(world, x, z) else {
@@ -128,8 +130,8 @@ impl Ambient {
             p.age += dt;
             // Carried by the wind, with a slow lazy wobble up and down.
             let push = 0.4 * WIND_SPEED * gust;
-            p.position[0] += (WIND[0] * push + 0.2 * (time * 0.7 + p.phase).sin()) * dt;
-            p.position[2] += (WIND[1] * push + 0.2 * (time * 0.6 + p.phase).cos()) * dt;
+            p.position[0] += (wind[0] * push + 0.2 * (time * 0.7 + p.phase).sin()) * dt;
+            p.position[2] += (wind[1] * push + 0.2 * (time * 0.6 + p.phase).cos()) * dt;
             p.position[1] += 0.15 * (time * 0.9 + p.phase).sin() * dt;
         }
         self.motes
@@ -137,6 +139,7 @@ impl Ambient {
     }
 
     fn update_leaves(&mut self, dt: f32, time: f32, gust: f32, target: [f32; 2], world: &World) {
+        let wind = self.wind;
         // Gusts tear leaves off: more of them when the wind is strong.
         self.leaf_debt += LEAF_RATE * gust * gust * dt;
         while self.leaf_debt >= 1.0 {
@@ -167,8 +170,8 @@ impl Ambient {
             // Swept along by the wind, falling slowly, sometimes lifted by a gust, fluttering.
             let flutter = (time * 3.1 + p.phase).sin();
             let push = WIND_SPEED * gust;
-            p.position[0] += (WIND[0] * push + 0.3 * flutter) * dt;
-            p.position[2] += (WIND[1] * push + 0.3 * (time * 2.3 + p.phase).cos()) * dt;
+            p.position[0] += (wind[0] * push + 0.3 * flutter) * dt;
+            p.position[2] += (wind[1] * push + 0.3 * (time * 2.3 + p.phase).cos()) * dt;
             let lift = 0.5 * (gust - 0.6).max(0.0) * (time * 1.7 + p.phase).sin().max(0.0);
             p.position[1] += (lift - 0.45 - 0.2 * flutter.abs()) * dt;
         }

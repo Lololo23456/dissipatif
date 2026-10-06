@@ -16,9 +16,11 @@ use glam::{Vec2, Vec3};
 use sim::thermal::KELVIN;
 use world::{Material, World};
 
+use crate::deer::{self, Herd, HerdEvent, Observer};
 use crate::ecology::{Change, Ecology};
 use crate::items::{ClaySource, Harvest, Inventory, Matter, Refusal, harvest};
 use crate::needs::{self, Exposure, Needs};
+use crate::notebook::{Entry, Notebook, Spell};
 use crate::objects::Objects;
 use crate::obstacles::Obstacles;
 use crate::player::{Controls, Player};
@@ -80,6 +82,12 @@ pub struct PlayerState {
     camera_yaw: f32,
     /// Seconds of rubbing towards an ember, while the drill key is held.
     pub rubbing: f32,
+    /// The notebook, once found.
+    pub notebook: Option<Notebook>,
+    /// Spells understood.
+    pub spells: Vec<Spell>,
+    /// Seconds spent watching the rite, unseen.
+    witnessed: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +116,8 @@ pub enum Command {
     PickAt { player: PlayerId, at: Vec2 },
     /// Work what slot `slot` holds with the hands (see `Work`).
     Work { player: PlayerId, slot: usize },
+    /// Cast a spell (again to end one that lasts, like a shape).
+    Cast { player: PlayerId, spell: Spell },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +135,8 @@ pub enum Failure {
     NothingToWork,
     /// The fire drill gives no ember in the rain.
     TooWet,
+    /// In the shape of a deer: no hands.
+    NoHands,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -181,6 +193,52 @@ pub enum Event {
         player: PlayerId,
         failure: Failure,
     },
+    /// The notebook wrote page `page` by itself (the first: it was just found).
+    Wrote {
+        player: PlayerId,
+        page: usize,
+        entry: Entry,
+    },
+    /// A spell understood.
+    Learnt {
+        player: PlayerId,
+        spell: Spell,
+    },
+    /// A spell cast: `on` false when a lasting one ends.
+    Cast {
+        player: PlayerId,
+        spell: Spell,
+        on: bool,
+    },
+}
+
+/// The moment: time, sky and weather, the same for everything in the world.
+#[derive(Clone, Copy, Debug)]
+pub struct Conditions {
+    /// Hour of the day, in [0, 24).
+    pub hour: f32,
+    /// Days since the start, fractional.
+    pub days: f64,
+    /// Moon phase in [0, 1): 0 new, 0.5 full.
+    pub moon: f32,
+    /// Rain, in [0, 1].
+    pub rain: f32,
+    /// Direction the wind blows towards, unit.
+    pub wind: Vec2,
+}
+
+impl Conditions {
+    /// A dry noon on the first day, under a full moon's phase: for tests.
+    #[cfg(test)]
+    pub fn noon() -> Self {
+        Self {
+            hour: 12.0,
+            days: 0.5,
+            moon: 0.5,
+            rain: 0.0,
+            wind: Vec2::new(0.89, 0.45),
+        }
+    }
 }
 
 pub struct GameState {
@@ -211,6 +269,13 @@ pub struct GameState {
     changes: Vec<(Vec3, Matter, Matter)>,
     /// Chance in the players' gestures (knapping), seeded: deterministic.
     rng: sim::rng::SplitMix64,
+    /// The deer of the meadow, if the world has one.
+    herd: Option<Herd>,
+    herd_events: Vec<HerdEvent>,
+    /// The notebook lying on the ground, until someone picks it up.
+    notebook_lying: Option<Vec3>,
+    /// The moment of the last step.
+    now: Conditions,
 }
 
 impl GameState {
@@ -242,7 +307,66 @@ impl GameState {
             events: Vec::new(),
             changes: Vec::new(),
             rng: sim::rng::SplitMix64::new(world.config.seed ^ 0x4ea9),
+            herd: None,
+            herd_events: Vec::new(),
+            notebook_lying: None,
+            now: Conditions {
+                hour: 12.0,
+                days: 0.5,
+                moon: 0.0,
+                rain: 0.0,
+                wind: Vec2::X,
+            },
         }
+    }
+
+    /// Lets a herd of deer live in the world.
+    pub fn add_herd(&mut self, herd: Herd) {
+        self.herd = Some(herd);
+    }
+
+    pub fn herd(&self) -> Option<&Herd> {
+        self.herd.as_ref()
+    }
+
+    /// Lays the notebook on the ground at `at`.
+    pub fn place_notebook(&mut self, at: Vec3) {
+        self.notebook_lying = Some(at);
+    }
+
+    /// Puts the notebook in player `id`'s hands at once, wherever it lies (for captures).
+    pub fn give_notebook(&mut self, id: PlayerId) {
+        if let Some(at) = self.notebook_lying.take() {
+            let found = Vec2::new(at.x, at.z);
+            let now = self.now;
+            if let Some(p) = self.player_mut(id) {
+                let mut book = Notebook::new(found);
+                book.write(Entry::Found, &now, found);
+                p.notebook = Some(book);
+            }
+        }
+    }
+
+    /// Gives player `id` a spell (for tests and captures).
+    pub fn teach(&mut self, id: PlayerId, spell: Spell) {
+        if let Some(p) = self.player_mut(id)
+            && !p.spells.contains(&spell)
+        {
+            p.spells.push(spell);
+        }
+    }
+
+    /// Whether player `id` can pick up the notebook lying there.
+    pub fn notebook_in_reach(&self, id: PlayerId) -> bool {
+        match (self.notebook_lying, self.hands(id)) {
+            (Some(at), Some(hands)) => hands.distance(Vec2::new(at.x, at.z)) < ARM_REACH,
+            _ => false,
+        }
+    }
+
+    /// Where the notebook lies, if nobody has it yet.
+    pub fn notebook_lying(&self) -> Option<Vec3> {
+        self.notebook_lying
     }
 
     pub fn objects(&self) -> &Objects {
@@ -501,6 +625,9 @@ impl GameState {
             controls: Controls::default(),
             camera_yaw: 0.0,
             rubbing: 0.0,
+            notebook: None,
+            spells: Vec::new(),
+            witnessed: 0.0,
         });
         id
     }
@@ -607,7 +734,37 @@ impl GameState {
 
     /// Applies a command. Returns what happened, if anything worth telling.
     pub fn apply(&mut self, world: &World, command: Command) -> Option<Event> {
+        // In the shape of a deer, nothing can be held or worked.
+        if let Command::Pick { player }
+        | Command::PickAt { player, .. }
+        | Command::Lay { player, .. }
+        | Command::LayAt { player, .. }
+        | Command::Work { player, .. }
+        | Command::Eat { player, .. } = command
+            && self.player(player).is_some_and(|p| p.body.deer)
+        {
+            return Some(Event::Failed {
+                player,
+                failure: Failure::NoHands,
+            });
+        }
         match command {
+            Command::Cast { player, spell } => {
+                let p = self.player_mut(player)?;
+                if !p.spells.contains(&spell) {
+                    return None;
+                }
+                match spell {
+                    Spell::DeerForm => {
+                        p.body.deer = !p.body.deer;
+                        Some(Event::Cast {
+                            player,
+                            spell,
+                            on: p.body.deer,
+                        })
+                    }
+                }
+            }
             Command::Steer {
                 player,
                 controls,
@@ -621,6 +778,23 @@ impl GameState {
                 None
             }
             Command::Pick { player } => {
+                // The notebook, if it lies there.
+                if let (Some(at), Some(hands)) = (self.notebook_lying, self.hands(player))
+                    && hands.distance(Vec2::new(at.x, at.z)) < ARM_REACH
+                {
+                    self.notebook_lying = None;
+                    let found = Vec2::new(at.x, at.z);
+                    let now = self.now;
+                    let p = self.player_mut(player)?;
+                    let mut book = Notebook::new(found);
+                    let page = book.write(Entry::Found, &now, found)?;
+                    p.notebook = Some(book);
+                    return Some(Event::Wrote {
+                        player,
+                        page,
+                        entry: Entry::Found,
+                    });
+                }
                 // A laid object within reach first: taking it back.
                 if let Some(i) = self.object_in_reach(player) {
                     return self.take_back(player, i);
@@ -963,8 +1137,9 @@ impl GameState {
     }
 
     /// One fixed step of time: bodies move as steered, needs follow the conditions.
-    /// `hour` in [0, 24), `rain` in [0, 1].
-    pub fn step(&mut self, world: &World, hour: f32, rain: f32) {
+    pub fn step(&mut self, world: &World, now: &Conditions) {
+        self.now = *now;
+        let (hour, rain) = (now.hour, now.rain);
         self.rain = rain;
         // Objects' physics, in the air around the first player (the objects lie near them).
         let around = self.players.first().map_or(Vec3::ZERO, |p| p.body.position);
@@ -999,7 +1174,7 @@ impl GameState {
             }
         }
         self.ecology
-            .update_fire(STEP, rain, &self.plants, &mut self.plant_changes);
+            .update_fire(STEP, rain, now.wind, &self.plants, &mut self.plant_changes);
         // Plants live: growth, seeds, death.
         let objects = &self.objects;
         let free = |p: Vec2| {
@@ -1089,6 +1264,146 @@ impl GameState {
             };
             self.events.push(event);
         }
+        self.step_deer(world, now);
+    }
+
+    /// The deer live, sensing the players; the notebooks write what their owners witnessed.
+    fn step_deer(&mut self, world: &World, now: &Conditions) {
+        let Some(herd) = self.herd.as_mut() else {
+            return;
+        };
+        let observers: Vec<Observer> = self
+            .players
+            .iter()
+            .map(|p| observer(world, &self.ecology, &self.plants, p))
+            .collect();
+        let mut fires: Vec<Vec2> = (0..self.objects.placed().len())
+            .filter(|&i| self.objects.body(i).burning)
+            .map(|i| {
+                let b = self.objects.placed()[i].base;
+                Vec2::new(b.x, b.z)
+            })
+            .collect();
+        fires.extend(
+            self.ecology
+                .burning(&self.plants)
+                .map(|(i, _)| crate::ecology::place(&self.plants[i])),
+        );
+        self.herd_events.clear();
+        herd.update(STEP, world, now, &observers, &fires, &mut self.herd_events);
+
+        let herd = &*herd;
+        let light = deer::daylight(now.hour).max(crate::clock::moon_light(now.moon) * 0.8);
+        for p in &mut self.players {
+            let feet = Vec2::new(p.body.position.x, p.body.position.z);
+            let mut entries = Vec::new();
+            // The herd in sight (close enough, light enough to make them out).
+            let nearest = herd
+                .deer
+                .iter()
+                .map(|d| Vec2::new(d.position.x, d.position.z).distance(feet))
+                .fold(f32::INFINITY, f32::min);
+            if nearest < 20.0 && light > 0.3 {
+                entries.push(Entry::Herd);
+            }
+            for &event in &self.herd_events {
+                if nearest < 35.0 {
+                    entries.push(match event {
+                        HerdEvent::Alarm { .. } => Entry::Alarm,
+                        HerdEvent::Fled { cause } => Entry::Fled(cause),
+                    });
+                }
+            }
+            let to_ring = feet.distance(herd.ring);
+            if to_ring < deer::RING_RADIUS + 1.5 && herd.glow < 0.05 && light > 0.4 {
+                entries.push(Entry::Ring);
+            }
+            if herd.foretelling() && to_ring < 30.0 {
+                entries.push(Entry::Turning);
+            }
+            // The rite, watched without being noticed: understood after a while.
+            let watching = herd.glow > 0.3 && to_ring < 32.0 && !herd.frightened(now);
+            if watching {
+                entries.push(Entry::Rite);
+                if herd.glow > 0.6 {
+                    p.witnessed += STEP;
+                }
+            }
+            if p.witnessed >= RITE_UNDERSTOOD && !p.spells.contains(&Spell::DeerForm) {
+                p.spells.push(Spell::DeerForm);
+                entries.push(Entry::Learnt(Spell::DeerForm));
+                self.events.push(Event::Learnt {
+                    player: p.id,
+                    spell: Spell::DeerForm,
+                });
+            }
+            // The notebook, if they have it, writes what they saw.
+            let Some(book) = p.notebook.as_mut() else {
+                continue;
+            };
+            for entry in entries {
+                if let Some(page) = book.write(entry, now, feet) {
+                    self.events.push(Event::Wrote {
+                        player: p.id,
+                        page,
+                        entry,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Seconds of watching the full rite, unnoticed, to understand it.
+const RITE_UNDERSTOOD: f32 = 30.0;
+
+/// A player as the deer perceive them: moving or still, crouched, hidden by plants, on loud
+/// or soft ground, in their own shape or a deer's.
+fn observer(
+    world: &World,
+    ecology: &Ecology,
+    plants: &[world::PlantInstance],
+    p: &PlayerState,
+) -> Observer {
+    let feet = p.body.position;
+    let at = Vec2::new(feet.x, feet.z);
+    // Cover: ferns, bushes and tall dry shrubs close around.
+    let cover = ecology
+        .near(at, 1.3, plants)
+        .into_iter()
+        .filter(|&i| {
+            matches!(
+                plants[i].plant,
+                world::Plant::Fern | world::Plant::Bush | world::Plant::DryShrub
+            )
+        })
+        .count() as f32
+        * 0.3;
+    let dims = world.dims();
+    let (x, z) = (
+        (feet.x.max(0.0) as usize).min(dims.nx - 1),
+        (feet.z.max(0.0) as usize).min(dims.nz - 1),
+    );
+    let below = world.block(x, (feet.y - 0.5).max(0.0) as usize, z);
+    let ground_noise = if p.body.in_water() {
+        1.0
+    } else {
+        match below {
+            Material::Gravel | Material::Stone | Material::Rock => 1.0,
+            Material::ForestFloor => 0.7,
+            Material::DryGrass | Material::Snow => 0.55,
+            Material::Sand | Material::DesertSand => 0.45,
+            _ => 0.35,
+        }
+    };
+    let velocity = p.body.velocity();
+    Observer {
+        at: feet,
+        speed: Vec2::new(velocity.x, velocity.z).length(),
+        crouched: p.body.crouched() > 0.5,
+        cover: cover.min(1.0),
+        ground_noise,
+        disguised: p.body.deer,
     }
 }
 
@@ -1247,7 +1562,7 @@ mod tests {
             },
         );
         for _ in 0..60 {
-            state.step(&world, 12.0, 0.0);
+            state.step(&world, &Conditions::noon());
         }
         assert!(state.player(id).unwrap().body.position.distance(start) > 1.0);
     }
@@ -1308,7 +1623,7 @@ mod tests {
         };
         steer(&mut state, true);
         for _ in 0..(60.0 * (RUB_SECONDS + 0.5)) as usize {
-            state.step(&world, 12.0, 0.0);
+            state.step(&world, &Conditions::noon());
         }
         assert!(
             state
@@ -1323,7 +1638,7 @@ mod tests {
         let mut seconds = 0;
         while !any_burning(&state) && seconds < 120 {
             for _ in 0..60 {
-                state.step(&world, 12.0, 0.0);
+                state.step(&world, &Conditions::noon());
             }
             seconds += 1;
         }
@@ -1333,7 +1648,7 @@ mod tests {
         }
         let mut twigs_burning = false;
         for _ in 0..60 * 90 {
-            state.step(&world, 12.0, 0.0);
+            state.step(&world, &Conditions::noon());
             let objects = state.objects();
             twigs_burning |= objects
                 .placed()

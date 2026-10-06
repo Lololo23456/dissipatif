@@ -25,6 +25,12 @@ const HALF_WIDTH: f32 = 0.3;
 const HEIGHT: f32 = 1.8;
 /// Highest step climbed without jumping.
 const STEP_HEIGHT: f32 = 1.05;
+/// Walking crouched: slow and low.
+const CROUCH_SPEED: f32 = 1.3;
+/// In the shape of a deer (the spell): faster, and a deer's leap.
+const DEER_WALK: f32 = 4.0;
+const DEER_RUN: f32 = 10.5;
+const DEER_JUMP: f32 = 10.0;
 /// Speed factor in water.
 const WADING: f32 = 0.55;
 /// The body starts swimming beyond this water depth (at the feet) and stops below the second
@@ -53,6 +59,8 @@ pub struct Controls {
     pub jump: bool,
     /// Rubbing a fire drill (held).
     pub rub: bool,
+    /// Crouching (held): slow, low and quiet.
+    pub crouch: bool,
 }
 
 pub struct Player {
@@ -75,6 +83,10 @@ pub struct Player {
     look_target: [f32; 2],
     next_glance: f32,
     rng: SplitMix64,
+    /// How crouched, 0 (standing) to 1 (eased).
+    crouch: f32,
+    /// In the shape of a deer (the spell).
+    pub deer: bool,
 }
 
 impl Player {
@@ -95,6 +107,8 @@ impl Player {
             look_target: [0.0; 2],
             next_glance: 2.0,
             rng: SplitMix64::new(0x10c),
+            crouch: 0.0,
+            deer: false,
         }
     }
 
@@ -114,6 +128,11 @@ impl Player {
     /// Phase of the walking cycle (radians) and how strongly the legs swing (0 to 1).
     pub fn stride(&self) -> (f32, f32) {
         (self.stride_phase, self.stride)
+    }
+
+    /// How crouched, 0 to 1.
+    pub fn crouched(&self) -> f32 {
+        self.crouch
     }
 
     /// Current velocity, in cells per second.
@@ -145,6 +164,12 @@ impl Player {
             remaining -= step;
         }
         self.animate(dt);
+        let crouch = if controls.crouch && !self.swimming && !self.deer {
+            1.0
+        } else {
+            0.0
+        };
+        self.crouch += (crouch - self.crouch) * (1.0 - (-8.0 * dt).exp());
     }
 
     fn physics(
@@ -173,7 +198,13 @@ impl Player {
             self.swimming = false;
         }
         let swimming = self.swimming;
-        let mut speed = if c.run { RUN_SPEED } else { WALK_SPEED } * self.pace;
+        let mut speed = match (self.deer, c.run, c.crouch) {
+            (true, true, _) => DEER_RUN,
+            (true, false, _) => DEER_WALK,
+            (false, true, false) => RUN_SPEED,
+            (false, _, true) => CROUCH_SPEED,
+            (false, false, false) => WALK_SPEED,
+        } * self.pace;
         if self.in_water {
             speed *= WADING;
         }
@@ -200,7 +231,7 @@ impl Player {
         } else {
             self.velocity.y -= GRAVITY * dt;
             if jump && self.on_ground {
-                self.velocity.y = JUMP_SPEED;
+                self.velocity.y = if self.deer { DEER_JUMP } else { JUMP_SPEED };
             }
         }
 
@@ -327,6 +358,7 @@ impl Player {
             airborne: !self.on_ground && !self.in_water,
             time,
             gesture: None,
+            crouch: self.crouch,
         }
     }
 }

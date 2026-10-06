@@ -230,6 +230,38 @@ impl World {
         }
     }
 
+    /// Wears the ground of column (x, z) bare, as a path trodden for years: grass and forest
+    /// floor turn to earth and the ground cover growing there is gone. Meant right after
+    /// generation, before the world is shown or lived in (plant indices shift).
+    pub fn wear(&mut self, x: usize, z: usize) {
+        let dims = self.dims();
+        if x >= dims.nx || z >= dims.nz {
+            return;
+        }
+        let top = self.ground_top(x, z);
+        if top == 0 {
+            return;
+        }
+        let i = dims.index(x, top - 1, z);
+        if matches!(
+            Material::from_id(self.blocks[i]),
+            Some(Material::Grass | Material::ForestFloor | Material::DryGrass)
+        ) {
+            self.blocks[i] = Material::Dirt.id();
+        }
+        let worn: Vec<PlantInstance> = self
+            .plants
+            .iter()
+            .filter(|p| p.plant.is_ground_cover() && p.base[0] == x && p.base[2] == z)
+            .copied()
+            .collect();
+        for plant in &worn {
+            self.unstamp_plant(plant);
+        }
+        self.plants
+            .retain(|p| !(p.plant.is_ground_cover() && p.base[0] == x && p.base[2] == z));
+    }
+
     /// Height of the ground surface at (x, z), micro-voxels included.
     pub fn surface_height(&self, x: f32, z: f32) -> f32 {
         let d = self.dims();

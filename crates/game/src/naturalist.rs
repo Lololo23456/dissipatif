@@ -32,13 +32,13 @@ const RIGHT_ARM: usize = 5;
 const PART_COUNT: usize = 6;
 
 /// A small box of voxels being drawn.
-struct Grid {
-    dims: Dims,
-    voxels: Vec<u8>,
+pub(crate) struct Grid {
+    pub(crate) dims: Dims,
+    pub(crate) voxels: Vec<u8>,
 }
 
 impl Grid {
-    fn new(nx: usize, ny: usize, nz: usize) -> Self {
+    pub(crate) fn new(nx: usize, ny: usize, nz: usize) -> Self {
         let dims = Dims { nx, ny, nz };
         Self {
             dims,
@@ -47,7 +47,7 @@ impl Grid {
     }
 
     /// Fills the box [x0, x1) × [y0, y1) × [z0, z1) (clipped to the grid).
-    fn fill(&mut self, x: [usize; 2], y: [usize; 2], z: [usize; 2], material: Material) {
+    pub(crate) fn fill(&mut self, x: [usize; 2], y: [usize; 2], z: [usize; 2], material: Material) {
         let d = self.dims;
         for zi in z[0]..z[1].min(d.nz) {
             for yi in y[0]..y[1].min(d.ny) {
@@ -58,7 +58,7 @@ impl Grid {
         }
     }
 
-    fn set(&mut self, x: usize, y: usize, z: usize, material: Material) {
+    pub(crate) fn set(&mut self, x: usize, y: usize, z: usize, material: Material) {
         self.fill([x, x + 1], [y, y + 1], [z, z + 1], material);
     }
 }
@@ -169,6 +169,8 @@ pub struct Motion {
     pub time: f32,
     /// What the hands are doing, if anything (an action's animation).
     pub gesture: Option<Gesture>,
+    /// How crouched, 0 (standing) to 1.
+    pub crouch: f32,
 }
 
 /// A gesture of the hands, posed over the body.
@@ -199,13 +201,19 @@ pub struct Gesture {
 pub struct Naturalist {
     parts: [Part; PART_COUNT],
     ids: Vec<PartId>,
+    /// The notebook lying in the world, before it is picked up.
+    book: Option<PartId>,
 }
+
+/// Size of a voxel of the notebook lying on the ground: a small, thick field notebook.
+const BOOK_VOXEL: f32 = 0.035;
 
 impl Naturalist {
     pub fn new() -> Self {
         Self {
             parts: parts(),
             ids: Vec::new(),
+            book: None,
         }
     }
 
@@ -228,6 +236,48 @@ impl Naturalist {
                 renderer.add_part(&mesh)
             })
             .collect();
+        // The notebook: red cloth covers, the pale edge of its pages.
+        let mut book = Grid::new(6, 2, 8);
+        book.fill([0, 6], [0, 2], [0, 8], Material::NotebookRed);
+        book.fill([5, 6], [0, 1], [1, 7], Material::Canvas);
+        book.fill([1, 5], [0, 1], [7, 8], Material::Canvas);
+        let mut mesh = MeshData::default();
+        mesh_materials(
+            &book.voxels,
+            book.dims,
+            [3.0, 0.0, 4.0],
+            BOOK_VOXEL,
+            LOOK_SEED,
+            &mut mesh,
+        );
+        self.book = Some(renderer.add_part(&mesh));
+    }
+
+    /// The notebook where it lies, if it does: floating a hand above the grass, turning
+    /// slowly.
+    pub fn pose_book(&self, renderer: &mut Renderer, at: Option<Vec3>, time: f32) {
+        let Some(id) = self.book else {
+            return;
+        };
+        let instances: Vec<PartInstance> = at
+            .map(|at| {
+                let lift = 0.12 + 0.03 * (time * 1.3).sin();
+                PartInstance::new(
+                    Mat4::from_translation(at + Vec3::Y * lift)
+                        * Mat4::from_rotation_y(time * 0.4)
+                        * Mat4::from_rotation_x(0.12 * (time * 0.9).sin()),
+                )
+            })
+            .into_iter()
+            .collect();
+        renderer.set_part_instances(id, &instances);
+    }
+
+    /// Not drawn (the naturalist has another shape).
+    pub fn hide(&self, renderer: &mut Renderer) {
+        for &id in &self.ids {
+            renderer.set_part_instances(id, &[]);
+        }
     }
 
     /// Poses the parts for this frame.
@@ -248,7 +298,13 @@ impl Naturalist {
         let breath = (m.time * 1.7).sin() * 0.008 * (1.0 - m.stride);
         let tuck = if m.airborne { 0.5 } else { 0.0 };
         // Gesture: how low the body goes (crouch, kneel), how far the torso leans, the arms.
-        let pose = gesture_pose(m.gesture, m.time);
+        let mut pose = gesture_pose(m.gesture, m.time);
+        // Crouching: knees bent, back bowed, arms in; a gesture that goes lower wins.
+        let c = m.crouch;
+        pose.lower = pose.lower.max(0.3 * c);
+        pose.knees = pose.knees.max(1.0 * c);
+        pose.lean = pose.lean.max(0.45 * c);
+        pose.nod -= 0.3 * c * (1.0 - pose.hold);
         let root = Mat4::from_translation(m.position + Vec3::Y * (bob + breath - pose.lower))
             * Mat4::from_rotation_y(m.facing);
         let place = |part: usize, rotation: Mat4| {
@@ -383,6 +439,7 @@ mod tests {
             airborne: false,
             time: 0.0,
             gesture: None,
+            crouch: 0.0,
         }
     }
 

@@ -165,7 +165,8 @@ impl Renderer {
             entries: &[
                 // The fragment shader also reads the eye position, for the haze.
                 uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
-                uniform_entry(1, wgpu::ShaderStages::FRAGMENT),
+                // The vertex shader reads the wind from the atmosphere (plants bending).
+                uniform_entry(1, wgpu::ShaderStages::VERTEX_FRAGMENT),
                 uniform_entry(2, wgpu::ShaderStages::FRAGMENT),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
@@ -220,15 +221,26 @@ impl Renderer {
         let shadow_frame_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("shadow frame layout"),
-                entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
+                // The camera, and the atmosphere for the wind: plants cast the shadow of their
+                // swaying shape.
+                entries: &[
+                    uniform_entry(0, wgpu::ShaderStages::VERTEX),
+                    uniform_entry(1, wgpu::ShaderStages::VERTEX),
+                ],
             });
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow frame"),
             layout: &shadow_frame_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: atmosphere_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         // Group 1: a volume. Two 3D textures of f32 (base and life) read with `textureLoad`
@@ -388,7 +400,9 @@ impl Renderer {
     /// Light, haze and grading for the hour of the day (see `sky::sky`).
     pub fn set_sky(&mut self, sky: &Sky) {
         let atmosphere = &sky.atmosphere;
-        let uniform = AtmosphereUniform::new(atmosphere, sky.stars);
+        let uniform = AtmosphereUniform::new(atmosphere, sky.stars)
+            .with_moon(sky.moon)
+            .with_wind(sky.wind);
         self.gpu
             .queue()
             .write_buffer(&self.atmosphere_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -517,6 +531,64 @@ impl Renderer {
     pub fn capture(&self) -> Option<(u32, u32, Vec<u8>)> {
         let (width, height) = self.gpu.size();
         self.gpu.read_pixels().map(|pixels| (width, height, pixels))
+    }
+
+    /// The last scene drawn, before grading and the interface: linear RGB per pixel, rows
+    /// from top to bottom, with its size. Waits for the GPU: for a rare moment (a sketch in
+    /// the notebook), not every frame.
+    pub fn snapshot(&self) -> Option<(u32, u32, Vec<[f32; 3]>)> {
+        let device = self.gpu.device();
+        let texture = self.post.scene_view().texture();
+        let (width, height) = (texture.width(), texture.height());
+        // 4 half floats a pixel; rows padded to 256 bytes for the copy.
+        let row = 8 * width;
+        let padded_row = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("snapshot"),
+            size: (padded_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("snapshot"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.gpu.queue().submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        let mapped = slice.get_mapped_range().ok()?;
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height as usize {
+            let start = y * padded_row as usize;
+            for px in mapped[start..start + row as usize].chunks_exact(8) {
+                let half = |k: usize| f16_to_f32(u16::from_le_bytes([px[k], px[k + 1]]));
+                pixels.push([half(0), half(2), half(4)]);
+            }
+        }
+        drop(mapped);
+        buffer.unmap();
+        Some((width, height, pixels))
     }
 
     /// Width / height of the window images.
@@ -881,4 +953,27 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         view_formats: &[],
     });
     texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// A 16-bit float (IEEE 754 half: 1 sign bit, 5 exponent bits, 10 mantissa bits) as an f32.
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = ((h >> 10) & 0x1f) as i32;
+    let mantissa = (h & 0x3ff) as f32;
+    match exponent {
+        0 => sign * mantissa * 2f32.powi(-24),
+        31 => sign * f32::INFINITY,
+        e => sign * (1.0 + mantissa / 1024.0) * 2f32.powi(e - 15),
+    }
+}
+
+#[cfg(test)]
+mod half_tests {
+    #[test]
+    fn halves_decode() {
+        assert_eq!(super::f16_to_f32(0x3c00), 1.0);
+        assert_eq!(super::f16_to_f32(0xc000), -2.0);
+        assert_eq!(super::f16_to_f32(0x3555), 0.333_251_95);
+        assert_eq!(super::f16_to_f32(0x0000), 0.0);
+    }
 }

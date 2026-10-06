@@ -46,8 +46,6 @@ const SEEDLING: f32 = 0.12;
 pub const TREE_STANDS: f32 = 0.85;
 /// Living plants at most, as a multiple of the initial ones (keeps the cost bounded).
 const MAX_GROWTH: f32 = 2.0;
-/// Wind direction (as for the plants bending, the particles): fire runs before it.
-const WIND: Vec2 = Vec2::new(0.89, 0.45);
 
 /// Storey of a plant: who competes with whom, and over what distance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -562,6 +560,7 @@ impl Ecology {
         &mut self,
         dt: f32,
         rain: f32,
+        wind: Vec2,
         plants: &[PlantInstance],
         changes: &mut Vec<Change>,
     ) {
@@ -584,7 +583,7 @@ impl Ecology {
                 }
                 let offset = place(&plants[j]) - at;
                 let towards = offset.normalize_or_zero();
-                let wind = 1.0 + 0.8 * towards.dot(WIND);
+                let wind = 1.0 + 0.8 * towards.dot(wind);
                 let near = 1.0 - offset.length() / reach;
                 let rate = 1.5 * near * wind * (1.0 - 0.9 * rain);
                 self.try_ignite(j, plants, 1.0 - (-rate * dt).exp(), changes);
@@ -912,7 +911,13 @@ mod tests {
                 eco.ignite(start, 0.6, &plants, &mut changes);
             }
             for _ in 0..60 * 60 {
-                eco.update_fire(1.0 / 60.0, rain, &plants, &mut changes);
+                eco.update_fire(
+                    1.0 / 60.0,
+                    rain,
+                    Vec2::new(0.89, 0.45),
+                    &plants,
+                    &mut changes,
+                );
             }
             changes
                 .iter()
@@ -939,6 +944,10 @@ mod timing {
         for _ in 0..100 {
             eco.step(1.0 / 600.0, &world, &mut plants, &|_| true, &mut changes);
         }
-        println!("{} plantes vivantes, un pas : {:?}", eco.living(), start.elapsed() / 100);
+        println!(
+            "{} plantes vivantes, un pas : {:?}",
+            eco.living(),
+            start.elapsed() / 100
+        );
     }
 }

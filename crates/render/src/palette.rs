@@ -121,10 +121,10 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
         srgb_hex(0x241c18), // 40 eyes (11)
         srgb_hex(0xc9a24a), // 41 brass (69)
         srgb_hex(0x45301f), // 42 dark bark (22)
+        srgb_hex(0x9a5c36), // 43 deer coat, summer red (45)
+        srgb_hex(0xd8c7a2), // 44 deer rump and belly (81)
+        srgb_hex(0x2b221c), // 45 hooves, muzzle (14)
         // Free slots.
-        srgb_hex(0xff00ff),
-        srgb_hex(0xff00ff),
-        srgb_hex(0xff00ff),
         srgb_hex(0xff00ff),
         srgb_hex(0xff00ff),
     ]
@@ -193,10 +193,10 @@ pub fn golden_hour() -> Atmosphere {
 /// WGSL side (`shaders/voxel.wgsl`), every field a `vec4<f32>`, `w` unused unless stated:
 /// ```wgsl
 /// struct Atmosphere {
-///     sun_direction: vec4<f32>,  // offset 0
+///     sun_direction: vec4<f32>,  // offset 0, w = moon's lit share
 ///     sun_color: vec4<f32>,      // offset 16
-///     sky_color: vec4<f32>,      // offset 32
-///     ground_color: vec4<f32>,   // offset 48
+///     sky_color: vec4<f32>,      // offset 32, w = wind towards x
+///     ground_color: vec4<f32>,   // offset 48, w = wind towards z
 ///     fog_color: vec4<f32>,      // offset 64
 ///     fog: vec4<f32>,            // offset 80: start, end, max, stars (0 to 1)
 /// }
@@ -213,16 +213,41 @@ pub struct AtmosphereUniform {
 }
 
 impl AtmosphereUniform {
-    /// `stars`: how many stars show, in [0, 1] (night sky reflected in the water).
+    /// Direction the wind blows towards, on the ground plane (x, z), unit.
+    pub fn with_wind(mut self, wind: [f32; 2]) -> Self {
+        self.sky_color[3] = wind[0];
+        self.ground_color[3] = wind[1];
+        self
+    }
+
+    /// Lit share of the moon's disc, in [0, 1] (its reflection in the water).
+    pub fn with_moon(mut self, moon: f32) -> Self {
+        self.sun_direction[3] = moon;
+        self
+    }
+
+    /// `stars`: how many stars show, in [0, 1] (night sky reflected in the water). The moon's
+    /// lit share defaults to full; see `with_moon`.
     pub fn new(atmosphere: &Atmosphere, stars: f32) -> Self {
         let [x, y, z] = atmosphere.sun_direction;
         let length = (x * x + y * y + z * z).sqrt();
         let rgb = |[r, g, b]: [f32; 3]| [r, g, b, 1.0];
+        let wind = [0.89, 0.45];
         Self {
-            sun_direction: [x / length, y / length, z / length, 0.0],
+            sun_direction: [x / length, y / length, z / length, 1.0],
             sun_color: rgb(atmosphere.sun_color),
-            sky_color: rgb(atmosphere.sky_color),
-            ground_color: rgb(atmosphere.ground_color),
+            sky_color: [
+                atmosphere.sky_color[0],
+                atmosphere.sky_color[1],
+                atmosphere.sky_color[2],
+                wind[0],
+            ],
+            ground_color: [
+                atmosphere.ground_color[0],
+                atmosphere.ground_color[1],
+                atmosphere.ground_color[2],
+                wind[1],
+            ],
             fog_color: rgb(atmosphere.fog_color),
             fog: [
                 atmosphere.fog_start,

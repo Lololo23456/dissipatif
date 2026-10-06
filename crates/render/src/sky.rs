@@ -33,6 +33,23 @@ pub struct Sky {
     pub stars: f32,
     /// Darkness, in [0, 1]: 0 by day, 1 in the deep night (fireflies, crickets…).
     pub night: f32,
+    /// Whether the direct light is the moon's (1) or the sun's (0).
+    pub moonlit: f32,
+    /// Lit share of the moon's disc, in [0, 1] (see `with_moon`).
+    pub moon: f32,
+    /// Direction the wind blows towards, (x, z), unit.
+    pub wind: [f32; 2],
+}
+
+impl Sky {
+    /// The moon's phase: its light at night is as strong as the lit share of its disc
+    /// (`moon`, 0 new to 1 full), a new-moon night lit by the stars alone.
+    pub fn with_moon(mut self, moon: f32) -> Self {
+        let factor = 1.0 + self.moonlit * (0.08 + 0.92 * moon - 1.0);
+        self.atmosphere.sun_color = self.atmosphere.sun_color.map(|c| c * factor);
+        self.moon = moon;
+        self
+    }
 }
 
 /// One hand-written moment of the day.
@@ -215,6 +232,7 @@ pub fn sky(hour: f32) -> Sky {
 
     // Sun by day, moon by night (opposite in the sky), fading out near the horizon.
     let sun = sun_path(h);
+    let moonlit = if sun[1] >= 0.0 { 0.0 } else { 1.0 };
     let (raw, up) = if sun[1] >= 0.0 {
         (sun, sun[1])
     } else {
@@ -246,6 +264,9 @@ pub fn sky(hour: f32) -> Sky {
         },
         stars: mix(a.stars, b.stars),
         night: mix(a.night, b.night),
+        moonlit,
+        moon: 1.0,
+        wind: [0.89, 0.45],
     }
 }
 
