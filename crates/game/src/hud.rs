@@ -27,6 +27,10 @@ pub struct HudInput<'a> {
     pub message: Option<(&'a str, f32)>,
     /// The bag is open.
     pub bag_open: bool,
+    /// Direction the wind blows towards (x, z), and the camera's yaw: the wind is shown as
+    /// seen on screen.
+    pub wind: glam::Vec2,
+    pub camera_yaw: f32,
     /// The notebook is open at this page, with its sketch if drawn.
     pub notebook_page: Option<(usize, Option<&'a Sketch>)>,
 }
@@ -315,6 +319,14 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
     );
     let w = Ui::text_width(&clock, s);
     ui.text_shadowed(width - w - 10.0 * s, 10.0 * s, &clock, s, faint);
+    wind(
+        ui,
+        input.wind,
+        input.camera_yaw,
+        width - 10.0 * s,
+        10.0 * s + LINE * s + 4.0 * s,
+        s,
+    );
 
     // ---- Message ----
     if let Some((text, left)) = input.message {
@@ -451,4 +463,53 @@ fn notebook(ui: &mut Ui, book: &Notebook, page: usize, sketch: Option<&Sketch>, 
         s,
         faded,
     );
+}
+
+/// Where the wind goes, as seen on screen: "vent" and an arrow pointing downwind (where one's
+/// scent is carried), right-aligned at `right`, top at `top`.
+fn wind(ui: &mut Ui, towards: glam::Vec2, camera_yaw: f32, right: f32, top: f32, s: f32) {
+    let color = rgba(0xf4ead8, 0.75);
+    // Screen axes on the ground: "up" is away from the camera.
+    let forward = glam::Vec2::new(-camera_yaw.sin(), -camera_yaw.cos());
+    let side = glam::Vec2::new(-forward.y, forward.x);
+    let on_screen = glam::Vec2::new(towards.dot(side), -towards.dot(forward)).normalize_or_zero();
+    let radius = 7.0 * s;
+    let centre = glam::Vec2::new(right - radius - s, top + radius);
+    let label = "vent";
+    let w = Ui::text_width(label, s);
+    ui.text_shadowed(
+        centre.x - radius - 6.0 * s - w,
+        centre.y - 3.0 * s,
+        label,
+        s,
+        color,
+    );
+    let dot = |ui: &mut Ui, p: glam::Vec2| {
+        ui.rect(
+            p.x.round() - s,
+            p.y.round() - s,
+            2.0 * s,
+            2.0 * s,
+            [0.0, 0.0, 0.0, 0.3],
+        );
+        ui.rect(
+            p.x.round() - s * 0.5 - s * 0.5,
+            p.y.round() - s,
+            s * 1.5,
+            s * 1.5,
+            color,
+        );
+    };
+    let tail = centre - on_screen * radius;
+    let head = centre + on_screen * radius;
+    let steps = (2.0 * radius / s) as usize;
+    for k in 0..=steps {
+        dot(ui, tail.lerp(head, k as f32 / steps as f32));
+    }
+    for turn in [2.5f32, -2.5] {
+        let back = glam::Vec2::from_angle(turn).rotate(on_screen);
+        for k in 1..=4 {
+            dot(ui, head + back * (k as f32 * s * 1.2));
+        }
+    }
 }

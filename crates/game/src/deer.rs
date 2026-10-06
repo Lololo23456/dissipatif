@@ -613,15 +613,35 @@ fn inside(world: &World, at: Vec2) -> bool {
     at.x >= 1.0 && at.y >= 1.0 && at.x < dims.nx as f32 - 1.0 && at.y < dims.nz as f32 - 1.0
 }
 
-/// Dry ground no higher than a deer steps up (a cell and a bit), within the world.
+/// Dry ground no higher than a deer steps up (a cell and a bit), within the world, and no
+/// trunk standing there.
 fn walkable(world: &World, from_height: f32, at: Vec2) -> bool {
     if !inside(world, at) {
         return false;
     }
-    if world.water_level(at.x as usize, at.y as usize).is_some() {
+    let (x, z) = (at.x as usize, at.y as usize);
+    if world.water_level(x, z).is_some() {
         return false;
     }
-    (world.surface_height(at.x, at.y) - from_height).abs() < 1.3
+    let ground = world.surface_height(at.x, at.y);
+    if (ground - from_height).abs() >= 1.3 {
+        return false;
+    }
+    let dims = world.dims();
+    let trunk = |y: usize| {
+        y < dims.ny
+            && matches!(
+                world.block(x, y, z),
+                Material::Wood
+                    | Material::BarkDark
+                    | Material::BirchBark
+                    | Material::PalmTrunk
+                    | Material::DeadWood
+                    | Material::Cactus
+            )
+    };
+    let y = ground.max(0.0) as usize;
+    !(trunk(y) || trunk(y + 1))
 }
 
 /// A point on the ground.

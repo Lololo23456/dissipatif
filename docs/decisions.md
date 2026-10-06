@@ -257,3 +257,9 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Accroupi** (C) : plus lent, plus bas, plus discret.
 - **Carnet** : posé brillant devant le joueur au départ ; se remplit seul, une page par genre d'observation (jour, heure, lune, vent, lieu compté en pas depuis l'endroit où il était), quelques mots rares. **Les croquis sont faits à partir de ce qui était vraiment à l'écran** : l'image HDR de la scène est relue (`Renderer::snapshot`) puis passée en encre (contours de Sobel sur la luminance floutée, seuil adaptatif, hachures dans les ombres, bords estompés).
 - **Sorts** : comprendre est séparé du carnet (le naturaliste comprend, le carnet note). Premier sort : Forme du cerf (V), qui bascule la forme ; pas de mains sous cette forme. Coût, durée et autres sorts : encore ouverts (pistes dans le design).
+
+## 2026-10-06 — Corrections après le premier essai du rituel
+- **Bug** : la harde vivait en temps réel même quand le jour était accéléré (T) ; la nuit de pleine lune passait en quelques secondes, le cercle n'avait pas le temps de se former. Elle vit maintenant en temps de jeu (un pas de harde par unité d'accélération), et la compréhension se compte aussi en temps de jeu. Testé dans les deux cas.
+- **Retour visible** : pendant qu'on comprend le rite, des poussières argentées quittent le cercle et viennent au naturaliste, de plus en plus nombreuses ; le message « Vous avez compris » reste 8 s.
+- **Vent lisible** : une flèche sous l'heure, orientée selon la caméra, montre où le vent emporte l'odeur.
+- **Cerfs** : collisions avec les troncs ; modèle refait en formes continues (voxels de 5 cm, tronc elliptique, cou oblique, tête effilée, grandes oreilles, dos plus sombre, ventre et croupe pâles), aux proportions d'une biche.

@@ -55,10 +55,12 @@ pub enum Material {
     DeerCoat = 43,
     DeerPale = 44,
     Hoof = 45,
+    /// The darker coat along a deer's back and neck.
+    DeerDark = 46,
 }
 
 /// Number of materials, `Air` included: the size of the colour table.
-pub const MATERIAL_COUNT: usize = 46;
+pub const MATERIAL_COUNT: usize = 47;
 
 impl Material {
     /// Every material, in id order.
@@ -109,6 +111,7 @@ impl Material {
         Material::DeerCoat,
         Material::DeerPale,
         Material::Hoof,
+        Material::DeerDark,
     ];
 
     pub const fn id(self) -> u8 {

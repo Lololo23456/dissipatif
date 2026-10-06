@@ -473,7 +473,13 @@ impl App {
             }
             .to_owned(),
         };
-        self.message = Some((text, 2.5));
+        // What is understood stays long enough to be read.
+        let seconds = if matches!(event, Event::Learnt { .. }) {
+            8.0
+        } else {
+            2.5
+        };
+        self.message = Some((text, seconds));
     }
 
     /// Ambient levels a few times a second; at each footstep, its sound and its trace.
@@ -621,6 +627,33 @@ impl App {
                 out.push(render::ParticleInstance {
                     centre_size: [at.x, ground + 0.04, at.y, 0.035],
                     color: [silver[0], silver[1], silver[2], -1.2 * g * pulse],
+                });
+            }
+        }
+        // Understanding the rite: its light comes to the watcher, more and more of it.
+        let understanding = self.state.understanding(self.me);
+        if understanding > 0.0
+            && let Some(herd) = self.state.herd()
+        {
+            let silver = srgb_hex(0xd6e2ff);
+            let feet = self.state.body(self.me).shown_position();
+            let ring = herd.ring;
+            let from = Vec3::new(
+                ring.x,
+                self.world.surface_height(ring.x, ring.y) + 1.0,
+                ring.y,
+            );
+            for i in 0..(60.0 * understanding) as usize {
+                let phase = (time * 0.25 + i as f32 * 0.618) % 1.0;
+                let angle = i as f32 * 2.399 + time * 1.5;
+                // From the circle towards the naturalist, then winding round them.
+                let swirl = 0.25 + 0.5 * (1.0 - phase);
+                let target =
+                    feet + Vec3::new(angle.cos() * swirl, 0.6 + 0.8 * phase, angle.sin() * swirl);
+                let at = from.lerp(target, smooth(phase));
+                out.push(render::ParticleInstance {
+                    centre_size: [at.x, at.y, at.z, 0.015 + 0.02 * phase],
+                    color: [silver[0], silver[1], silver[2], -2.5 * phase],
                 });
             }
         }
@@ -849,6 +882,7 @@ impl ApplicationHandler for App {
                         self.me,
                         self.selected,
                         &self.clock,
+                        self.camera.yaw,
                         &self.message,
                         self.bag_open,
                         self.notebook_open
@@ -1165,6 +1199,7 @@ fn draw_hud(
     me: PlayerId,
     selected: usize,
     clock: &Clock,
+    camera_yaw: f32,
     message: &Option<(String, f32)>,
     bag_open: bool,
     notebook_page: Option<(usize, Option<&Sketch>)>,
@@ -1182,6 +1217,8 @@ fn draw_hud(
             hour: clock.hour(),
             day: clock.day(),
             moon_phase: clock.moon_phase(),
+            wind: wind::direction(clock.days()),
+            camera_yaw,
             message: message.as_ref().map(|(text, left)| (text.as_str(), *left)),
             bag_open,
             notebook_page,
@@ -1466,6 +1503,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.me,
         app.selected,
         &app.clock,
+        app.camera.yaw,
         &app.message,
         app.bag_open || options.bag,
         None,
@@ -1489,6 +1527,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
             app.me,
             app.selected,
             &app.clock,
+            app.camera.yaw,
             &app.message,
             false,
             Some((page, app.sketches.get(&page))),
@@ -1541,6 +1580,12 @@ fn main() {
     event_loop
         .run_app(&mut app)
         .expect("exécution de la boucle d'événements");
+}
+
+/// Smoothstep on [0, 1]: eases in and out.
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]

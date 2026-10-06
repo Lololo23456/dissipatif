@@ -356,6 +356,18 @@ impl GameState {
         }
     }
 
+    /// How far player `id` has understood the rite they are watching, 0 to 1 (0 when not
+    /// watching it).
+    pub fn understanding(&self, id: PlayerId) -> f32 {
+        let watching = self.herd.as_ref().is_some_and(|h| h.glow > 0.6);
+        match self.player(id) {
+            Some(p) if watching && !p.spells.contains(&Spell::DeerForm) => {
+                (p.witnessed / RITE_UNDERSTOOD).min(1.0)
+            }
+            _ => 0.0,
+        }
+    }
+
     /// Whether player `id` can pick up the notebook lying there.
     pub fn notebook_in_reach(&self, id: PlayerId) -> bool {
         match (self.notebook_lying, self.hands(id)) {
@@ -1290,7 +1302,10 @@ impl GameState {
                 .map(|(i, _)| crate::ecology::place(&self.plants[i])),
         );
         self.herd_events.clear();
-        herd.update(STEP, world, now, &observers, &fires, &mut self.herd_events);
+        // The deer live in game time: when the day runs faster, so do they (a step each).
+        for _ in 0..self.time_scale.round().max(1.0) as usize {
+            herd.update(STEP, world, now, &observers, &fires, &mut self.herd_events);
+        }
 
         let herd = &*herd;
         let light = deer::daylight(now.hour).max(crate::clock::moon_light(now.moon) * 0.8);
@@ -1326,7 +1341,7 @@ impl GameState {
             if watching {
                 entries.push(Entry::Rite);
                 if herd.glow > 0.6 {
-                    p.witnessed += STEP;
+                    p.witnessed += STEP * self.time_scale;
                 }
             }
             if p.witnessed >= RITE_UNDERSTOOD && !p.spells.contains(&Spell::DeerForm) {
@@ -1792,5 +1807,37 @@ mod tests {
         let dug = world.dig(at.x, at.y).unwrap();
         assert_eq!(dug.material, Material::Sand);
         assert!(world.surface_height(at.x, at.y) < top as f32);
+    }
+
+    /// Watching the full-moon rite from downwind, unseen, teaches the deer's shape: in real
+    /// time as when the day runs fast (the herd lives in game time).
+    #[test]
+    fn watching_the_rite_unseen_teaches_the_deer_shape_even_fast_forwarded() {
+        for fast in [false, true] {
+            let mut world = World::generate(WorldConfig::standard(1));
+            let spawn = crate::player::spawn_point(&world);
+            let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
+            deer::wear_ring(&mut world, ring, 1);
+            let mut state = GameState::new(&world);
+            state.add_herd(Herd::new(ring, cover, &world, 7));
+            let mut clock = crate::clock::Clock::on_day(3, 21.0);
+            let wind = crate::wind::direction(clock.days() + 0.1);
+            // Downwind of the circle, 15 cells off, standing still.
+            let at = ring + wind * 15.0;
+            let feet = Vec3::new(at.x, world.surface_height(at.x, at.y), at.y);
+            let me = state.join(feet);
+            state.time_scale = if fast { 60.0 } else { 1.0 };
+            clock.fast = fast;
+            let steps = if fast { 6 * 60 } else { 150 * 60 };
+            for _ in 0..steps {
+                clock.advance(STEP);
+                state.step(&world, &clock.conditions(0.0));
+            }
+            let p = state.player(me).expect("joined");
+            assert!(
+                p.spells.contains(&Spell::DeerForm),
+                "fast {fast}: not learnt"
+            );
+        }
     }
 }

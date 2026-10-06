@@ -12,10 +12,10 @@ use crate::deer::{Activity, Deer};
 use crate::naturalist::Grid;
 
 /// Size of a voxel of a deer, in world cells.
-const VOXEL: f32 = 0.07;
+const VOXEL: f32 = 0.05;
 const LOOK_SEED: u64 = 0xdee7;
 /// Leg length, in voxels: the body's underside stands this high.
-const LEG: f32 = 11.0;
+const LEG: f32 = 13.0;
 
 const BODY: usize = 0;
 const NECK: usize = 1;
@@ -152,10 +152,11 @@ impl DeerView {
             0.0
         };
         // Neck: leaning forward at rest, down to the grass, upright when alert.
+        // Neck: as built at rest, down to the grass, upright when alert.
         let neck = if d.head < 0.0 {
-            0.35 + 1.95 * grazing
+            1.7 * grazing
         } else {
-            0.35 - 0.6 * d.head
+            -0.35 * d.head
         };
         [
             place(BODY, Mat4::IDENTITY),
@@ -168,59 +169,120 @@ impl DeerView {
     }
 }
 
-/// Builds the parts. Units are voxels; the deer faces +z.
-fn parts() -> [Part; PARTS] {
-    // Body: a summer-red coat, a pale belly, the pale rump patch round a short tail.
-    let mut body = Grid::new(8, 8, 23);
-    body.fill([0, 8], [0, 8], [1, 23], Material::DeerCoat);
-    // Rounded: the long edges cut.
-    for z in 1..23 {
-        for (x, y) in [(0, 0), (7, 0), (0, 7), (7, 7)] {
-            body.set(x, y, z, Material::Air);
+/// A grid filled where `paint` says, voxel centres at `p - offset` (offset in voxels).
+fn sculpt(size: [usize; 3], offset: Vec3, paint: impl Fn(Vec3) -> Option<Material>) -> Grid {
+    let mut g = Grid::new(size[0], size[1], size[2]);
+    for z in 0..size[2] {
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                let p = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - offset;
+                if let Some(m) = paint(p) {
+                    g.set(x, y, z, m);
+                }
+            }
         }
     }
-    body.fill([2, 6], [0, 1], [4, 20], Material::DeerPale);
-    body.fill([2, 6], [2, 7], [1, 2], Material::DeerPale);
-    body.fill([3, 5], [5, 8], [0, 1], Material::DeerCoat);
-    // Neck and head, pivot at the base of the neck. The head points forward (+z).
-    let mut neck = Grid::new(6, 12, 11);
-    neck.fill([1, 5], [0, 7], [0, 4], Material::DeerCoat);
-    neck.fill([2, 4], [0, 6], [3, 4], Material::DeerPale);
-    neck.fill([1, 5], [6, 10], [1, 9], Material::DeerCoat);
-    neck.fill([2, 4], [6, 9], [9, 11], Material::DeerCoat);
-    neck.fill([2, 4], [6, 8], [10, 11], Material::Hoof);
-    neck.set(0, 8, 6, Material::Eye);
-    neck.set(5, 8, 6, Material::Eye);
-    // Large ears, the hind's.
-    neck.fill([0, 1], [9, 12], [2, 4], Material::DeerCoat);
-    neck.fill([5, 6], [9, 12], [2, 4], Material::DeerCoat);
-    // Legs: slender, darker hooves. Pivot at the top.
+    g
+}
+
+/// Distance from `p` to the segment [a, b], and how far along it (0 to 1) the nearest point is.
+fn to_segment(p: Vec3, a: Vec3, b: Vec3) -> (f32, f32) {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+    ((a + ab * t).distance(p), t)
+}
+
+/// Builds the parts. Units are voxels; the deer faces +z.
+fn parts() -> [Part; PARTS] {
+    // Body: ellipses along its length, deep at the chest, rounder at the rump; a darker back,
+    // a pale belly and the pale rump patch round a short tail. Centred on x, rump at z = 0.
+    let body = sculpt([10, 13, 25], Vec3::new(5.0, 0.0, 0.0), |p| {
+        let t = (p.z / 25.0).clamp(0.0, 1.0);
+        let half_height = 4.0 + 2.0 * (std::f32::consts::PI * (0.1 + 0.85 * t)).sin();
+        let half_width = 0.7 * half_height;
+        let centre = 6.6 - 0.6 * t;
+        let (u, v) = (p.x / half_width, (p.y - centre) / half_height);
+        if u * u + v * v > 1.0 {
+            // The tail: short, held down over the rump patch.
+            let tail = p.z < 1.0 && p.x.abs() < 1.0 && (centre..centre + 3.0).contains(&p.y);
+            return tail.then_some(Material::DeerDark);
+        }
+        Some(if p.z < 1.5 && v > -0.5 && v < 0.7 {
+            Material::DeerPale
+        } else if v > 0.8 {
+            Material::DeerDark
+        } else if v < -0.72 {
+            Material::DeerPale
+        } else {
+            Material::DeerCoat
+        })
+    });
+    // Neck and head, built leaning forward; pivot at the base of the neck.
+    let neck_top = Vec3::new(0.0, 11.0, 7.0);
+    let muzzle = Vec3::new(0.0, 9.0, 15.0);
+    let neck = sculpt([9, 18, 20], Vec3::new(4.5, 0.0, 3.0), |p| {
+        let (d, t) = to_segment(p, Vec3::ZERO, neck_top);
+        if d < 2.3 - 0.7 * t {
+            return Some(if p.y > 2.0 && p.z < neck_top.z * p.y / neck_top.y - 1.0 {
+                Material::DeerDark
+            } else {
+                Material::DeerCoat
+            });
+        }
+        let (d, t) = to_segment(p, neck_top + Vec3::new(0.0, 0.5, -1.0), muzzle);
+        if d < 2.1 - 1.1 * t {
+            if t > 0.92 {
+                return Some(Material::Hoof);
+            }
+            if t > 0.3 && t < 0.42 && p.x.abs() > 1.2 && p.y > 10.0 {
+                return Some(Material::Eye);
+            }
+            return Some(Material::DeerCoat);
+        }
+        // Large ears, the hind's, set back and spread.
+        for side in [-1.0f32, 1.0] {
+            let base = Vec3::new(1.6 * side, 12.0, 6.0);
+            let tip = Vec3::new(3.6 * side, 15.5, 5.0);
+            let (d, t) = to_segment(p, base, tip);
+            if d < 1.0 - 0.3 * t {
+                return Some(Material::DeerCoat);
+            }
+        }
+        None
+    });
+    // Legs: a thigh, then a slender shank and a dark hoof. Pivot at the top.
     let leg = || {
-        let mut g = Grid::new(2, LEG as usize, 2);
-        g.fill([0, 2], [0, LEG as usize], [0, 2], Material::DeerCoat);
-        g.fill([0, 2], [0, 1], [0, 2], Material::Hoof);
-        g
+        sculpt([4, LEG as usize + 2, 4], Vec3::ZERO, |p| {
+            let thigh = p.y > LEG - 3.0;
+            let reach = if thigh { 1.6 } else { 1.0 };
+            let near = (p.x - 2.0).abs() < reach && (p.z - 2.0).abs() < reach;
+            near.then_some(if p.y < 1.0 {
+                Material::Hoof
+            } else {
+                Material::DeerCoat
+            })
+        })
     };
     let leg_part = |x: f32, z: f32| Part {
         grid: leg(),
-        pivot: [1.0, LEG, 1.0],
-        attach: Vec3::new(x, LEG, z),
+        pivot: [2.0, LEG + 2.0, 2.0],
+        attach: Vec3::new(x, LEG + 1.0, z),
     };
     [
         Part {
             grid: body,
-            pivot: [4.0, 0.0, 11.5],
-            attach: Vec3::new(0.0, LEG, 0.0),
+            pivot: [5.0, 0.0, 12.5],
+            attach: Vec3::new(0.0, LEG - 1.0, 0.0),
         },
         Part {
             grid: neck,
-            pivot: [3.0, 0.0, 2.0],
-            attach: Vec3::new(0.0, LEG + 4.0, 9.5),
+            pivot: [4.5, 0.0, 3.0],
+            attach: Vec3::new(0.0, LEG + 7.0, 9.0),
         },
-        leg_part(-2.3, 8.5),
-        leg_part(2.3, 8.5),
-        leg_part(-2.3, -8.0),
-        leg_part(2.3, -8.0),
+        leg_part(-2.2, 8.0),
+        leg_part(2.2, 8.0),
+        leg_part(-2.2, -8.5),
+        leg_part(2.2, -8.5),
     ]
 }
 
@@ -247,15 +309,15 @@ mod tests {
         let t = view.transforms(&standing());
         let hoof = t[FRONT_LEFT] * glam::Vec4::new(0.0, -LEG * VOXEL, 0.0, 1.0);
         assert!((hoof.y - 5.0).abs() < 0.08, "{hoof:?}");
-        let ear = t[NECK] * glam::Vec4::new(0.0, 12.0 * VOXEL, 3.0 * VOXEL, 1.0);
+        let ear = t[NECK] * glam::Vec4::new(3.6 * VOXEL, 15.5 * VOXEL, 5.0 * VOXEL, 1.0);
         let height = ear.y - 5.0;
-        assert!((1.6..2.1).contains(&height), "{height}");
+        assert!((1.5..2.0).contains(&height), "{height}");
         // Grazing, the muzzle comes near the grass.
         let grazing = view.transforms(&DeerPose {
             head: -1.0,
             ..standing()
         });
-        let muzzle = grazing[NECK] * glam::Vec4::new(0.0, 7.0 * VOXEL, 10.0 * VOXEL, 1.0);
+        let muzzle = grazing[NECK] * glam::Vec4::new(0.0, 9.0 * VOXEL, 15.0 * VOXEL, 1.0);
         assert!(muzzle.y - 5.0 < 0.5, "{muzzle:?}");
     }
 }

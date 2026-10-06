@@ -124,8 +124,8 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
         srgb_hex(0x9a5c36), // 43 deer coat, summer red (45)
         srgb_hex(0xd8c7a2), // 44 deer rump and belly (81)
         srgb_hex(0x2b221c), // 45 hooves, muzzle (14)
+        srgb_hex(0x6e4128), // 46 deer back, darker (32)
         // Free slots.
-        srgb_hex(0xff00ff),
         srgb_hex(0xff00ff),
     ]
 }
