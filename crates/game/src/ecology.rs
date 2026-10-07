@@ -189,6 +189,10 @@ pub fn species(plant: Plant) -> Option<Species> {
         Plant::Cactus => (
             Shrub, 0.08, 200.0, 0.03, 3.0, 0.05, 0.15, 1.0, 0.0, 1.0, 0.0,
         ),
+        // Reeds stand in the marsh's water, which no other plant of the model can live in
+        // (see `Habitat::suitability`): they stay as the marsh was dug, neither growing,
+        // spreading nor grazed.
+        Plant::Reed => return None,
         _ => return None,
     }))
 }

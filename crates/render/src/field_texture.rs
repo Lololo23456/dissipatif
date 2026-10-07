@@ -59,6 +59,44 @@ impl FieldTexture {
             extent(self.dims),
         );
     }
+
+    /// Copies `region`, a packed box of texels, into the texture with its first texel at `at`
+    /// (x, y, z): only what changed is sent (a cell of the ground, the marsh's grid in its
+    /// corner), not the whole texture. The box must fit inside the texture.
+    pub fn upload_region(&self, queue: &wgpu::Queue, at: [usize; 3], region: &Field3) {
+        let d = region.dims;
+        assert!(
+            at[0] + d.nx <= self.dims.nx
+                && at[1] + d.ny <= self.dims.ny
+                && at[2] + d.nz <= self.dims.nz,
+            "region {d:?} at {at:?} overruns the texture {:?}",
+            self.dims
+        );
+        if d.is_empty() {
+            return;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: at[0] as u32,
+                    y: at[1] as u32,
+                    z: at[2] as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&region.data),
+            // Rows of the box are packed: no padding between them (unlike buffer copies,
+            // `write_texture` asks for no alignment of rows).
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(d.nx as u32 * 4),
+                rows_per_image: Some(d.ny as u32),
+            },
+            extent(d),
+        );
+    }
 }
 
 fn extent(dims: Dims) -> wgpu::Extent3d {

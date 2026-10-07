@@ -166,6 +166,16 @@ impl Volume {
         }
     }
 
+    /// Copies `region`, a packed box of the base field, at `at`: a few cells changed (the
+    /// ground worn or grown over, a piece built). The base field must have been uploaded.
+    pub(crate) fn upload_base_region(&self, queue: &wgpu::Queue, at: [usize; 3], region: &Field3) {
+        let fields = self
+            .fields
+            .as_ref()
+            .expect("upload the base field before a region of it");
+        fields.base.upload_region(queue, at, region);
+    }
+
     /// Copies the life field. Must have the dimensions of the base field, uploaded before.
     pub(crate) fn upload_life(&self, queue: &wgpu::Queue, field: &Field3) {
         let fields = self

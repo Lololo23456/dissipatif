@@ -3,6 +3,7 @@
 //! Shaders WGSL dans `crates/render/shaders/`.
 
 pub mod camera;
+pub mod effects;
 pub mod field_texture;
 pub mod gpu;
 pub mod marks;
@@ -20,6 +21,7 @@ pub mod volume;
 pub mod water_mesher;
 
 pub use camera::OrbitCamera;
+pub use effects::EffectsUniform;
 pub use gpu::Gpu;
 pub use models::{ModelInstance, PartInstance};
 pub use particles::ParticleInstance;

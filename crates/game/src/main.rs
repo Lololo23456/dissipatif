@@ -1,6 +1,7 @@
 //! Binaire jouable. Un naturaliste se promène dans un monde procédural (relief, mer, plages,
-//! déserts, forêts, montagnes, rivières, lacs), suivi par la caméra plongeante. Le feuillage
-//! ondule au vent, du pollen flotte dans la lumière, des feuilles tombent.
+//! déserts, forêts, montagnes, rivières, lacs, un marais près de la prairie des cerfs), suivi
+//! par la caméra plongeante. Le feuillage ondule au vent, du pollen flotte dans la lumière, des
+//! feuilles tombent.
 //! Commandes (touches par position, ZQSD sur un clavier AZERTY) : Z Q S D pour marcher, Maj
 //! pour courir, Espace pour sauter. Souris : clic gauche pose ce qu'on tient là où pointe le
 //! curseur, clic droit le reprend (ou cueille), glisser avec le bouton droit tourne la
@@ -10,7 +11,8 @@
 //! V lance le sort connu (un sort perdu avec son anomalie ne répond plus).
 //! `--seed N` choisit le monde ; `--capture fichier.png` enregistre une vue sans fenêtre (ses
 //! options sont dans `Options::from_args`, dont `--lost deer` : le rituel meurt, sort perdu) ;
-//! `DISSIPATIF_DEBUG_ANOMALIES=1` raconte la vie des anomalies.
+//! `--marsh` tourne la vue vers le marais ; `DISSIPATIF_DEBUG_ANOMALIES=1` raconte la vie des
+//! anomalies.
 
 mod ambient;
 mod anomaly;
@@ -58,7 +60,7 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, Window
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
-use world::{World, WorldConfig};
+use world::{Marsh, World, WorldConfig};
 
 use ambient::Ambient;
 use audio::Audio;
@@ -104,6 +106,8 @@ struct Graphics {
 struct App {
     graphics: Option<Graphics>,
     world: World,
+    /// The marsh dug near the deer's meadow (given again by the generation, never saved).
+    marsh: Option<Marsh>,
     data: SceneData,
     ambient: Ambient,
     fauna: Fauna,
@@ -187,6 +191,41 @@ const AUTOSAVE_SECONDS: f32 = 120.0;
 /// What a save holds beyond the world: the game state, the time, the notebook's sketches.
 type Saved = (GameState, Clock, HashMap<usize, Sketch>);
 
+/// A world as the game makes it from its seed: generated, the deer's meadow found and the
+/// circle their rite has worn into it over the years, the marsh dug a walk away. The same every
+/// time: a saved game is laid over it.
+struct Generated {
+    world: World,
+    /// Where the naturalist starts a new game.
+    spawn: Vec3,
+    /// The deer's circle and the wood's edge where they lie up, if the world has a meadow.
+    home: Option<(glam::Vec2, glam::Vec2)>,
+    marsh: Option<Marsh>,
+}
+
+fn generate(config: WorldConfig) -> Generated {
+    let seed = config.seed;
+    let mut world = World::generate(config);
+    let spawn = player::spawn_point(&world);
+    let start = glam::Vec2::new(spawn.x, spawn.z);
+    let home = deer::home(&world, start);
+    if let Some((ring, _)) = home {
+        deer::wear_ring(&mut world, ring, seed);
+    }
+    // The marsh, a walk from the meadow (or from the start, in a world without one): never
+    // where the naturalist starts and finds the notebook, nor where the herd lies up.
+    let near = home.map_or(start, |(ring, _)| ring);
+    let mut dry = vec![start.to_array()];
+    dry.extend(home.map(|(_, cover)| cover.to_array()));
+    let marsh = world.make_marsh_away_from(near.to_array(), &dry, seed);
+    Generated {
+        world,
+        spawn,
+        home,
+        marsh,
+    }
+}
+
 /// Reads the save of world `seed`, if there is one, restoring `world` from it.
 fn load_save(seed: u64, world: &mut World) -> save::Result<Option<Saved>> {
     let Ok(bytes) = std::fs::read(save::path(seed)) else {
@@ -210,24 +249,19 @@ impl App {
     /// one.
     fn new(seed: u64, resume: bool) -> Self {
         let start = Instant::now();
-        let generate = || {
-            let mut world = World::generate(WorldConfig::standard(seed));
-            // The deer's meadow, and the circle their rite has worn into it over the years.
-            let spawn = player::spawn_point(&world);
-            let home = deer::home(&world, glam::Vec2::new(spawn.x, spawn.z));
-            if let Some((ring, _)) = home {
-                deer::wear_ring(&mut world, ring, seed);
-            }
-            (world, spawn, home)
-        };
-        let (mut world, spawn, home) = generate();
+        let Generated {
+            mut world,
+            spawn,
+            home,
+            marsh,
+        } = generate(WorldConfig::standard(seed));
         let saved = if resume {
             match load_save(seed, &mut world) {
                 Ok(saved) => saved,
                 Err(message) => {
                     eprintln!("Sauvegarde illisible ({message}) : nouvelle partie.");
                     // The world may have been half restored: start again from the seed.
-                    world = generate().0;
+                    world = generate(WorldConfig::standard(seed)).world;
                     None
                 }
             }
@@ -235,7 +269,7 @@ impl App {
             None
         };
         let generated = start.elapsed();
-        let mut data = SceneData::build(&world);
+        let mut data = SceneData::build(&world, marsh.as_ref());
         println!(
             "Monde {seed} : généré en {:.0} ms, préparé en {:.0} ms ({} faces, {} faces d'eau, \
              {} plantes, {} éléments au sol, {} faces de modèles)",
@@ -249,7 +283,7 @@ impl App {
         );
         let ambient = Ambient::new(&world, seed ^ AMBIENT_SEED);
         let resumed = saved.is_some();
-        let (state, clock, sketches) = match saved {
+        let (mut state, clock, sketches) = match saved {
             Some(saved) => saved,
             None => {
                 let mut state = GameState::new(&world);
@@ -273,6 +307,8 @@ impl App {
                 (state, Clock::new(clock::START_HOUR), HashMap::new())
             }
         };
+        // The marsh is not saved: the game is told where it is again.
+        state.set_marsh(marsh.clone());
         // The local player is the first.
         let me: PlayerId = 0;
         let feet = state.body(me).shown_position();
@@ -298,6 +334,7 @@ impl App {
         Self {
             graphics: None,
             world,
+            marsh,
             data,
             ambient,
             fauna: Fauna::new(seed ^ 0xfa_0a),
@@ -1723,13 +1760,15 @@ struct CaptureOptions {
     lost: Option<anomaly::Kind>,
     /// Snow lying on the ground (and ice on the water), 0 to 1.
     snow: f32,
+    /// Looks at the marsh, the naturalist standing on its bank.
+    marsh: bool,
 }
 
 impl Options {
     /// `[--seed N] [--capture file.png [--size WxH] [--yaw DEG] [--pitch DEG] [--zoom F]
     /// [--at X,Z] [--time SECONDS] [--walk SECONDS] [--hour H] [--day N] [--weather rain]
     /// [--start X,Z] [--pick N] [--demo-fire] [--bag] [--pose GESTE] [--notebook] [--deer]
-    /// [--lost deer] [--snow F]]`.
+    /// [--lost deer] [--snow F] [--marsh]]`.
     fn from_args(args: &[String]) -> Result<Self, String> {
         let value = |name: &str| -> Option<&str> {
             args.iter()
@@ -1795,12 +1834,41 @@ impl Options {
                         Some(other) => return Err(format!("--lost {other} : anomalie inconnue")),
                     },
                     snow: number("--snow")?.unwrap_or(0.0),
+                    marsh: args.iter().any(|a| a == "--marsh"),
                 })
             }
             None => None,
         };
         Ok(Self { seed, capture })
     }
+}
+
+/// Where to stand to look at the marsh from a camera turned by `yaw`: dry ground on its bank,
+/// near its middle and on the camera's side (in the foreground, not hiding the water), as a
+/// point (x, z) in the world.
+fn marsh_bank(world: &World, marsh: &Marsh, yaw: f32) -> [f32; 2] {
+    let reach = marsh.size[0].max(marsh.size[1]) as i64;
+    let (cx, cz) = (
+        marsh.centre[0].floor() as i64,
+        marsh.centre[1].floor() as i64,
+    );
+    // Towards the eye, on the ground (see `OrbitCamera::eye`).
+    let (ex, ez) = yaw.sin_cos();
+    let mut best: Option<(f32, [f32; 2])> = None;
+    for dz in -reach..=reach {
+        for dx in -reach..=reach {
+            let (x, z) = world.column(cx + dx, cz + dz);
+            if marsh.contains(x, z) || world.water_level(x, z).is_some() {
+                continue;
+            }
+            let (fx, fz) = (dx as f32, dz as f32);
+            let score = fx * fx + fz * fz - 3.0 * (fx * ex + fz * ez);
+            if best.is_none_or(|(s, _)| score < s) {
+                best = Some((score, [x as f32 + 0.5, z as f32 + 0.5]));
+            }
+        }
+    }
+    best.map_or(marsh.centre, |(_, at)| at)
 }
 
 /// Generates the world, renders one frame offscreen, saves it as PNG.
@@ -1817,7 +1885,20 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
             spell: notebook::Spell::DeerForm,
         });
     }
-    if let Some((x, z)) = options.start {
+    // `--marsh`: the naturalist on the bank nearest the middle of the marsh (unless `--start`
+    // says where), the camera on the water.
+    let yaw = options.yaw.map_or(app.rig.camera.yaw, f32::to_radians);
+    let marsh_view = app.marsh.as_ref().filter(|_| options.marsh).map(|marsh| {
+        let bank = marsh_bank(&app.world, marsh, yaw);
+        (marsh.centre, bank)
+    });
+    if marsh_view.is_none() && options.marsh {
+        eprintln!("Ce monde n'a pas de marais.");
+    }
+    let start = options
+        .start
+        .or(marsh_view.map(|(_, bank)| (bank[0], bank[1])));
+    if let Some((x, z)) = start {
         let dims = app.world.dims();
         let (xi, zi) = (
             x.clamp(0.0, dims.nx as f32 - 1.0),
@@ -1914,8 +1995,25 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     if options.snow > 0.0 {
         app.weather.set_cover(options.snow, options.snow);
     }
-    // `--at` overrides the follow camera.
-    if let Some((x, z)) = options.at {
+    if std::env::var_os("DISSIPATIF_DEBUG_ANOMALIES").is_some() {
+        match app.state.marsh() {
+            Some(m) => eprintln!(
+                "marais : centre ({:.1}, {:.1}), niveau {:.2}, {} cases d'eau, boîte {:?} + {:?}",
+                m.centre[0],
+                m.centre[1],
+                m.level,
+                m.cells.len(),
+                m.origin,
+                m.size
+            ),
+            None => eprintln!("marais : aucun"),
+        }
+    }
+    // `--at` overrides the follow camera; `--marsh` looks at the middle of the water.
+    let look = options
+        .at
+        .or(marsh_view.map(|(centre, _)| (centre[0], centre[1])));
+    if let Some((x, z)) = look {
         app.rig.camera.target = Vec3::new(x, app.rig.camera.target.y, z);
     }
     let time = frames as f32 * CAPTURE_STEP;
@@ -2067,5 +2165,94 @@ mod tests {
         let offset = glam::Vec2::new(hit.x - feet.x, hit.z - feet.z).length();
         assert!(offset < 3.0, "pointed {offset} cells from the feet");
         assert!((hit.y - feet.y).abs() < 2.5);
+    }
+
+    /// Whether the column under point `at` (x, z) is dry.
+    fn dry(world: &World, at: glam::Vec2) -> bool {
+        let (x, z) = world.wrap(at.x, at.y);
+        world.water_level(x as usize, z as usize).is_none()
+    }
+
+    #[test]
+    fn every_world_has_a_meadow_and_a_marsh_a_walk_away_that_floods_nothing_it_should_not() {
+        for seed in 1..=6 {
+            let Generated {
+                world,
+                spawn,
+                home,
+                marsh,
+            } = generate(WorldConfig::small(seed));
+            let (ring, cover) = home.unwrap_or_else(|| panic!("world {seed}: no meadow"));
+            let marsh = marsh.unwrap_or_else(|| panic!("world {seed}: no marsh"));
+            // The circle and the meadow around it stay as the deer found them: dry (the
+            // meadow is chosen with no water within five cells).
+            for dz in -5..=5 {
+                for dx in -5..=5 {
+                    let at = ring + glam::Vec2::new(dx as f32, dz as f32);
+                    assert!(dry(&world, at), "world {seed}: water on the meadow at {at}");
+                }
+            }
+            for (x, z, _) in deer::ring_cells(ring, seed) {
+                assert!(!marsh.contains(x, z), "world {seed}: the circle is flooded");
+            }
+            // Where one starts, where the notebook lies, where the herd lies up.
+            let start = glam::Vec2::new(spawn.x, spawn.z);
+            let book = start + glam::Vec2::new(0.0, 1.4);
+            for (place, at) in [("start", start), ("notebook", book), ("cover", cover)] {
+                assert!(
+                    dry(&world, at),
+                    "world {seed}: the {place} at {at} is flooded"
+                );
+            }
+            let [x, z] = world.nearest(ring.to_array(), marsh.centre);
+            let distance = ring.distance(glam::Vec2::new(x, z));
+            assert!(
+                (20.0..=90.0).contains(&distance),
+                "world {seed}: the marsh is {distance} cells from the circle"
+            );
+        }
+    }
+
+    /// Where the marsh lies in the worlds of the game: `cargo test --release -p game
+    /// marsh_census -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "relevé : cargo test --release -p game marsh_census -- --ignored --nocapture"]
+    fn marsh_census() {
+        for seed in 1..=6 {
+            let started = std::time::Instant::now();
+            let Generated {
+                world,
+                spawn,
+                home,
+                marsh,
+            } = generate(WorldConfig::standard(seed));
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            let Some((ring, _)) = home else {
+                eprintln!("graine {seed} : pas de prairie");
+                continue;
+            };
+            let Some(m) = marsh else {
+                eprintln!("graine {seed} : pas de marais (cercle {ring})");
+                continue;
+            };
+            let [x, z] = world.nearest(ring.to_array(), m.centre);
+            let (cx, cz) = (m.centre[0] as usize, m.centre[1] as usize);
+            eprintln!(
+                "graine {seed} : départ ({:.0}, {:.0}), cercle ({:.0}, {:.0}), marais ({:.0}, \
+                 {:.0}) à {:.0} cases, {:?}, {} cases d'eau, boîte {:?}, niveau {:.2} ; \
+                 monde fait en {elapsed:.0} ms",
+                spawn.x,
+                spawn.z,
+                ring.x,
+                ring.y,
+                m.centre[0],
+                m.centre[1],
+                ring.distance(glam::Vec2::new(x, z)),
+                world.biome(cx, cz),
+                m.cells.len(),
+                m.size,
+                m.level,
+            );
+        }
     }
 }
