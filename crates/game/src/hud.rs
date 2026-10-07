@@ -5,6 +5,7 @@
 use render::palette::srgb_hex;
 use render::ui::{LINE, Ui};
 
+use crate::anomaly::SpellState;
 use crate::items::{MAX_MASS, Matter, SLOTS};
 use crate::needs::Needs;
 use crate::notebook::{Notebook, wind_words};
@@ -300,8 +301,14 @@ pub fn build(ui: &mut Ui, input: &HudInput) {
         hy += LINE * s;
     }
     if !deer {
-        for spell in &me.spells {
-            ui.text_shadowed(10.0 * s, hy, &format!("V  {}", spell.name()), s, faint);
+        // A spell gone out with its anomaly stays listed, dimmer, and says so in words.
+        let out = rgba(0xf4ead8, 0.3);
+        for &spell in &me.spells {
+            let (line, color) = match input.state.spell_state(input.me, spell) {
+                SpellState::Lost => (format!("   {} : ne répond plus", spell.name()), out),
+                _ => (format!("V  {}", spell.name()), faint),
+            };
+            ui.text_shadowed(10.0 * s, hy, &line, s, color);
             hy += LINE * s;
         }
     }

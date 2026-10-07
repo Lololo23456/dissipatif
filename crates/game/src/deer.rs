@@ -1,5 +1,8 @@
 //! Red deer (Cervus elaphus): a herd of hinds led by an old hind, living as real deer do, and
-//! the anomaly they keep: on full-moon nights they walk in a circle in their meadow.
+//! the anomaly they carry: on full-moon nights they walk in a circle in their meadow. The rite
+//! is not theirs to decide: whether it is kept tonight, its omens, and how strongly, are the
+//! anomaly's (see `anomaly.rs`), which lives only while the meadow and the herd are well. The
+//! herd reads its `Order` each step and carries it out.
 //!
 //! Real behaviour, outside the anomaly, after field studies:
 //! - Crepuscular: they graze at dawn and dusk and through part of the night, and lie up in
@@ -22,6 +25,7 @@ use glam::{Vec2, Vec3};
 use sim::rng::SplitMix64;
 use world::{Biome, Material, World};
 
+use crate::anomaly::Order;
 use crate::state::Conditions;
 
 /// Hinds and calves in the herd.
@@ -60,11 +64,17 @@ const RING_TURN: f32 = 20.0;
 /// Seconds for the light of the rite to gather once all stand in their places.
 const GATHERING: f32 = 4.0;
 /// The incantation's movements, as shares of it: gathered and still, bowing together (a stamp
-/// running round the circle), the procession, heads raised to the moon, the end.
+/// running round the circle), the procession, heads raised to the moon (its height), the end.
 const BOWING: f32 = 0.12;
 const PROCESSION: f32 = 0.45;
-const TO_THE_MOON: f32 = 0.8;
+pub const TO_THE_MOON: f32 = 0.8;
 const ENDING: f32 = 0.97;
+/// From dusk, when the herd comes to its meadow, the night of the rite is watched over: a fright
+/// then wounds the anomaly (see `vigil_hours`).
+const VIGIL_HOUR: f32 = 20.0;
+/// The light of the rite never rises above this plus the anomaly's strength: a weak rite
+/// glows dimly.
+const GLOW_FLOOR: f32 = 0.4;
 
 /// What a deer is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +245,8 @@ pub struct Herd {
     pub rite: Option<f32>,
     /// Where they graze: their meadow, or elsewhere when it is grazed out.
     pasture: Vec2,
+    /// What the anomaly asks of them now (set each step before they move: not saved).
+    order: Order,
     /// Which deer were grazing when the grazers were last asked for (see `grazers`).
     grazing: Vec<usize>,
     /// The stag that joins the hinds for the rut, while it lasts.
@@ -257,15 +269,36 @@ pub fn daylight(hour: f32) -> f32 {
     1.0 - render::sky::sky(hour).night
 }
 
-/// The full moon's night, from the gathering to the end of the incantation.
-pub fn ritual_time(now: &Conditions) -> bool {
-    moonlight(now.moon) >= 0.93 && (GATHER_HOUR..RITE_HOUR + RITE_HOURS).contains(&now.hour)
+/// The full moon's night: the rite is due (whether it is kept is the anomaly's to say).
+pub fn rite_night(now: &Conditions) -> bool {
+    moonlight(now.moon) >= 0.93
 }
 
-/// How far into the incantation (0 to 1), while it lasts.
-pub fn rite_progress(now: &Conditions) -> Option<f32> {
-    let u = (now.hour - RITE_HOUR) / RITE_HOURS;
-    (moonlight(now.moon) >= 0.93 && (0.0..1.0).contains(&u)).then_some(u)
+/// The rite's hours, from the gathering to the end of the incantation.
+pub fn rite_hours(hour: f32) -> bool {
+    (GATHER_HOUR..RITE_HOUR + RITE_HOURS).contains(&hour)
+}
+
+/// How far into the incantation (0 to 1), in its hours.
+fn incantation(hour: f32) -> Option<f32> {
+    let u = (hour - RITE_HOUR) / RITE_HOURS;
+    (0.0..1.0).contains(&u).then_some(u)
+}
+
+/// The nights before and after the full moon: a gibbous moon, when the omens may show.
+pub fn omen_night(now: &Conditions) -> bool {
+    (0.55..0.93).contains(&moonlight(now.moon))
+}
+
+/// The omens' hours: around midnight.
+fn omen_hours(hour: f32) -> bool {
+    !(1.0..22.0).contains(&hour)
+}
+
+/// The hours a night of the rite (or of its omens) is watched over: from dusk to the end of the
+/// omens.
+pub fn vigil_hours(hour: f32) -> bool {
+    hour >= VIGIL_HOUR || omen_hours(hour)
 }
 
 /// Head carriage of the deer during the incantation at `u` (share), `seconds` into it.
@@ -283,12 +316,6 @@ fn incantation_head(u: f32, seconds: f32) -> f32 {
     } else {
         0.8
     }
-}
-
-/// The nights before and after: a gibbous moon, around midnight.
-pub fn foretelling_time(now: &Conditions) -> bool {
-    let light = moonlight(now.moon);
-    (0.55..0.93).contains(&light) && (now.hour >= 22.0 || now.hour < 1.0)
 }
 
 impl Herd {
@@ -319,12 +346,31 @@ impl Herd {
             glow: 0.0,
             rite: None,
             pasture: ring,
+            order: Order::NONE,
             grazing: Vec::new(),
             stag: None,
             bell_in: BELL_EVERY,
             shed_year: -1,
             last_rite: 0.0,
         }
+    }
+
+    /// What the anomaly asks of the herd now: the rite tonight or not, its omens, how strongly.
+    pub fn set_order(&mut self, order: Order) {
+        self.order = order;
+    }
+
+    pub fn order(&self) -> Order {
+        self.order
+    }
+
+    /// Whether a deer is stamping, barking or fleeing now: the herd has taken fright.
+    pub fn startled(&self) -> bool {
+        self.flight.is_some()
+            || self
+                .deer
+                .iter()
+                .any(|d| matches!(d.activity, Activity::Alarmed | Activity::Fleeing))
     }
 
     /// Where the herd is, roughly: the lead hind.
@@ -352,10 +398,11 @@ impl Herd {
         if now.days < self.wary_until {
             return Mode::Graze(self.refuge);
         }
-        if ritual_time(now) {
+        // The anomaly's night, at its hours; its omens on the nights around.
+        if self.order.tonight && rite_hours(now.hour) {
             return Mode::Ritual;
         }
-        if foretelling_time(now) {
+        if self.order.omens && omen_hours(now.hour) {
             return Mode::Foretelling;
         }
         let pasture = self.pasture;
@@ -535,8 +582,11 @@ impl Herd {
         }
         self.sense(dt, world, now, observers, fires, events);
         let mode = self.mode(now);
-        let rite = rite_progress(now).filter(|_| mode == Mode::Ritual);
+        let rite = incantation(now.hour).filter(|_| mode == Mode::Ritual);
         self.rite = rite;
+        // A weak anomaly gathers fewer of them on the circle; the others graze close by.
+        let n = self.deer.len();
+        let circling = ((self.order.strength * n as f32).ceil() as usize).min(n);
         let seconds = rite.map_or(0.0, |u| u * RITE_HOURS * crate::clock::DAY_SECONDS / 24.0);
         // The circle turns in the procession (and for the lone hind); otherwise they stand.
         let turning = match mode {
@@ -548,7 +598,13 @@ impl Herd {
             self.turn =
                 (self.turn + dt * std::f32::consts::TAU / RING_TURN) % std::f32::consts::TAU;
         }
-        let n = self.deer.len();
+        // How fast a place on the turning circle goes round (cells per second): the hinds walk
+        // with it, and keep their places (and the light of the rite) through the procession.
+        let pace = if turning {
+            RING_RADIUS * std::f32::consts::TAU / RING_TURN
+        } else {
+            0.0
+        };
         // Fleeing: everyone away from the source, then a stop to look back.
         if let Some((from, left, cause)) = self.flight {
             let left = left - dt;
@@ -571,7 +627,7 @@ impl Herd {
             } else {
                 None
             };
-            let slot = self.ring_slot(i, n);
+            let slot = self.ring_slot(i, circling.max(1));
             let rng = &mut self.rng;
             let d = &mut self.deer[i];
             d.timer -= dt;
@@ -620,11 +676,12 @@ impl Herd {
                         // Turning half the time, grazing the rest: an odd habit, not yet a rite.
                         let turning = (self.turn / std::f32::consts::TAU * 2.0).fract() < 0.6;
                         if i == 0 && turning {
-                            circle(here, slot)
+                            circle(here, slot, pace)
                         } else {
                             graze(d, rng, self.ring, dt)
                         }
                     }
+                    Mode::Ritual if i >= circling => graze(d, rng, self.ring, dt),
                     Mode::Ritual => {
                         if here.distance(slot) < 0.8 {
                             in_place += 1;
@@ -634,12 +691,12 @@ impl Herd {
                         let beat = seconds * 2.0;
                         if rite.is_some_and(|u| (BOWING..PROCESSION).contains(&u))
                             && beat.fract() < dt * 2.0
-                            && (beat as usize) % n == i
+                            && (beat as usize) % circling == i
                         {
                             d.stamp = 0.6;
                             events.push(HerdEvent::Stamp { at: here });
                         }
-                        circle(here, slot)
+                        circle(here, slot, pace)
                     }
                 }
             };
@@ -682,12 +739,19 @@ impl Herd {
         if self.glow > 0.5 {
             self.last_rite = now.days;
         }
-        // The rite gathers while (nearly) all walk their places.
-        let gathering = mode == Mode::Ritual && self.flight.is_none() && in_place + 1 >= n;
-        self.glow = if gathering {
-            (self.glow + dt / GATHERING).min(1.0)
+        // The rite gathers while (nearly) all those called walk their places (one at least),
+        // up to what the anomaly's strength allows.
+        let gathering =
+            mode == Mode::Ritual && self.flight.is_none() && in_place + 1 >= circling.max(2);
+        let target = if gathering {
+            (GLOW_FLOOR + self.order.strength).min(1.0)
         } else {
-            (self.glow - dt / 5.0).max(0.0)
+            0.0
+        };
+        self.glow = if self.glow < target {
+            (self.glow + dt / GATHERING).min(target)
+        } else {
+            (self.glow - dt / 5.0).max(target)
         };
     }
 
@@ -865,14 +929,15 @@ fn graze(
     (Activity::Grazing, d.goal, speed, false)
 }
 
-/// Walking the circle: to its place on the ring, at a slow, even pace.
-fn circle(here: Vec2, slot: Vec2) -> (Activity, Vec2, f32, bool) {
+/// Walking the circle: to its place on the ring, at a slow, even pace; while the circle turns,
+/// at its pace (`pace`, cells per second) and a little more to keep to its place.
+fn circle(here: Vec2, slot: Vec2, pace: f32) -> (Activity, Vec2, f32, bool) {
     let gap = here.distance(slot);
-    // Slowing down to stop on its place.
+    // Slowing down to stop on its place (or to walk along with it).
     let speed = if gap > 3.0 {
-        WALK_SPEED
+        WALK_SPEED.max(pace + 0.5)
     } else {
-        (0.45 + gap * 0.4).min(gap * 1.5)
+        pace + (0.45 + gap * 0.4).min(gap * 1.5)
     };
     (Activity::Circling, slot, speed, false)
 }
@@ -1186,6 +1251,7 @@ impl crate::save::Persist for Herd {
             glow: r.get()?,
             rite: r.get()?,
             pasture: r.get()?,
+            order: Order::NONE,
             grazing: Vec::new(),
             shed_year: r.get()?,
             last_rite: r.get()?,
@@ -1218,6 +1284,26 @@ mod tests {
         }
     }
 
+    /// The full moon's night, from the gathering to the end of the incantation.
+    fn ritual_time(now: &Conditions) -> bool {
+        rite_night(now) && rite_hours(now.hour)
+    }
+
+    /// The nights before and after, around midnight.
+    fn foretelling_time(now: &Conditions) -> bool {
+        omen_night(now) && omen_hours(now.hour)
+    }
+
+    /// What a living rite in full strength asks of the herd under this moon: the herd alone,
+    /// as the anomaly would lead it (see `anomaly.rs`).
+    fn of_the_moon(now: &Conditions) -> Order {
+        Order {
+            tonight: rite_night(now),
+            omens: omen_night(now),
+            strength: 1.0,
+        }
+    }
+
     fn run(
         herd: &mut Herd,
         world: &World,
@@ -1227,6 +1313,7 @@ mod tests {
     ) -> Vec<HerdEvent> {
         let mut events = Vec::new();
         let observers: Vec<Observer> = me.into_iter().collect();
+        herd.set_order(of_the_moon(&now));
         for _ in 0..(seconds * 30.0) as usize {
             herd.update(1.0 / 30.0, world, &now, &observers, &[], &mut events);
         }
@@ -1284,6 +1371,7 @@ mod tests {
         mut me: Observer,
     ) -> Vec<HerdEvent> {
         let mut events = Vec::new();
+        herd.set_order(of_the_moon(&now));
         for _ in 0..(seconds * 30.0) as usize {
             let to = herd.centre() - Vec2::new(me.at.x, me.at.z);
             if to.length() > 6.0 {
@@ -1356,6 +1444,67 @@ mod tests {
         run(&mut herd, &world, at(23.0, 2.0, 0.5, Vec2::X), 30.0, None);
         assert!(herd.glow < 0.1);
         assert!(herd.centre().distance(herd.ring) > 20.0);
+    }
+
+    /// The light of the rite holds through all its movements: bowing, the procession (the
+    /// circle turning, each hind walking with its place), heads raised to the moon, the end.
+    #[test]
+    fn the_light_of_the_rite_holds_through_its_procession() {
+        let (world, mut herd) = setup();
+        run(&mut herd, &world, at(20.0, 2.0, 0.5, Vec2::X), 60.0, None);
+        run(&mut herd, &world, at(21.9, 2.0, 0.5, Vec2::X), 40.0, None);
+        // The incantation as it goes: its 0.6 hours are half a minute.
+        let mut events = Vec::new();
+        let steps = (RITE_HOURS * crate::clock::DAY_SECONDS / 24.0 * 30.0) as usize;
+        let mut dimmest: f32 = 1.0;
+        for k in 0..steps {
+            let u = k as f32 / steps as f32;
+            let now = at(RITE_HOUR + RITE_HOURS * u, 2.0, 0.5, Vec2::X);
+            herd.set_order(of_the_moon(&now));
+            herd.update(1.0 / 30.0, &world, &now, &[], &[], &mut events);
+            if u > BOWING {
+                dimmest = dimmest.min(herd.glow);
+            }
+        }
+        assert!(
+            dimmest > crate::anomaly::SUMMIT,
+            "the light of the rite fell to {dimmest} in its course"
+        );
+    }
+
+    /// What the anomaly asks, the herd does: a weak rite calls fewer hinds to the circle, and
+    /// its light stays dim; without its order, no rite at all, full moon or not.
+    #[test]
+    fn a_weak_rite_gathers_fewer_hinds_and_glows_dimly() {
+        let (world, mut herd) = setup();
+        let night = at(22.0, 2.0, 0.5, Vec2::X);
+        run(&mut herd, &world, at(20.0, 2.0, 0.5, Vec2::X), 60.0, None);
+        let n = herd.deer.len();
+        herd.set_order(Order {
+            strength: 0.4,
+            ..of_the_moon(&night)
+        });
+        for _ in 0..60 * 30 {
+            herd.update(1.0 / 30.0, &world, &night, &[], &[], &mut Vec::new());
+        }
+        let circling = herd
+            .deer
+            .iter()
+            .filter(|d| d.activity == Activity::Circling)
+            .count();
+        assert_eq!(circling, (0.4 * n as f32).ceil() as usize, "of {n}");
+        assert!(
+            (herd.glow - (GLOW_FLOOR + 0.4)).abs() < 0.02,
+            "glow {} at strength 0.4",
+            herd.glow
+        );
+        // The anomaly silent (dead): the herd grazes on under the full moon.
+        herd.set_order(Order::NONE);
+        for _ in 0..30 * 30 {
+            herd.update(1.0 / 30.0, &world, &night, &[], &[], &mut Vec::new());
+        }
+        assert!(herd.deer.iter().all(|d| d.activity != Activity::Circling));
+        assert!(herd.glow < 0.05 && herd.rite.is_none());
     }
 
     #[test]

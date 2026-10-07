@@ -287,6 +287,28 @@ impl AtmosphereUniform {
     }
 }
 
+/// Light that is not of this world, drawn as self-lit motes: each its colour, and told apart by
+/// how bright it is as much as by its hue.
+pub struct Magic {
+    /// The notebook glowing where it lies: warm gold.
+    pub notebook: [f32; 3],
+    /// The rite of the deer under the full moon: moonlit silver.
+    pub rite: [f32; 3],
+    /// A spell cast, or answering again: pale green.
+    pub spell: [f32; 3],
+    /// A spell gone out with its anomaly: ash, dim and grey.
+    pub lost: [f32; 3],
+}
+
+pub fn magic() -> Magic {
+    Magic {
+        notebook: srgb_hex(0xffe3a0),
+        rite: srgb_hex(0xd6e2ff),
+        spell: srgb_hex(0xc8f0b0),
+        lost: srgb_hex(0x7d7873),
+    }
+}
+
 /// Converts a colour written as `0xRRGGBB` (sRGB, as in colour pickers) to linear RGB,
 /// the space where shaders compute light.
 pub fn srgb_hex(rgb: u32) -> [f32; 3] {
@@ -380,6 +402,23 @@ mod tests {
         let living = concentration().map(lightness);
         let mean = |l: [f32; STOP_COUNT]| l.iter().sum::<f32>() / STOP_COUNT as f32;
         assert!(mean(earth) + 10.0 < mean(living));
+    }
+
+    #[test]
+    fn a_lost_spell_reads_as_ash_dimmer_and_greyer_than_living_magic() {
+        let m = magic();
+        let lost = lightness(m.lost);
+        for (name, living) in [("carnet", m.notebook), ("rite", m.rite), ("sort", m.spell)] {
+            assert!(
+                lightness(living) > lost + 30.0,
+                "{name} {} not clearly brighter than a lost spell {lost}",
+                lightness(living)
+            );
+        }
+        // Grey: its channels close together.
+        let spread = m.lost.iter().fold(0.0f32, |s, &c| s.max(c))
+            - m.lost.iter().fold(1.0f32, |s, &c| s.min(c));
+        assert!(spread < 0.03, "a lost spell is tinted ({spread})");
     }
 
     #[test]

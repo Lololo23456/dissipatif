@@ -6,21 +6,27 @@
 
 use glam::Vec2;
 
+use crate::anomaly::Kind;
 use crate::deer::Cause;
 use crate::state::Conditions;
 
-/// The spells: magic practised by living things, learnt by understanding them.
+/// The spells: magic practised by living things, learnt by understanding them. Each answers only
+/// while the anomaly that taught it lives (see `anomaly.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spell {
     /// The shape of a deer: the herd takes you for one of its own; a deer's speed and leap,
     /// but no hands. Learnt from the hinds' circle under the full moon.
     DeerForm,
+    /// The eye of an owl: a spell of perception, to see in the dark and hear what moves. Learnt
+    /// from the owls' gaze on the dark nights.
+    OwlEye,
 }
 
 impl Spell {
     pub fn name(self) -> &'static str {
         match self {
             Spell::DeerForm => "Forme du cerf",
+            Spell::OwlEye => "Œil de chouette",
         }
     }
 }
@@ -54,6 +60,10 @@ pub enum Entry {
     Rite,
     /// A spell understood.
     Learnt(Spell),
+    /// The night of an anomaly, watched for in vain: nothing came.
+    Unkept(Kind),
+    /// A spell that no longer answers: the anomaly that taught it died.
+    Lost(Spell),
 }
 
 impl Entry {
@@ -78,13 +88,17 @@ impl Entry {
             Entry::Recovery => &["Il creuse juste", "au bon endroit."],
             Entry::Starved => &["Une biche morte.", "Les côtes saillantes."],
             Entry::Learnt(Spell::DeerForm) => &["Je sais marcher", "comme elles."],
+            Entry::Learnt(Spell::OwlEye) => &["Je vois dans le noir", "ce qu'elles voient."],
+            Entry::Unkept(Kind::DeerRite) => &["La pleine lune,", "et personne au cercle."],
+            Entry::Lost(Spell::DeerForm) => &["Je ne sais plus", "marcher comme elles."],
+            Entry::Lost(Spell::OwlEye) => &["Le noir est revenu."],
         }
     }
 
-    /// A title over the page, for a spell.
+    /// A title over the page, for a spell (learnt, or lost).
     pub fn title(self) -> Option<&'static str> {
         match self {
-            Entry::Learnt(spell) => Some(spell.name()),
+            Entry::Learnt(spell) | Entry::Lost(spell) => Some(spell.name()),
             _ => None,
         }
     }
@@ -176,7 +190,7 @@ pub fn wind_words(towards: Vec2) -> String {
     format!("vent {article}{from}")
 }
 
-crate::save::persist_enum!(Spell { DeerForm });
+crate::save::persist_enum!(Spell { DeerForm, OwlEye });
 
 impl crate::save::Persist for Entry {
     fn write(&self, w: &mut crate::save::Writer) {
@@ -194,10 +208,16 @@ impl crate::save::Persist for Entry {
             Entry::Bell => (10, None, None),
             Entry::Cache => (11, None, None),
             Entry::Recovery => (12, None, None),
+            Entry::Unkept(_) => (13, None, None),
+            Entry::Lost(s) => (14, None, Some(s)),
         };
         w.put(&tag);
         w.put(&cause);
         w.put(&spell);
+        // The anomaly waited for, after the common fields.
+        if let Entry::Unkept(kind) = *self {
+            w.put(&kind);
+        }
     }
     fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
         let tag: u8 = r.get()?;
@@ -217,6 +237,8 @@ impl crate::save::Persist for Entry {
             10 => Entry::Bell,
             11 => Entry::Cache,
             12 => Entry::Recovery,
+            13 => Entry::Unkept(r.get()?),
+            14 => Entry::Lost(spell.ok_or("sort manquant")?),
             _ => return Err("page inconnue".into()),
         })
     }
@@ -252,5 +274,33 @@ mod tests {
         );
         assert_eq!(book.write(Entry::Herd, &now, Vec2::ZERO), None);
         assert_eq!(book.place(&book.pages[0]), "50 pas au nord-est");
+    }
+
+    #[test]
+    fn lost_spells_and_empty_nights_are_written_and_kept() {
+        let entries = [
+            Entry::Fled(Cause::Scent),
+            Entry::Learnt(Spell::OwlEye),
+            Entry::Unkept(Kind::DeerRite),
+            Entry::Lost(Spell::DeerForm),
+            Entry::Lost(Spell::OwlEye),
+            Entry::Recovery,
+        ];
+        let mut book = Notebook::new(Vec2::ZERO);
+        let now = crate::state::Conditions::noon();
+        for entry in entries {
+            assert!(book.write(entry, &now, Vec2::ONE).is_some());
+            if !matches!(entry, Entry::Recovery | Entry::Fled(_)) {
+                assert!(!entry.words().is_empty(), "{entry:?} has no words");
+            }
+        }
+        assert_eq!(Entry::Lost(Spell::OwlEye).title(), Some("Œil de chouette"));
+        let mut w = crate::save::Writer::default();
+        w.put(&book);
+        let back: Notebook = crate::save::Reader::new(&w.bytes)
+            .get()
+            .expect("a notebook");
+        let kinds = |b: &Notebook| b.pages.iter().map(|p| p.entry).collect::<Vec<_>>();
+        assert_eq!(kinds(&back), entries.to_vec());
     }
 }

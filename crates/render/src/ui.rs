@@ -394,7 +394,8 @@ mod tests {
     #[test]
     fn every_letter_of_the_game_texts_has_a_glyph() {
         let unknown = base_glyph('\u{1}');
-        let texts = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:;'!?-+/()%°Œœ";
+        let texts =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:;'!?-+/()%°Œœ";
         for ch in texts.chars() {
             assert!(ch == ' ' || base_glyph(ch) != unknown, "{ch}");
         }

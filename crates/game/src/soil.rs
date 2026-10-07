@@ -267,6 +267,12 @@ impl Soil {
         self.cover[k]
     }
 
+    /// The plant cover of patch `k` at the start (the world's balance, what it is measured
+    /// against).
+    pub fn cover_start(&self, k: usize) -> f32 {
+        self.cover_start[k]
+    }
+
     pub fn forage(&self, k: usize) -> f32 {
         self.forage[k]
     }

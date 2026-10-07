@@ -6,10 +6,14 @@
 //! curseur, clic droit le reprend (ou cueille), glisser avec le bouton droit tourne la
 //! caméra, molette pour zoomer (de la vue plongeante jusqu'à hauteur d'homme). Clavier : E ramasser, P poser devant soi, 1 à 8 choisir dans
 //! le sac, F manger ou modeler, B boire, G (maintenu) frotter le foret à feu ou souffler sur
-//! la braise. T (maintenu) accélère la journée, R lance ou arrête la pluie.
-//! `--seed N` choisit le monde ; `--capture fichier.png` enregistre une vue sans fenêtre.
+//! la braise. T (maintenu) accélère la journée, R lance ou arrête la pluie. N ouvre le carnet,
+//! V lance le sort connu (un sort perdu avec son anomalie ne répond plus).
+//! `--seed N` choisit le monde ; `--capture fichier.png` enregistre une vue sans fenêtre (ses
+//! options sont dans `Options::from_args`, dont `--lost deer` : le rituel meurt, sort perdu) ;
+//! `DISSIPATIF_DEBUG_ANOMALIES=1` raconte la vie des anomalies.
 
 mod ambient;
+mod anomaly;
 mod audio;
 mod camera_rig;
 mod clock;
@@ -66,7 +70,6 @@ use naturalist::Motion;
 use naturalist::{Gesture, GestureKind, Naturalist};
 use objects_view::ObjectsView;
 use player::Controls;
-use render::palette::srgb_hex;
 use scene::SceneData;
 use sketch::Sketch;
 use state::{Command, Event, Failure, GameState, PlayerId};
@@ -85,6 +88,10 @@ const DEFAULT_SEED: u64 = 1;
 const AMBIENT_SEED: u64 = 0xa1b;
 /// Frame duration used to advance the air when capturing (60 frames per second).
 const CAPTURE_STEP: f32 = 1.0 / 60.0;
+/// Real seconds the ash of a spell gone out takes to fall and fade.
+const LOST_SECONDS: f32 = 2.5;
+/// Real seconds between two tellings of the anomalies (`DISSIPATIF_DEBUG_ANOMALIES`).
+const DEBUG_EVERY: f32 = 5.0;
 
 /// Window and renderer are created together on `resumed`, so they are either both present or both absent.
 struct Graphics {
@@ -160,8 +167,12 @@ struct App {
     /// waiting for theirs (drawn after the next frame).
     sketches: HashMap<usize, Sketch>,
     sketch_pending: Vec<usize>,
-    /// When a spell was last cast (seconds since start).
+    /// When a spell was last cast, or answered again (seconds since start).
     cast_at: Option<f32>,
+    /// When a spell last went out with its anomaly (seconds since start).
+    lost_at: Option<f32>,
+    /// Real seconds until the anomalies are told again (`DISSIPATIF_DEBUG_ANOMALIES`).
+    debug_in: f32,
     /// Gait cycle of the naturalist in the shape of a deer (radians).
     deer_stride: f32,
     /// Real seconds until the next automatic save.
@@ -329,6 +340,8 @@ impl App {
             frames: (0, 0.0),
             sketch_pending: Vec::new(),
             cast_at: None,
+            lost_at: None,
+            debug_in: 0.0,
             deer_stride: 0.0,
         }
     }
@@ -347,6 +360,14 @@ impl App {
             }
         }
         self.run_steps(dt);
+        // `DISSIPATIF_DEBUG_ANOMALIES=1`: how the anomalies are doing, every few seconds.
+        if self.graphics.is_some() && std::env::var_os("DISSIPATIF_DEBUG_ANOMALIES").is_some() {
+            self.debug_in -= dt;
+            if self.debug_in <= 0.0 {
+                self.debug_in = DEBUG_EVERY;
+                self.tell_anomalies();
+            }
+        }
         if let Some((_, left)) = &mut self.message {
             *left -= dt;
             if *left <= 0.0 {
@@ -400,6 +421,31 @@ impl App {
         let data = &mut self.data;
         self.trample
             .update(dt, feet, velocity, |plant, bend| data.set_bend(plant, bend));
+    }
+
+    /// Tells each anomaly of the world, a line each, with the herd's order (for debugging).
+    fn tell_anomalies(&self) {
+        eprintln!(
+            "jour {}, {:02} h {:02}, nuit {}",
+            self.clock.day(),
+            self.clock.hour() as u32,
+            (self.clock.hour().fract() * 60.0) as u32,
+            anomaly::night_of(self.clock.days())
+        );
+        for a in self.state.anomalies().iter() {
+            eprintln!("  {}", a.describe());
+        }
+        if let Some(herd) = self.state.herd() {
+            let order = herd.order();
+            eprintln!(
+                "  harde : {} cerfs, lueur {:.2}, rite ce soir : {}, présages : {}, force {:.2}",
+                herd.deer.len(),
+                herd.glow,
+                if order.tonight { "oui" } else { "non" },
+                if order.omens { "oui" } else { "non" },
+                order.strength
+            );
+        }
     }
 
     /// Where the naturalist's feet are drawn: between where they were before the last fixed
@@ -523,20 +569,35 @@ impl App {
                     notebook::Entry::Found => {
                         "Un carnet. Il brillait. (N pour l'ouvrir)".to_owned()
                     }
-                    notebook::Entry::Learnt(_) => return,
+                    // The message of the spell says it.
+                    notebook::Entry::Learnt(_) | notebook::Entry::Lost(_) => return,
                     _ => "Le carnet s'est rempli d'une page.".to_owned(),
                 }
             }
             Event::Learnt { spell, .. } => {
                 format!("Vous avez compris : {}. (V pour le lancer)", spell.name())
             }
-            Event::Cast { on, .. } => {
+            Event::Cast { spell, on, .. } => {
                 self.cast_at = Some(self.now);
-                if on {
-                    "Vous prenez la forme du cerf.".to_owned()
-                } else {
-                    "Vous reprenez forme humaine.".to_owned()
+                match (spell, on) {
+                    (notebook::Spell::DeerForm, true) => "Vous prenez la forme du cerf.",
+                    (notebook::Spell::DeerForm, false) => "Vous reprenez forme humaine.",
+                    (notebook::Spell::OwlEye, true) => "Vos yeux s'ouvrent sur la nuit.",
+                    (notebook::Spell::OwlEye, false) => "Vos yeux redeviennent les vôtres.",
                 }
+                .to_owned()
+            }
+            // Something went out: the spell no longer answers (the cause is not told).
+            Event::SpellLost { spell, .. } => {
+                self.lost_at = Some(self.now);
+                format!(
+                    "Quelque chose s'est éteint. {} ne répond plus.",
+                    with_article(spell)
+                )
+            }
+            Event::SpellRegained { spell, .. } => {
+                self.cast_at = Some(self.now);
+                format!("{} répond de nouveau.", with_article(spell))
             }
             Event::Picked {
                 matter, removed, ..
@@ -647,11 +708,15 @@ impl App {
                 Failure::NothingToWork => "Rien à travailler avec ce que vous tenez.",
                 Failure::TooWet => "Le bois est trop humide : la friction ne donne rien.",
                 Failure::NoHands => "Pas de mains sous cette forme.",
+                Failure::SpellLost => "Ce sort ne répond plus.",
             }
             .to_owned(),
         };
-        // What is understood stays long enough to be read.
-        let seconds = if matches!(event, Event::Learnt { .. }) {
+        // What is understood, lost or found again stays long enough to be read.
+        let seconds = if matches!(
+            event,
+            Event::Learnt { .. } | Event::SpellLost { .. } | Event::SpellRegained { .. }
+        ) {
             8.0
         } else {
             2.5
@@ -772,11 +837,13 @@ impl App {
     }
 
     /// Light that is not of this world: the notebook glowing where it lies, the rite's motes
-    /// over the circle, a spell's swirl.
+    /// over the circle (as many as the anomaly's strength allows), the light of a trial coming
+    /// to the one who understands, a spell's swirl, the ash of a spell gone out.
     fn magic(&mut self, time: f32) {
+        let colors = render::palette::magic();
         let out = &mut self.particles;
         if let Some(at) = self.state.notebook_lying() {
-            let gold = srgb_hex(0xffe3a0);
+            let gold = colors.notebook;
             for i in 0..28 {
                 let phase = (time * 0.3 + i as f32 * 0.0357) % 1.0;
                 let angle = i as f32 * 2.399 + time * 0.5;
@@ -799,7 +866,10 @@ impl App {
         if let Some(herd) = self.state.herd()
             && herd.glow > 0.01
         {
-            let silver = srgb_hex(0xd6e2ff);
+            let silver = colors.rite;
+            // Its light is already dimmed by a weak anomaly; its figures are thinner too.
+            let strength = herd.order().strength.clamp(0.0, 1.0);
+            let share = |full: usize| (full as f32 * strength).ceil() as usize;
             let g = herd.glow;
             let ring = herd.ring;
             let ground = self.world.surface_height(ring.x, ring.y);
@@ -832,8 +902,9 @@ impl App {
                 if (0.12..0.45).contains(&u) {
                     // Each bow sends a wave of light out from the centre over the grass.
                     let wave = (seconds / 3.0 + 0.5).fract();
-                    for k in 0..40 {
-                        let a = k as f32 / 40.0 * tau;
+                    let n = share(40);
+                    for k in 0..n {
+                        let a = k as f32 / n as f32 * tau;
                         let r = deer::RING_RADIUS * 1.15 * wave;
                         point(
                             out,
@@ -844,7 +915,7 @@ impl App {
                     }
                 } else if (0.45..0.8).contains(&u) {
                     // The procession: light winding up from the circle.
-                    for k in 0..60 {
+                    for k in 0..share(60) {
                         let phase = (seconds * 0.15 + k as f32 / 60.0) % 1.0;
                         let a = k as f32 * 0.7 + seconds * 0.6;
                         let r = deer::RING_RADIUS * (1.0 - 0.7 * phase);
@@ -856,17 +927,20 @@ impl App {
                         );
                     }
                 } else if (0.8..0.97).contains(&u) {
-                    // Heads raised to the moon: threads from each to the centre, and a column
-                    // of light rising to the sky.
+                    // Heads raised to the moon: threads from each on the circle to the centre,
+                    // and a column of light rising to the sky.
                     let top = centre + Vec3::Y * 2.5;
                     for d in &herd.deer {
+                        if d.activity != deer::Activity::Circling {
+                            continue;
+                        }
                         let head = d.position + Vec3::Y * 1.7 * d.size;
                         for k in 0..10 {
                             let t = ((k as f32 + seconds * 3.0) / 10.0).fract();
                             point(out, head.lerp(top, t), 0.025, 3.5);
                         }
                     }
-                    for k in 0..70 {
+                    for k in 0..share(70) {
                         let phase = (seconds * 0.6 + k as f32 / 70.0) % 1.0;
                         let a = k as f32 * 2.399;
                         let r = 0.25 + 0.15 * (seconds * 3.0 + k as f32).sin();
@@ -880,7 +954,7 @@ impl App {
                 } else if u >= 0.97 {
                     // The end: the light bursts and scatters.
                     let t = (u - 0.97) / 0.03;
-                    for k in 0..90 {
+                    for k in 0..share(90) {
                         let a = k as f32 * 2.399;
                         let rise = (k % 9) as f32 / 9.0;
                         let r = 0.5 + 9.0 * t * (0.5 + 0.5 * rise);
@@ -903,20 +977,19 @@ impl App {
                 });
             }
         }
-        // Understanding the rite: its light comes to the watcher, more and more of it.
-        let understanding = self.state.understanding(self.me);
-        if understanding > 0.0
-            && let Some(herd) = self.state.herd()
-        {
-            let silver = srgb_hex(0xd6e2ff);
+        // Understanding an anomaly: its light comes from its place to the watcher, more and
+        // more of it.
+        if let Some(understanding) = self.state.understanding(self.me) {
+            let color = match understanding.kind {
+                anomaly::Kind::DeerRite => colors.rite,
+            };
             let feet = self.state.body(self.me).shown_position();
-            let ring = herd.ring;
-            let from = Vec3::new(
-                ring.x,
-                self.world.surface_height(ring.x, ring.y) + 1.0,
-                ring.y,
-            );
-            for i in 0..(60.0 * understanding) as usize {
+            // Its place as seen from the watcher (across the edges of the world if nearer).
+            let [x, z] = self
+                .world
+                .nearest([feet.x, feet.z], understanding.site.to_array());
+            let from = Vec3::new(x, self.world.surface_height(x, z) + 1.0, z);
+            for i in 0..(60.0 * understanding.progress) as usize {
                 let phase = (time * 0.25 + i as f32 * 0.618) % 1.0;
                 let angle = i as f32 * 2.399 + time * 1.5;
                 // From the circle towards the naturalist, then winding round them.
@@ -926,7 +999,7 @@ impl App {
                 let at = from.lerp(target, smooth(phase));
                 out.push(render::ParticleInstance {
                     centre_size: [at.x, at.y, at.z, 0.015 + 0.02 * phase],
-                    color: [silver[0], silver[1], silver[2], -2.5 * phase],
+                    color: [color[0], color[1], color[2], -2.5 * phase],
                 });
             }
         }
@@ -934,7 +1007,7 @@ impl App {
             let t = time - start;
             if (0.0..1.8).contains(&t) {
                 let feet = self.state.body(self.me).shown_position();
-                let green = srgb_hex(0xc8f0b0);
+                let green = colors.spell;
                 let fade = 1.0 - t / 1.8;
                 for i in 0..40 {
                     let k = i as f32 / 40.0;
@@ -948,6 +1021,32 @@ impl App {
                             0.02 + 0.03 * fade,
                         ],
                         color: [green[0], green[1], green[2], -2.5 * fade],
+                    });
+                }
+            }
+        }
+        // A spell gone out: what shone of it falls round the naturalist as ash, flakes of
+        // matter that no longer shine by themselves (seen by day, barely by night), and settles.
+        if let Some(start) = self.lost_at {
+            let t = time - start;
+            if (0.0..LOST_SECONDS).contains(&t) {
+                let feet = self.state.body(self.me).shown_position();
+                let ash = colors.lost;
+                let fade = 1.0 - t / LOST_SECONDS;
+                for i in 0..48 {
+                    let k = i as f32 / 48.0;
+                    let angle = k * std::f32::consts::TAU * 2.0 - t * 1.2;
+                    let r = 0.35 + 0.3 * k;
+                    // Each flake falls from above the head to the ground, the later ones last.
+                    let fall = (t / LOST_SECONDS + k * 0.5).min(1.0);
+                    out.push(render::ParticleInstance {
+                        centre_size: [
+                            feet.x + angle.cos() * r,
+                            feet.y + 0.02 + 2.1 * (1.0 - fall),
+                            feet.z + angle.sin() * r,
+                            0.03 + 0.03 * fade,
+                        ],
+                        color: [ash[0], ash[1], ash[2], 0.5],
                     });
                 }
             }
@@ -1619,13 +1718,18 @@ struct CaptureOptions {
     notebook: bool,
     /// The naturalist knows the deer's shape and takes it (to look at it).
     deer: bool,
+    /// An anomaly dies after the simulation, once its spell is learnt (to see a spell lost):
+    /// `--lost deer`.
+    lost: Option<anomaly::Kind>,
     /// Snow lying on the ground (and ice on the water), 0 to 1.
     snow: f32,
 }
 
 impl Options {
     /// `[--seed N] [--capture file.png [--size WxH] [--yaw DEG] [--pitch DEG] [--zoom F]
-    /// [--at X,Z] [--time SECONDS] [--walk SECONDS] [--hour H] [--weather rain] [--start X,Z] [--pick N]]`.
+    /// [--at X,Z] [--time SECONDS] [--walk SECONDS] [--hour H] [--day N] [--weather rain]
+    /// [--start X,Z] [--pick N] [--demo-fire] [--bag] [--pose GESTE] [--notebook] [--deer]
+    /// [--lost deer] [--snow F]]`.
     fn from_args(args: &[String]) -> Result<Self, String> {
         let value = |name: &str| -> Option<&str> {
             args.iter()
@@ -1685,6 +1789,11 @@ impl Options {
                     day: number("--day")?.unwrap_or(1.0) as u32,
                     notebook: args.iter().any(|a| a == "--notebook"),
                     deer: args.iter().any(|a| a == "--deer"),
+                    lost: match value("--lost") {
+                        None => None,
+                        Some("deer") => Some(anomaly::Kind::DeerRite),
+                        Some(other) => return Err(format!("--lost {other} : anomalie inconnue")),
+                    },
                     snow: number("--snow")?.unwrap_or(0.0),
                 })
             }
@@ -1751,6 +1860,33 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.pending.push(Command::Pick { player: app.me });
         app.tick(CAPTURE_STEP, (still + walking) as f32 * CAPTURE_STEP);
     }
+    // Frames run so far: the picture is taken at their end.
+    let mut frames = still + walking;
+    // `--lost`: the anomaly dies, its spell known (learnt by then, or taught now): the shape is
+    // left, the notebook writes the loss, the spell no longer answers; its ash is caught
+    // halfway down.
+    if let Some(kind) = options.lost {
+        if frames == 0 && options.pick == 0 {
+            // A step first, so that the loss is written at the moment of the picture.
+            app.tick(CAPTURE_STEP, 0.0);
+            frames += 1;
+        }
+        if let Some(spell) = kind.spell() {
+            app.state.teach(app.me, spell);
+        }
+        app.state.force_life(kind, anomaly::Life::Dead);
+        let events: Vec<Event> = app.state.drain_events().collect();
+        for event in events {
+            app.on_event(event);
+        }
+        for _ in 0..(0.4 * LOST_SECONDS / CAPTURE_STEP) as usize {
+            app.tick(CAPTURE_STEP, frames as f32 * CAPTURE_STEP);
+            frames += 1;
+        }
+    }
+    if std::env::var_os("DISSIPATIF_DEBUG_ANOMALIES").is_some() {
+        app.tell_anomalies();
+    }
     if std::env::var_os("DISSIPATIF_DEBUG_DEER").is_some()
         && let Some(squirrels) = app.state.squirrels()
     {
@@ -1782,7 +1918,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     if let Some((x, z)) = options.at {
         app.rig.camera.target = Vec3::new(x, app.rig.camera.target.y, z);
     }
-    let time = (still + walking) as f32 * CAPTURE_STEP;
+    let time = frames as f32 * CAPTURE_STEP;
     for (cell, flooded) in std::mem::take(&mut app.dug_cells) {
         app.data.ground_dug(&app.world, cell, flooded, None);
     }
@@ -1907,6 +2043,14 @@ fn main() {
 fn smooth(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// The name of a spell with its article, to begin a sentence.
+fn with_article(spell: notebook::Spell) -> &'static str {
+    match spell {
+        notebook::Spell::DeerForm => "La Forme du cerf",
+        notebook::Spell::OwlEye => "L'Œil de chouette",
+    }
 }
 
 #[cfg(test)]

@@ -16,6 +16,9 @@ use glam::{Vec2, Vec3};
 use sim::thermal::KELVIN;
 use world::{Material, World};
 
+use crate::anomaly::{
+    Anomalies, Anomaly, Around, Harm, Kind, Life, SpellState, Understanding, WATCH_RANGE,
+};
 use crate::deer::{self, Herd, HerdEvent, Observer};
 use crate::ecology::{Change, Ecology};
 use crate::items::{ClaySource, Harvest, Inventory, Matter, Refusal, harvest};
@@ -84,10 +87,76 @@ pub struct PlayerState {
     pub rubbing: f32,
     /// The notebook, once found.
     pub notebook: Option<Notebook>,
-    /// Spells understood.
+    /// Spells understood, for good: one whose anomaly dies stays here, lost, and answers
+    /// again when it is born again (see `GameState::spell_state`).
     pub spells: Vec<Spell>,
-    /// Seconds spent watching the rite, unseen.
-    witnessed: f32,
+    /// Shapes taken: each spell learnt the first time adds one, and nothing takes one back.
+    /// The notebook loses words with each (the naturalist's human syntax goes).
+    pub transformations: u32,
+    /// Game seconds spent in the trial of each kind of anomaly (the rite: watching its height
+    /// unseen).
+    trials: Vec<(Kind, f32)>,
+    /// The anomaly whose trial they are in, this step (not saved: found again at the next).
+    attending: Option<Kind>,
+}
+
+impl PlayerState {
+    /// Game seconds spent in the trial of `kind`.
+    fn trial(&self, kind: Kind) -> f32 {
+        self.trials
+            .iter()
+            .find(|t| t.0 == kind)
+            .map_or(0.0, |t| t.1)
+    }
+
+    fn trial_mut(&mut self, kind: Kind) -> &mut f32 {
+        let i = match self.trials.iter().position(|t| t.0 == kind) {
+            Some(i) => i,
+            None => {
+                self.trials.push((kind, 0.0));
+                self.trials.len() - 1
+            }
+        };
+        &mut self.trials[i].1
+    }
+
+    /// Understands `spell`, the first time only: it joins the spells, the count of shapes
+    /// taken grows, the notebook writes its page. The way every anomaly teaches.
+    fn learn(&mut self, spell: Spell, now: &Conditions, events: &mut Vec<Event>) {
+        if self.spells.contains(&spell) {
+            return;
+        }
+        self.spells.push(spell);
+        self.transformations += 1;
+        events.push(Event::Learnt {
+            player: self.id,
+            spell,
+        });
+        self.write(Entry::Learnt(spell), now, events);
+    }
+
+    /// The notebook, if they have it, writes `entry` where they stand.
+    fn write(&mut self, entry: Entry, now: &Conditions, events: &mut Vec<Event>) {
+        let feet = Vec2::new(self.body.position.x, self.body.position.z);
+        if let Some(book) = self.notebook.as_mut()
+            && let Some(page) = book.write(entry, now, feet)
+        {
+            events.push(Event::Wrote {
+                player: self.id,
+                page,
+                entry,
+            });
+        }
+    }
+
+    /// Ends what `spell` keeps going on them (a shape taken), now that it no longer answers.
+    fn release(&mut self, spell: Spell) {
+        match spell {
+            Spell::DeerForm => self.body.deer = false,
+            // Nothing of the owl's eye stays on a player once cast.
+            Spell::OwlEye => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,6 +206,8 @@ pub enum Failure {
     TooWet,
     /// In the shape of a deer: no hands.
     NoHands,
+    /// The spell no longer answers: the anomaly that taught it is dead.
+    SpellLost,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -221,6 +292,16 @@ pub enum Event {
         spell: Spell,
         on: bool,
     },
+    /// A spell no longer answers: the anomaly that taught it died (a shape taken was left).
+    SpellLost {
+        player: PlayerId,
+        spell: Spell,
+    },
+    /// A lost spell answers again: its anomaly was born again.
+    SpellRegained {
+        player: PlayerId,
+        spell: Spell,
+    },
 }
 
 /// The moment: time, sky and weather, the same for everything in the world.
@@ -297,6 +378,13 @@ pub struct GameState {
     notebook_lying: Option<Vec3>,
     /// The moment of the last step.
     now: Conditions,
+    /// The anomalies of the world: their places, health, strength and nights.
+    anomalies: Anomalies,
+    /// Scratch lists of each step (reused): where something burns, the players as animals
+    /// perceive them (in the order of `players`), the anomalies whose life changed.
+    fires: Vec<Vec2>,
+    observers: Vec<Observer>,
+    life_changes: Vec<(Kind, Life)>,
 }
 
 impl GameState {
@@ -343,6 +431,10 @@ impl GameState {
                 wind: Vec2::X,
                 year: 0.375,
             },
+            anomalies: Anomalies::default(),
+            fires: Vec::new(),
+            observers: Vec::new(),
+            life_changes: Vec::new(),
         }
     }
 
@@ -364,6 +456,7 @@ impl GameState {
         w.put(&bared);
         w.put(&self.notebook_lying);
         w.put(&self.now);
+        w.put(&self.anomalies);
     }
 
     /// Reads back what `save` wrote, in `world` (restored first).
@@ -388,6 +481,7 @@ impl GameState {
         state.bared = r.get::<Vec<(usize, usize)>>()?.into_iter().collect();
         state.notebook_lying = r.get()?;
         state.now = r.get()?;
+        state.anomalies = r.get()?;
         // What is rebuilt rather than saved: what can be picked, and the stones in the way.
         state.pickables.clear();
         for (i, p) in plants.iter().enumerate() {
@@ -410,9 +504,44 @@ impl GameState {
         Ok(state)
     }
 
-    /// Lets a herd of deer live in the world.
+    /// Lets a herd of deer live in the world, and the rite it carries on its meadow: alive, the
+    /// world being at its balance (its health is measured at the first step).
     pub fn add_herd(&mut self, herd: Herd) {
+        self.anomalies.register(Anomaly::new(
+            Kind::DeerRite,
+            herd.ring,
+            crate::anomaly::RITE_MEADOW,
+            Life::Alive,
+        ));
         self.herd = Some(herd);
+    }
+
+    pub fn anomalies(&self) -> &Anomalies {
+        &self.anomalies
+    }
+
+    /// Sets the life of the anomaly of `kind` at once, with all that follows (spells lost or
+    /// answering again): for tests and captures.
+    pub fn force_life(&mut self, kind: Kind, life: Life) {
+        if self.anomalies.force_life(kind, life, self.now.days) {
+            self.spells_follow(kind, life);
+        }
+    }
+
+    /// Where player `id` stands with `spell`: unknown, usable, or lost with its anomaly (a
+    /// spell no anomaly of the world teaches stays usable).
+    pub fn spell_state(&self, id: PlayerId, spell: Spell) -> SpellState {
+        if !self.player(id).is_some_and(|p| p.spells.contains(&spell)) {
+            return SpellState::Unknown;
+        }
+        let alive = Kind::teaching(spell)
+            .and_then(|kind| self.anomalies.get(kind))
+            .is_none_or(|a| a.life == Life::Alive);
+        if alive {
+            SpellState::Usable
+        } else {
+            SpellState::Lost
+        }
     }
 
     /// Lets squirrels live in the world.
@@ -454,25 +583,28 @@ impl GameState {
         }
     }
 
-    /// Gives player `id` a spell (for tests and captures).
+    /// Gives player `id` a spell, without a page (for tests and captures): a shape taken all
+    /// the same.
     pub fn teach(&mut self, id: PlayerId, spell: Spell) {
         if let Some(p) = self.player_mut(id)
             && !p.spells.contains(&spell)
         {
             p.spells.push(spell);
+            p.transformations += 1;
         }
     }
 
-    /// How far player `id` has understood the rite they are watching, 0 to 1 (0 when not
-    /// watching it).
-    pub fn understanding(&self, id: PlayerId) -> f32 {
-        let watching = self.herd.as_ref().is_some_and(|h| h.glow > 0.6);
-        match self.player(id) {
-            Some(p) if watching && !p.spells.contains(&Spell::DeerForm) => {
-                (p.witnessed / RITE_UNDERSTOOD).min(1.0)
-            }
-            _ => 0.0,
-        }
+    /// The anomaly player `id` is understanding now, how far, and where it is: `None` when not
+    /// in a trial (for the light of it).
+    pub fn understanding(&self, id: PlayerId) -> Option<Understanding> {
+        let p = self.player(id)?;
+        let kind = p.attending?;
+        let anomaly = self.anomalies.get(kind)?;
+        Some(Understanding {
+            kind,
+            progress: (p.trial(kind) / kind.trial_seconds()).min(1.0),
+            site: anomaly.site,
+        })
     }
 
     /// Whether player `id` can pick up the notebook lying there.
@@ -746,7 +878,9 @@ impl GameState {
             rubbing: 0.0,
             notebook: None,
             spells: Vec::new(),
-            witnessed: 0.0,
+            transformations: 0,
+            trials: Vec::new(),
+            attending: None,
         });
         id
     }
@@ -869,9 +1003,18 @@ impl GameState {
         }
         match command {
             Command::Cast { player, spell } => {
+                let state = self.spell_state(player, spell);
                 let p = self.player_mut(player)?;
-                if !p.spells.contains(&spell) {
-                    return None;
+                match state {
+                    SpellState::Unknown => return None,
+                    // A lost spell no longer answers; a shape still worn can always be left.
+                    SpellState::Lost if !(spell == Spell::DeerForm && p.body.deer) => {
+                        return Some(Event::Failed {
+                            player,
+                            failure: Failure::SpellLost,
+                        });
+                    }
+                    SpellState::Lost | SpellState::Usable => {}
                 }
                 match spell {
                     Spell::DeerForm => {
@@ -882,6 +1025,9 @@ impl GameState {
                             on: p.body.deer,
                         })
                     }
+                    // The owl's eye has no effect of its own yet: it opens with the spell
+                    // wheel, the way to see and hear the night (see `docs/phase-2.md`).
+                    Spell::OwlEye => None,
                 }
             }
             Command::Steer {
@@ -954,7 +1100,7 @@ impl GameState {
                         });
                     }
                     let at = self.dig_point(player)?;
-                    self.dig(at);
+                    self.dig(world, at);
                     return Some(Event::Picked {
                         player,
                         matter,
@@ -1012,7 +1158,7 @@ impl GameState {
                             failure: Failure::Bag(refusal),
                         });
                     }
-                    self.dig(at);
+                    self.dig(world, at);
                     return Some(Event::Picked {
                         player,
                         matter,
@@ -1151,10 +1297,16 @@ impl GameState {
     }
 
     /// Digs a handful at `at`: the world takes a micro-voxel out there (event `Dig`).
-    fn dig(&mut self, at: Vec2) {
+    fn dig(&mut self, world: &World, at: Vec2) {
         self.events.push(Event::Dig { at });
         // What grew there is dug up with the soil.
         self.clear_plants(at, 0.4);
+        // Digging into an anomaly's place wounds it a little.
+        for kind in Kind::ALL {
+            if self.anomalies.get(kind).is_some_and(|a| a.holds(world, at)) {
+                self.anomalies.disturb(kind, kind.harm(Harm::Dig));
+            }
+        }
     }
 
     /// Living plants within `radius` of `at` are gone (dug up with the soil).
@@ -1416,8 +1568,30 @@ impl GameState {
             };
             self.events.push(event);
         }
+        // What burns, and the players as the animals perceive them, for all that follows.
+        self.fires.clear();
+        for (i, placed) in self.objects.placed().iter().enumerate() {
+            if self.objects.body(i).burning {
+                self.fires.push(Vec2::new(placed.base.x, placed.base.z));
+            }
+        }
+        self.fires.extend(
+            self.ecology
+                .burning(&self.plants)
+                .map(|(i, _)| crate::ecology::place(&self.plants[i])),
+        );
+        self.observers.clear();
+        for p in &self.players {
+            self.observers
+                .push(observer(world, &self.ecology, &self.plants, p));
+        }
+        // The anomalies tell their bearers what tonight holds, before they move.
+        if let (Some(herd), Some(rite)) = (self.herd.as_mut(), self.anomalies.get(Kind::DeerRite)) {
+            herd.set_order(rite.order(now, world.config.seed));
+        }
         self.step_deer(world, now);
         self.step_squirrels(world, now);
+        self.step_anomalies(world, now);
         self.ground_in -= STEP * self.time_scale;
         if self.ground_in <= 0.0 {
             self.ground_in = GROUND_EVERY;
@@ -1534,27 +1708,17 @@ impl GameState {
         let Some(herd) = self.herd.as_mut() else {
             return;
         };
-        let observers: Vec<Observer> = self
-            .players
-            .iter()
-            .map(|p| observer(world, &self.ecology, &self.plants, p))
-            .collect();
-        let mut fires: Vec<Vec2> = (0..self.objects.placed().len())
-            .filter(|&i| self.objects.body(i).burning)
-            .map(|i| {
-                let b = self.objects.placed()[i].base;
-                Vec2::new(b.x, b.z)
-            })
-            .collect();
-        fires.extend(
-            self.ecology
-                .burning(&self.plants)
-                .map(|(i, _)| crate::ecology::place(&self.plants[i])),
-        );
         self.herd_events.clear();
         // The deer live in game time: when the day runs faster, so do they (a step each).
         for _ in 0..self.time_scale.round().max(1.0) as usize {
-            herd.update(STEP, world, now, &observers, &fires, &mut self.herd_events);
+            herd.update(
+                STEP,
+                world,
+                now,
+                &self.observers,
+                &self.fires,
+                &mut self.herd_events,
+            );
         }
 
         // What the herd makes heard.
@@ -1611,31 +1775,19 @@ impl GameState {
                     entries.push(entry);
                 }
             }
-            let to_ring = feet.distance(herd.ring);
+            // The circle, as seen from here (across the edges of the world if nearer).
+            let to_ring =
+                Vec2::from(world.nearest(feet.to_array(), herd.ring.to_array())).distance(feet);
             if to_ring < deer::RING_RADIUS + 1.5 && herd.glow < 0.05 && light > 0.4 {
                 entries.push(Entry::Ring);
             }
             if herd.foretelling() && to_ring < 30.0 {
                 entries.push(Entry::Turning);
             }
-            // The rite, watched without being noticed: understood after a while.
-            let watching = herd.glow > 0.3 && to_ring < 32.0 && !herd.frightened(now);
-            if watching {
+            // The rite, watched without being noticed (understanding it is its anomaly's trial,
+            // see `step_anomalies`).
+            if herd.glow > 0.3 && to_ring < WATCH_RANGE && !herd.frightened(now) {
                 entries.push(Entry::Rite);
-                if herd.glow > 0.6 {
-                    p.witnessed += STEP * self.time_scale;
-                }
-            }
-            // Understood at the height of the rite, heads raised to the moon, by one who watched
-            // it unseen until then.
-            let height = herd.rite.is_some_and(|u| u >= 0.8);
-            if p.witnessed >= RITE_UNDERSTOOD && height && !p.spells.contains(&Spell::DeerForm) {
-                p.spells.push(Spell::DeerForm);
-                entries.push(Entry::Learnt(Spell::DeerForm));
-                self.events.push(Event::Learnt {
-                    player: p.id,
-                    spell: Spell::DeerForm,
-                });
             }
             // The notebook, if they have it, writes what they saw.
             let Some(book) = p.notebook.as_mut() else {
@@ -1649,6 +1801,80 @@ impl GameState {
                         entry,
                     });
                 }
+            }
+        }
+    }
+
+    /// The anomalies live (health, strength, their nights); the players in their trials
+    /// understand them, or wait for them in vain; spells follow the life of their anomalies.
+    fn step_anomalies(&mut self, world: &World, now: &Conditions) {
+        let seconds = STEP * self.time_scale;
+        let around = Around {
+            world,
+            now,
+            soil: self.ecology.soil(),
+            herd: self.herd.as_ref(),
+            fires: &self.fires,
+        };
+        self.life_changes.clear();
+        self.anomalies
+            .step(&around, seconds, &mut self.life_changes);
+        for (p, who) in self.players.iter_mut().zip(&self.observers) {
+            p.attending = None;
+            let feet = Vec2::new(p.body.position.x, p.body.position.z);
+            for a in self.anomalies.iter() {
+                if a.life != Life::Alive {
+                    // Its night, at its hours, and nothing comes.
+                    if a.kind.due(now)
+                        && a.kind.in_window(now.hour)
+                        && a.within(world, feet, WATCH_RANGE)
+                    {
+                        p.write(Entry::Unkept(a.kind), now, &mut self.events);
+                    }
+                    continue;
+                }
+                let Some(spell) = a.kind.spell() else {
+                    continue;
+                };
+                if p.spells.contains(&spell) || !a.kind.attends(a, &around, who) {
+                    continue;
+                }
+                p.attending = Some(a.kind);
+                let seconds = {
+                    let trial = p.trial_mut(a.kind);
+                    *trial += seconds;
+                    *trial
+                };
+                if a.kind.understood(&around, seconds) {
+                    p.learn(spell, now, &mut self.events);
+                }
+            }
+        }
+        for i in 0..self.life_changes.len() {
+            let (kind, life) = self.life_changes[i];
+            self.spells_follow(kind, life);
+        }
+    }
+
+    /// The anomaly of `kind` now has `life`: the spell it taught follows. Dead, it no longer
+    /// answers (a shape taken is left, the notebook writes the loss); born again, it answers
+    /// again (the words lost meanwhile do not come back).
+    fn spells_follow(&mut self, kind: Kind, life: Life) {
+        let Some(spell) = kind.spell() else {
+            return;
+        };
+        let now = self.now;
+        for p in &mut self.players {
+            if !p.spells.contains(&spell) {
+                continue;
+            }
+            let player = p.id;
+            if life == Life::Alive {
+                self.events.push(Event::SpellRegained { player, spell });
+            } else {
+                p.release(spell);
+                self.events.push(Event::SpellLost { player, spell });
+                p.write(Entry::Lost(spell), &now, &mut self.events);
             }
         }
     }
@@ -1697,9 +1923,6 @@ const GROUND_EVERY: f32 = 10.0;
 
 /// How close to the hands a buried nut can be found by digging.
 const CACHE_REACH: f32 = 0.9;
-
-/// Seconds of watching the full rite, unnoticed, to understand it.
-const RITE_UNDERSTOOD: f32 = 10.0;
 
 /// A player as the deer perceive them: moving or still, crouched, hidden by plants, on loud
 /// or soft ground, in their own shape or a deer's.
@@ -1776,7 +1999,8 @@ impl crate::save::Persist for PlayerState {
         w.put(&self.needs);
         w.put(&self.notebook);
         w.put(&self.spells);
-        w.put(&self.witnessed);
+        w.put(&self.trials);
+        w.put(&self.transformations);
     }
     fn read(r: &mut crate::save::Reader) -> crate::save::Result<Self> {
         Ok(Self {
@@ -1789,7 +2013,9 @@ impl crate::save::Persist for PlayerState {
             rubbing: 0.0,
             notebook: r.get()?,
             spells: r.get()?,
-            witnessed: r.get()?,
+            trials: r.get()?,
+            transformations: r.get()?,
+            attending: None,
         })
     }
 }
@@ -2283,6 +2509,7 @@ mod tests {
         let me = state.join(spawn);
         state.place_notebook(spawn + Vec3::new(0.0, 0.0, 0.5));
         state.give_notebook(me);
+        state.teach(me, Spell::DeerForm);
         state.time_scale = 60.0;
         let mut clock = crate::clock::Clock::on_day(1, 18.0);
         clock.fast = true;
@@ -2302,6 +2529,8 @@ mod tests {
         };
         run(&mut state, &mut world, &mut clock, 600);
         state.apply(&world, Command::Pick { player: me });
+        // The rite disturbed: its strength comes back, the same in both games.
+        state.anomalies.disturb(Kind::DeerRite, 0.4);
         run(&mut state, &mut world, &mut clock, 60);
 
         let mut w = crate::save::header(1);
@@ -2347,6 +2576,19 @@ mod tests {
         };
         assert_eq!(pages(&state), pages(&loaded));
         assert!(world.state().blocks == again.state().blocks);
+        // The rite, measured and weakened as before; the player's shapes and trials.
+        let (x, y) = (rite(&state), rite(&loaded));
+        assert!(x.strength < 1.0, "the rite never weakened");
+        assert_eq!(
+            (x.life, x.health, x.strength, x.healthy_for, x.since),
+            (y.life, y.health, y.strength, y.healthy_for, y.since)
+        );
+        assert_eq!((x.encore, x.last_shown), (y.encore, y.last_shown));
+        let shapes = |s: &GameState| {
+            s.player(me)
+                .map(|p| (p.spells.clone(), p.transformations, p.trials.clone()))
+        };
+        assert_eq!(shapes(&state), shapes(&loaded));
     }
 
     /// The circle of the rite grows over when the rite is no longer kept, and is trodden
@@ -2391,5 +2633,465 @@ mod tests {
         state.herd.as_mut().expect("herd").last_rite = now.days;
         apply(&mut state, &mut world, &now);
         assert_eq!(dirt(&world), worn);
+    }
+
+    /// The world of the deer tests (seed 1), its herd and its rite, alive.
+    fn rite_world() -> (World, GameState, Vec2) {
+        let mut world = World::generate(WorldConfig::small(1));
+        let spawn = crate::player::spawn_point(&world);
+        let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
+        deer::wear_ring(&mut world, ring, 1);
+        let mut state = GameState::new(&world);
+        state.add_herd(Herd::new(ring, cover, &world, 7));
+        (world, state, ring)
+    }
+
+    /// Steps the game until `until` (days since the start), dry, applying to the world what the
+    /// game asks of it (as `App::on_event` does); the events, in order.
+    fn run_until(
+        state: &mut GameState,
+        world: &mut World,
+        clock: &mut crate::clock::Clock,
+        until: f64,
+    ) -> Vec<Event> {
+        let mut seen = Vec::new();
+        while clock.days() < until {
+            clock.advance(STEP);
+            state.step(world, &clock.conditions(0.0));
+            let events: Vec<Event> = state.drain_events().collect();
+            for &event in &events {
+                match event {
+                    Event::Dig { at } => {
+                        world.dig(at.x, at.y);
+                    }
+                    Event::Ground { x, z, material } => {
+                        world.set_surface(x, z, material);
+                    }
+                    Event::Plant(Change::Stood(i)) => world.stamp_plant(&state.plants[i]),
+                    Event::Plant(Change::Died { plant, stood: true }) => {
+                        world.unstamp_plant(&state.plants[plant]);
+                    }
+                    _ => {}
+                }
+            }
+            seen.extend(events);
+        }
+        seen
+    }
+
+    /// A dry cell `distance` cells from the circle, along +x, and the feet there.
+    fn away_from(world: &World, ring: Vec2, distance: f32) -> Vec3 {
+        let at = Vec2::from(world.nearest(ring.to_array(), (ring + Vec2::X * distance).to_array()));
+        let (x, z) = world.wrap(at.x, at.y);
+        Vec3::new(x, world.surface_height(x, z), z)
+    }
+
+    /// Sets the meadow round the circle on fire, as a grass fire would take it: each living
+    /// plant of the rite's place gets a few chances to catch (dry grass catches, damp things
+    /// less).
+    fn burn_meadow(state: &mut GameState, ring: Vec2) {
+        for _ in 0..6 {
+            state.ecology.ignite(
+                ring,
+                crate::anomaly::RITE_MEADOW,
+                &state.plants,
+                &mut state.plant_changes,
+            );
+        }
+    }
+
+    fn rite(state: &GameState) -> &Anomaly {
+        state.anomalies().get(Kind::DeerRite).expect("the rite")
+    }
+
+    /// Frightened on the full moon's night, the herd keeps away: the rite is missed, and kept
+    /// the next night instead, by fewer hinds; once only.
+    #[test]
+    fn a_rite_missed_comes_back_the_next_night_weaker() {
+        let (mut world, mut state, ring) = rite_world();
+        // The naturalist stands in the open right by the circle as the herd comes to graze.
+        let me = state.join(away_from(&world, ring, 2.0));
+        let mut clock = crate::clock::Clock::on_day(3, 20.0);
+        clock.fast = true;
+        state.time_scale = 60.0;
+        let events = run_until(&mut state, &mut world, &mut clock, 2.0 + 23.0 / 24.0);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Call {
+                    call: crate::sound::AnimalCall::Bark,
+                    ..
+                }
+            )),
+            "the herd never took fright"
+        );
+        let a = rite(&state);
+        assert_eq!(a.encore, Some(4), "no encore after a missed night");
+        // A fright costs 0.35; the hours since gave back a little (0.5 a day in full health).
+        assert!(
+            a.strength < 1.0 - 0.35 + 0.1,
+            "a fright in its vigil cost it nothing: {}",
+            a.strength
+        );
+        assert_eq!(a.last_shown, None, "it rose to its height all the same");
+        // Gone far away; the next night, in the middle of the incantation.
+        state.place(me, away_from(&world, ring, 60.0));
+        run_until(&mut state, &mut world, &mut clock, 3.0 + 22.3 / 24.0);
+        let herd = state.herd().expect("herd");
+        let order = herd.order();
+        assert!(order.tonight, "the night after, no rite");
+        assert!(
+            order.strength <= crate::anomaly::ENCORE_STRENGTH + 1e-4,
+            "the encore at full strength: {}",
+            order.strength
+        );
+        let circling = herd
+            .deer
+            .iter()
+            .filter(|d| d.activity == deer::Activity::Circling)
+            .count();
+        let n = herd.deer.len();
+        assert_eq!(
+            circling,
+            (order.strength * n as f32).ceil() as usize,
+            "{circling} of {n} on the circle at strength {}",
+            order.strength
+        );
+        assert!(circling < n, "all of them came");
+        assert!(herd.glow > 0.6, "the encore never rose: glow {}", herd.glow);
+        // Kept: no third night.
+        run_until(&mut state, &mut world, &mut clock, 3.0 + 23.5 / 24.0);
+        let a = rite(&state);
+        assert_eq!(a.encore, None);
+        assert!(a.last_shown.is_some_and(|d| d > 3.0));
+    }
+
+    /// Dead, the rite takes back the shape it taught (the naturalist turned back into
+    /// themself, the spell refused); born again, it gives it back, but not the words: the
+    /// count of shapes taken stays.
+    #[test]
+    fn a_rite_born_again_gives_its_spell_back_but_not_the_words() {
+        let (mut world, mut state, ring) = rite_world();
+        let feet = away_from(&world, ring, 40.0);
+        let me = state.join(feet);
+        state.place_notebook(feet);
+        state.give_notebook(me);
+        state.teach(me, Spell::DeerForm);
+        let mut clock = crate::clock::Clock::on_day(1, 12.0);
+        clock.fast = true;
+        state.time_scale = 60.0;
+        state.apply(
+            &world,
+            Command::Cast {
+                player: me,
+                spell: Spell::DeerForm,
+            },
+        );
+        run_until(&mut state, &mut world, &mut clock, 0.6);
+        assert!(state.body(me).deer);
+        assert_eq!(
+            state.spell_state(me, Spell::DeerForm),
+            crate::anomaly::SpellState::Usable
+        );
+
+        state.force_life(Kind::DeerRite, Life::Dead);
+        let events: Vec<Event> = state.drain_events().collect();
+        assert!(
+            events.contains(&Event::SpellLost {
+                player: me,
+                spell: Spell::DeerForm
+            }),
+            "{events:?}"
+        );
+        assert!(!state.body(me).deer, "still a deer, its rite dead");
+        assert_eq!(
+            state.spell_state(me, Spell::DeerForm),
+            crate::anomaly::SpellState::Lost
+        );
+        assert_eq!(
+            state.apply(
+                &world,
+                Command::Cast {
+                    player: me,
+                    spell: Spell::DeerForm
+                }
+            ),
+            Some(Event::Failed {
+                player: me,
+                failure: Failure::SpellLost
+            })
+        );
+        let book = |state: &GameState| {
+            state
+                .player(me)
+                .and_then(|p| p.notebook.as_ref())
+                .map(|b| b.pages.iter().map(|p| p.entry).collect::<Vec<_>>())
+                .expect("notebook")
+        };
+        assert!(book(&state).contains(&Entry::Lost(Spell::DeerForm)));
+
+        // The meadow and the herd are well: born again after its ripening days.
+        let events = run_until(&mut state, &mut world, &mut clock, 3.2);
+        assert_eq!(rite(&state).life, Life::Alive);
+        assert!(
+            events.contains(&Event::SpellRegained {
+                player: me,
+                spell: Spell::DeerForm
+            }),
+            "no spell given back"
+        );
+        assert_eq!(
+            state.spell_state(me, Spell::DeerForm),
+            crate::anomaly::SpellState::Usable
+        );
+        let p = state.player(me).expect("player");
+        assert_eq!(p.transformations, 1, "a shape given back counted again");
+        assert_eq!(p.spells, vec![Spell::DeerForm]);
+        let pages = book(&state);
+        assert!(
+            pages.contains(&Entry::Lost(Spell::DeerForm)),
+            "the loss unwritten"
+        );
+        assert!(
+            !pages.contains(&Entry::Learnt(Spell::DeerForm)),
+            "learnt again"
+        );
+        assert!(matches!(
+            state.apply(
+                &world,
+                Command::Cast {
+                    player: me,
+                    spell: Spell::DeerForm
+                }
+            ),
+            Some(Event::Cast { on: true, .. })
+        ));
+    }
+
+    /// The rite dead, the full moon comes and nobody walks the circle; the notebook of one
+    /// who waited there says so.
+    #[test]
+    fn a_dead_rite_leaves_the_full_moon_night_empty() {
+        let (mut world, mut state, ring) = rite_world();
+        let wind = crate::wind::direction(2.0 + 21.5 / 24.0);
+        let at = ring + wind * 15.0;
+        let feet = Vec3::new(at.x, world.surface_height(at.x, at.y), at.y);
+        let me = state.join(feet);
+        state.place_notebook(feet);
+        state.give_notebook(me);
+        let mut clock = crate::clock::Clock::on_day(3, 21.0);
+        clock.fast = true;
+        state.time_scale = 60.0;
+        run_until(&mut state, &mut world, &mut clock, 2.0 + 21.1 / 24.0);
+        state.force_life(Kind::DeerRite, Life::Dead);
+        let mut highest: f32 = 0.0;
+        while clock.days() < 2.0 + 22.6 / 24.0 {
+            let next = clock.days() + 0.002;
+            run_until(&mut state, &mut world, &mut clock, next);
+            highest = highest.max(state.herd().expect("herd").glow);
+        }
+        assert_eq!(highest, 0.0, "the rite glowed, dead");
+        let p = state.player(me).expect("player");
+        assert!(p.spells.is_empty());
+        let book = p.notebook.as_ref().expect("notebook");
+        assert!(
+            book.has(Entry::Unkept(Kind::DeerRite)),
+            "nothing written of the empty night"
+        );
+        assert!(!book.has(Entry::Rite));
+    }
+
+    /// Fire in the meadow weakens the rite by a quarter a game minute, digging there by a
+    /// little a handful; elsewhere, neither.
+    #[test]
+    fn fire_and_digging_in_its_meadow_weaken_the_rite() {
+        let (world, mut state, ring) = rite_world();
+        let now = crate::clock::Clock::on_day(1, 12.0).conditions(0.0);
+        let mut changes = Vec::new();
+        let mut burn = |state: &mut GameState, fire: Vec2| {
+            let fires = [fire];
+            let around = Around {
+                world: &world,
+                now: &now,
+                soil: state.ecology.soil(),
+                herd: state.herd.as_ref(),
+                fires: &fires,
+            };
+            // A game minute.
+            for _ in 0..60 * 60 {
+                state.anomalies.step(&around, STEP, &mut changes);
+            }
+        };
+        burn(&mut state, ring + Vec2::new(5.0, 3.0));
+        let strength = rite(&state).strength;
+        assert!(
+            (0.74..0.8).contains(&strength),
+            "a minute of fire in the meadow: strength {strength}"
+        );
+        let far =
+            Vec2::from(world.nearest(ring.to_array(), (ring + Vec2::new(40.0, 0.0)).to_array()));
+        burn(&mut state, far);
+        assert!(
+            rite(&state).strength > strength,
+            "a fire far off wounded it"
+        );
+        let before = rite(&state).strength;
+        for _ in 0..10 {
+            state.dig(&world, ring + Vec2::new(6.0, -2.0));
+        }
+        let dug = before - rite(&state).strength;
+        assert!((dug - 0.3).abs() < 1e-4, "ten handfuls dug cost {dug}");
+        state.dig(&world, far);
+        assert!(
+            (before - rite(&state).strength - dug).abs() < 1e-6,
+            "digging far off wounded it"
+        );
+    }
+
+    /// A burnt meadow kills its rite within days (not at once: its health is the meadow's of
+    /// the last days): the spell it taught no longer answers, and one who wore the deer's
+    /// shape is themself again.
+    #[test]
+    fn burning_the_meadow_kills_the_rite_takes_the_spell_and_the_shape() {
+        let (mut world, mut state, ring) = rite_world();
+        let feet = away_from(&world, ring, 70.0);
+        let me = state.join(feet);
+        state.place_notebook(feet);
+        state.give_notebook(me);
+        state.teach(me, Spell::DeerForm);
+        state.apply(
+            &world,
+            Command::Cast {
+                player: me,
+                spell: Spell::DeerForm,
+            },
+        );
+        let mut clock = crate::clock::Clock::on_day(1, 12.0);
+        clock.fast = true;
+        state.time_scale = 60.0;
+        run_until(&mut state, &mut world, &mut clock, 0.6);
+        assert!(
+            rite(&state).health > crate::anomaly::BIRTH,
+            "an ailing meadow at the start"
+        );
+        burn_meadow(&mut state, ring);
+        let events = run_until(&mut state, &mut world, &mut clock, 1.2);
+        assert_eq!(
+            rite(&state).life,
+            Life::Alive,
+            "dead the very day of the fire"
+        );
+        assert!(!events.iter().any(|e| matches!(e, Event::SpellLost { .. })));
+        let events = run_until(&mut state, &mut world, &mut clock, 3.6);
+        assert_eq!(
+            rite(&state).life,
+            Life::Dead,
+            "alive three days after: health {}",
+            rite(&state).health
+        );
+        assert!(
+            events.contains(&Event::SpellLost {
+                player: me,
+                spell: Spell::DeerForm
+            }),
+            "the spell was not taken back"
+        );
+        assert!(!state.body(me).deer, "still in the shape of a deer");
+        assert_eq!(
+            state.spell_state(me, Spell::DeerForm),
+            crate::anomaly::SpellState::Lost
+        );
+        assert_eq!(
+            state.apply(
+                &world,
+                Command::Cast {
+                    player: me,
+                    spell: Spell::DeerForm
+                }
+            ),
+            Some(Event::Failed {
+                player: me,
+                failure: Failure::SpellLost
+            })
+        );
+        let p = state.player(me).expect("player");
+        assert!(
+            p.notebook
+                .as_ref()
+                .is_some_and(|b| b.has(Entry::Lost(Spell::DeerForm)))
+        );
+        assert_eq!(
+            p.transformations, 1,
+            "a shape lost took back a transformation"
+        );
+        // Dead, the rite asks nothing of the herd.
+        assert_eq!(
+            state.herd().expect("herd").order(),
+            crate::anomaly::Order::NONE
+        );
+    }
+
+    /// The rite's life over weeks: twelve days as the world goes (the herd grazing its meadow),
+    /// then the meadow burnt, and what follows. A measurement, not a check (slow): `cargo test
+    /// --release -p game rite_through -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mesure lente"]
+    fn the_rite_through_a_burnt_meadow_over_weeks() {
+        let (mut world, mut state, ring) = rite_world();
+        let me = state.join(away_from(&world, ring, 60.0));
+        state.teach(me, Spell::DeerForm);
+        let mut clock = crate::clock::Clock::on_day(1, 12.0);
+        clock.fast = true;
+        state.time_scale = 60.0;
+        let tell = |state: &GameState, world: &World, clock: &crate::clock::Clock| {
+            let now = clock.conditions(0.0);
+            let around = Around {
+                world,
+                now: &now,
+                soil: state.ecology.soil(),
+                herd: state.herd.as_ref(),
+                fires: &[],
+            };
+            let raw = Kind::DeerRite.measure(ring, crate::anomaly::RITE_MEADOW, &around);
+            let a = rite(state);
+            let herd = state.herd().expect("herd");
+            let energy =
+                herd.deer.iter().map(|d| d.energy).sum::<f32>() / herd.deer.len().max(1) as f32;
+            let plants = |radius: f32| state.ecology.near(ring, radius, &state.plants).len();
+            println!(
+                "jour {:5.2} : {:?}, santé {:.2} (mesure {:.2}, saine depuis {:.1} j), force {:.2}, \
+                 {} cerfs (réserves {:.2}), plantes à 16 / 40 cases : {} / {}, sort {:?}",
+                clock.days() + 1.0,
+                a.life,
+                a.health,
+                raw,
+                a.healthy_for,
+                a.strength,
+                herd.deer.len(),
+                energy,
+                plants(crate::anomaly::RITE_MEADOW),
+                plants(40.0),
+                state.spell_state(me, Spell::DeerForm)
+            );
+        };
+        let mut day: f64 = 0.5;
+        while day < 64.0 {
+            if (day - 12.5).abs() < 1e-6 {
+                println!("-- la prairie brûle --");
+                burn_meadow(&mut state, ring);
+            }
+            day += if (12.5..16.5).contains(&day) {
+                0.25
+            } else {
+                1.0
+            };
+            let events = run_until(&mut state, &mut world, &mut clock, day);
+            for e in events {
+                if matches!(e, Event::SpellLost { .. } | Event::SpellRegained { .. }) {
+                    println!("   {e:?}");
+                }
+            }
+            tell(&state, &world, &clock);
+        }
     }
 }
