@@ -342,3 +342,15 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Suivi sans à-coups** : le naturaliste (et donc la caméra) est dessiné entre sa position avant le dernier pas fixe et sa position actuelle, selon l'avance de l'image dans le pas suivant (les pas sont à 60 Hz, les images à la fréquence de l'écran) ; la cible suit par un ressort amorti critique (0,12 s à l'horizontale, 0,3 s à la verticale : un saut ou une marche ne secoue pas la vue).
 - Le flou miniature (tilt-shift) s'efface quand la vue descend sous 35° (rien de miniature à hauteur d'homme) ; la parallaxe de la poussière suit le champ de vision.
 - Correction : un cube entamé (sable, argile, terre creusés) devenait invisible tout en gardant sa collision depuis la planète. Ses micro-voxels portent leur matériau à la place de leur cellule, et le shader prenait ce code pour la cellule de l'ancrage : ils étaient dessinés à l'autre bout du monde. Ils s'ancrent désormais à leur propre position.
+
+## 2026-10-07 — Phase 2 : la tranche verticale
+- **Actées** (discussion avec l'utilisateur), détail dans `docs/phase-2.md` : une tranche d'environ deux heures d'une traite, sans passer la nuit (environ six jours de jeu, de la pleine lune à la nouvelle lune) ; l'accélération du temps reste pour le développement et sera retirée du jeu plus tard ; tout est tiré de la graine, météo comprise.
+- **Anomalies** : de tous types et énigmatiques ; elles vivent tant que la nature va bien à leur endroit, et s'affaiblissent quand on les dérange ou qu'on abîme leur lieu ; épreuves variées (se rendre à un lieu, suivre une piste, faire une action) ; au moins une de chaque sorte près du départ, puis partout où les conditions sont réunies ; jamais de blocage.
+- **Santé et force** : la santé du lieu (long terme : couverture, sol, population ; hystérésis) décide de la vie d'une anomalie ; sa force (court terme, entre 0 et 1) baisse quand on la dérange et remonte seule.
+- **Règle d'or contre les blocages** : la magie est un raccourci, la connaissance du milieu est la fondation. Toute épreuve qu'un sort facilite reste faisable sans lui, plus difficilement (vent, couvert, affût).
+- **Rituel** : vivant au départ (le monde est à l'équilibre) ; s'il meurt, la Forme du cerf disparaît aussi, et revient quand il renaît.
+- **Transformation irréversible** : perdre un sort ne rend pas les mots du carnet ; son signe se fissure et s'éteint. Les mots partent des plus abstraits (temps, verbes) aux plus concrets (arbre, cerf).
+- **Monde** : très interactif ; la litière se ramasse et se décompose à la vitesse réelle rapportée à l'année de 64 jours.
+- **Construction** : libre par assemblage modulaire sur la grille voxel, sans physique complexe ; supports simples (poteau sur le sol, plancher sur un poteau, toit sur un mur ou un poteau), ce qui perd son support tombe ; bois brut, argile, chaume dans la tranche.
+- **Saisons** : la partie commence à la fin de l'été.
+- Les chouettes pointent un endroit (piste retenue pour le regard des chouettes). Le reste est provisoire, voir `docs/phase-2.md`.
