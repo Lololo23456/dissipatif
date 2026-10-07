@@ -27,7 +27,9 @@ pub struct PostUniform {
     /// …tint of the lights (rgb) and exposure (w).
     pub light_tint: [f32; 4],
     /// x: darkness of the night, in [0, 1] (dims the foreground dust). y: weariness of the
-    /// naturalist, in [0, 1] (darker edges, duller colours). zw unused.
+    /// naturalist, in [0, 1] (darker edges, duller colours). z: how much the tilt-shift blurs,
+    /// in [0, 1] (a miniature is seen from above, not from a person's height). w: height of
+    /// the view per unit of distance, 2·tan(fov / 2) (parallax of the dust).
     pub night: [f32; 4],
 }
 
@@ -193,7 +195,12 @@ impl Post {
             time: [time, right, up, camera.distance],
             shadow_tint: [sr, sg, sb, g.saturation],
             light_tint: [lr, lg, lb, g.exposure],
-            night: [self.night, self.weariness, 0.0, 0.0],
+            night: [
+                self.night,
+                self.weariness,
+                crate::sky::smoothstep(15.0_f32.to_radians(), 35.0_f32.to_radians(), camera.pitch),
+                2.0 * (camera.fov_y / 2.0).tan(),
+            ],
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

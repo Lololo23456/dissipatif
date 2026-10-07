@@ -9,7 +9,8 @@ struct Post {
                       // on the ground (cells), w = camera distance (cells)
     shadow_tint: vec4<f32>,  // offset 16: tint of the darks, w = saturation
     light_tint: vec4<f32>,   // offset 32: tint of the lights, w = exposure
-    night: vec4<f32>,        // offset 48: x = darkness of the night, y = weariness (0 to 1)
+    night: vec4<f32>,        // offset 48: x = darkness of the night, y = weariness (0 to 1),
+                             // z = tilt-shift amount (0 to 1), w = 2·tan(fov / 2)
 }
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
@@ -127,8 +128,8 @@ fn dust(p: vec2<f32>, layer: i32, t: f32) -> f32 {
     // Cells per screen height: the closer layer has fewer, larger specks.
     let scale = mix(5.0, 2.5, near);
     // The ground moves on screen by 1 / (view height in cells) per cell the camera moves; the
-    // view height is about 2·tan(15°)·distance. Dust moves 1.6 to 2.4 times as much.
-    let ground = 1.0 / max(0.536 * post.time.w, 1.0);
+    // view height is about 2·tan(fov / 2)·distance. Dust moves 1.6 to 2.4 times as much.
+    let ground = 1.0 / max(post.night.w * post.time.w, 1.0);
     let parallax = vec2<f32>(post.time.y, -post.time.z) * ground * mix(1.6, 2.4, near);
     let drift = vec2<f32>(0.010, -0.004) * t * (1.0 + near);
     let q = (p + parallax + drift) * scale;
@@ -173,7 +174,7 @@ fn fs_post(in: FullScreen) -> @location(0) vec4<f32> {
     let uv = in.uv;
 
     let away = max(abs(uv.y - FOCUS_CENTRE) - FOCUS_HALF_WIDTH, 0.0);
-    let blur = smoothstep(0.0, FOCUS_FADE, away) * MAX_BLUR * size.y / 1080.0;
+    let blur = smoothstep(0.0, FOCUS_FADE, away) * MAX_BLUR * size.y / 1080.0 * post.night.z;
     var color = disc_blur(uv, texel * blur);
     color += bloom(uv, texel, size.y);
     color = grade(color);

@@ -20,11 +20,19 @@ pub struct OrbitCamera {
     pub fov_y: f32,
 }
 
+/// The ground is drawn at least this far from the point looked at, and at most this far (the
+/// haze is complete there, see `OrbitCamera::reach`).
+pub const MIN_REACH: f32 = 64.0;
+pub const MAX_REACH: f32 = 160.0;
+/// The ground is taken this far below the point looked at when measuring the reach.
+const REACH_BELOW: f32 = 10.0;
+
 impl OrbitCamera {
-    const MIN_PITCH: f32 = 15.0_f32.to_radians();
-    const MAX_PITCH: f32 = 85.0_f32.to_radians();
-    const MIN_DISTANCE: f32 = 10.0;
-    const MAX_DISTANCE: f32 = 500.0;
+    /// From level with the target (a view at a person's height) to nearly straight down.
+    pub const MIN_PITCH: f32 = 2.0_f32.to_radians();
+    pub const MAX_PITCH: f32 = 85.0_f32.to_radians();
+    pub const MIN_DISTANCE: f32 = 1.0;
+    pub const MAX_DISTANCE: f32 = 500.0;
 
     /// Camera framing a sphere of radius `radius` centred on `target`.
     pub fn framing(target: Vec3, radius: f32) -> Self {
@@ -62,11 +70,35 @@ impl OrbitCamera {
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let view = look_at_mat4(self.eye(), self.target, Vec3::Y);
         // WebGPU clip space: depth in [0, 1], Y up, which is the "directx" convention in glam.
-        // Near and far planes bracket the target generously; their ratio sets depth precision.
-        let near = (self.distance * 0.1).max(0.1);
-        let far = self.distance * 4.0;
+        // Near and far planes bracket what can be seen; their ratio sets depth precision. Seen
+        // from low, the view runs to the horizon: the far plane goes past the farthest ground
+        // drawn.
+        let near = (self.distance * 0.05).max(0.1);
+        let far = self.distance * 4.0 + 2.0 * MAX_REACH;
         let proj = directx::perspective(self.fov_y, aspect, near, far);
         proj * view
+    }
+
+    /// How far from the target the ground must be drawn to fill the view, in [`MIN_REACH`,
+    /// `MAX_REACH`]: the farthest point where the rays through the top corners of the screen
+    /// meet a plane below the target (lower than the ground around, so slopes going down are
+    /// covered), with a margin. A ray at or above the horizon sees as far as is drawn.
+    pub fn reach(&self, aspect: f32) -> f32 {
+        let inverse = self.view_proj(aspect).inverse();
+        let eye = self.eye();
+        let plane = self.target.y - REACH_BELOW;
+        let mut reach: f32 = 0.0;
+        for x in [-1.0, 1.0] {
+            let far = inverse.project_point3(Vec3::new(x, 1.0, 1.0));
+            let ray = (far - eye).normalize();
+            if ray.y > -0.02 {
+                return MAX_REACH;
+            }
+            let hit = eye + ray * ((plane - eye.y) / ray.y);
+            let offset = glam::Vec2::new(hit.x - self.target.x, hit.z - self.target.z);
+            reach = reach.max(offset.length());
+        }
+        (reach * 1.2 + 16.0).clamp(MIN_REACH, MAX_REACH)
     }
 }
 
@@ -81,6 +113,8 @@ impl OrbitCamera {
 ///     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
 ///     world: vec4<f32>,        // offset 160: size of the world in x, z (0: it has edges);
 ///                              // zw: the point looked at (x, z)
+///     inverse_view_proj: mat4x4<f32>,  // offset 176, size 64: clip space → world
+///     focus: vec4<f32>,        // offset 240: feet of the one followed (xyz), w = reach
 /// }
 /// ```
 #[repr(C)]
@@ -99,10 +133,18 @@ pub struct CameraUniform {
     /// Size of the world in x and z when it closes on itself (a planet): what lies across its
     /// edges is drawn next to the eye. 0 when it has edges.
     pub world: [f32; 4],
+    /// Clip space → world: the sky turns each pixel back into the direction it looks along.
+    pub inverse_view_proj: [[f32; 4]; 4],
+    /// Feet of the one the camera follows, in xyz: what stands between them and the eye is
+    /// cut away. w: how far from the point looked at the ground is drawn (the haze is
+    /// complete there).
+    pub focus: [f32; 4],
 }
 
 impl CameraUniform {
-    /// `weather`: mist, wetness, mist floor height (see `time`).
+    /// `weather`: mist, wetness, mist floor height (see `time`). `focus`: feet of the one
+    /// followed, `reach`: see `OrbitCamera::reach`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         camera: &OrbitCamera,
         aspect: f32,
@@ -110,13 +152,18 @@ impl CameraUniform {
         weather: [f32; 3],
         light_view_proj: Mat4,
         world: [f32; 2],
+        focus: Vec3,
+        reach: f32,
     ) -> Self {
+        let view_proj = camera.view_proj(aspect);
         Self {
-            view_proj: camera.view_proj(aspect).to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
             eye: camera.eye().extend(camera.distance).to_array(),
             time: [time, weather[0], weather[1], weather[2]],
             light_view_proj: light_view_proj.to_cols_array_2d(),
             world: [world[0], world[1], camera.target.x, camera.target.z],
+            inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
+            focus: focus.extend(reach).to_array(),
         }
     }
 }
@@ -190,8 +237,10 @@ mod tests {
     #[test]
     fn uniform_layout_matches_wgsl() {
         // Uniform structs must be a multiple of 16 bytes.
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 176);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 256);
         assert_eq!(std::mem::offset_of!(CameraUniform, world), 160);
+        assert_eq!(std::mem::offset_of!(CameraUniform, inverse_view_proj), 176);
+        assert_eq!(std::mem::offset_of!(CameraUniform, focus), 240);
         assert_eq!(std::mem::offset_of!(CameraUniform, light_view_proj), 96);
         assert_eq!(std::mem::offset_of!(CameraUniform, eye), 64);
         assert_eq!(std::mem::offset_of!(CameraUniform, time), 80);
@@ -212,6 +261,31 @@ mod tests {
         let vp = camera.view_proj(1.0);
         let above = vp * Vec4::new(0.0, 5.0, 0.0, 1.0);
         assert!(above.y / above.w > 0.0);
+    }
+
+    #[test]
+    fn reach_grows_as_the_view_lowers() {
+        let mut camera = OrbitCamera::framing(Vec3::new(0.0, 20.0, 0.0), 7.0);
+        camera.pitch = 60.0_f32.to_radians();
+        let high = camera.reach(1.6);
+        camera.pitch = 20.0_f32.to_radians();
+        let low = camera.reach(1.6);
+        assert!(high < low, "{high} {low}");
+        // Level with the target: the view runs to the horizon.
+        camera.pitch = OrbitCamera::MIN_PITCH;
+        assert_eq!(camera.reach(1.6), MAX_REACH);
+    }
+
+    #[test]
+    fn the_far_plane_holds_the_farthest_ground_drawn() {
+        let mut camera = OrbitCamera::framing(Vec3::ZERO, 7.0);
+        camera.distance = 3.0;
+        camera.pitch = OrbitCamera::MIN_PITCH;
+        // A point at the edge of what is drawn, straight ahead.
+        let ahead = -Vec3::new(camera.yaw.sin(), 0.0, camera.yaw.cos()) * MAX_REACH;
+        let clip = camera.view_proj(1.6) * ahead.extend(1.0);
+        let depth = clip.z / clip.w;
+        assert!(depth > 0.0 && depth < 1.0, "{depth}");
     }
 
     #[test]

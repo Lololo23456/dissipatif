@@ -27,9 +27,6 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_SIZE: u32 = 2048;
 /// On a planet, shadows are cast over this many cells around the eye (each way).
 const SHADOW_REACH: f32 = 72.0;
-/// On a planet, the pieces of ground farther than this from the point looked at are not
-/// drawn (and not shadowed beyond `SHADOW_REACH`).
-const VIEW_REACH: f32 = 150.0;
 
 /// Whether a mesh comes within `reach` of `target` (x, z), on a world of `size` that closes
 /// on itself (0: with edges, everything is near).
@@ -120,6 +117,10 @@ pub struct Renderer {
     ui: UiPass,
     /// Size of the world when it closes on itself (0: it has edges).
     world_size: [f32; 2],
+    /// Feet of the one the camera follows: what hides them is cut away (see `set_focus`).
+    focus: Vec3,
+    /// Fills the background with the sky, before the scene is drawn over it.
+    sky_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -374,6 +375,7 @@ impl Renderer {
             immediate_size: 0,
         });
         let particle_pipeline = create_particle_pipeline(device, &particle_layout, &shader, format);
+        let sky_pipeline = create_sky_pipeline(device, &particle_layout, &shader, format);
         let cube = unit_cube();
         let cube_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("particle cube"),
@@ -413,6 +415,8 @@ impl Renderer {
             sun_direction: Vec3::from(atmosphere.sun_direction),
             scene_bounds: (Vec3::ZERO, Vec3::splat(64.0)),
             world_size: [0.0, 0.0],
+            focus: Vec3::ZERO,
+            sky_pipeline,
             weather: [0.0, 0.0, 0.0],
             clear_color,
             volume_layout,
@@ -446,6 +450,12 @@ impl Renderer {
         let [r, g, b] = atmosphere.fog_color.map(f64::from);
         self.clear_color = wgpu::Color { r, g, b, a: 1.0 };
         self.post.set_grade(&sky.grade, sky.night);
+    }
+
+    /// Feet of the one the camera follows (at their copy nearest the point looked at, on a
+    /// planet): what stands between them and the eye is not drawn.
+    pub fn set_focus(&mut self, feet: Vec3) {
+        self.focus = feet;
     }
 
     /// How weary the naturalist is, in [0, 1]: the image darkens at its edges and dulls.
@@ -652,6 +662,9 @@ impl Renderer {
             max = Vec3::new(t.x + SHADOW_REACH, max.y, t.z + SHADOW_REACH);
         }
         let light = light_view_proj(self.sun_direction, min, max);
+        // On a planet, only the ground within reach of the point looked at is drawn, fading
+        // into the haze at the edge.
+        let reach = camera.reach(self.aspect());
         let uniform = CameraUniform::new(
             camera,
             self.aspect(),
@@ -659,6 +672,8 @@ impl Renderer {
             self.weather,
             light,
             self.world_size,
+            self.focus,
+            reach,
         );
         self.gpu
             .queue()
@@ -741,6 +756,9 @@ impl Renderer {
             // Group 0 is set once; only group 1 and the buffers change between volumes.
             // Opaque first, transparent last: blending needs what is behind to be drawn.
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            // The sky first, behind everything: one triangle covering the screen.
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.draw(0..3, 0..1);
             for (pipeline, transparent) in
                 [(&self.pipeline, false), (&self.transparent_pipeline, true)]
             {
@@ -759,8 +777,7 @@ impl Renderer {
                     };
                     pass.set_bind_group(1, &fields.bind_group, &[]);
                     for mesh in volume.meshes.iter().flatten().filter(|m| {
-                        m.index_count > 0
-                            && near(m.bounds, camera.target, self.world_size, VIEW_REACH)
+                        m.index_count > 0 && near(m.bounds, camera.target, self.world_size, reach)
                     }) {
                         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                         pass.set_index_buffer(
@@ -976,6 +993,47 @@ fn create_particle_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs_particle"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The sky: a triangle covering the screen, behind everything (it writes no depth and passes
+/// every depth test, and is drawn first).
+fn create_sky_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("sky pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_sky"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_sky"),
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,

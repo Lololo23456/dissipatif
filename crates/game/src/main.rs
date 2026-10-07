@@ -4,13 +4,14 @@
 //! Commandes (touches par position, ZQSD sur un clavier AZERTY) : Z Q S D pour marcher, Maj
 //! pour courir, Espace pour sauter. Souris : clic gauche pose ce qu'on tient là où pointe le
 //! curseur, clic droit le reprend (ou cueille), glisser avec le bouton droit tourne la
-//! caméra, molette pour zoomer. Clavier : E ramasser, P poser devant soi, 1 à 8 choisir dans
+//! caméra, molette pour zoomer (de la vue plongeante jusqu'à hauteur d'homme). Clavier : E ramasser, P poser devant soi, 1 à 8 choisir dans
 //! le sac, F manger ou modeler, B boire, G (maintenu) frotter le foret à feu ou souffler sur
 //! la braise. T (maintenu) accélère la journée, R lance ou arrête la pluie.
 //! `--seed N` choisit le monde ; `--capture fichier.png` enregistre une vue sans fenêtre.
 
 mod ambient;
 mod audio;
+mod camera_rig;
 mod clock;
 mod deer;
 mod deer_view;
@@ -44,6 +45,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use camera_rig::CameraRig;
 use glam::Vec3;
 use render::{Gpu, OrbitCamera, Renderer};
 use winit::application::ApplicationHandler;
@@ -76,8 +78,6 @@ use weather::Weather;
 const DRAG_THRESHOLD: f64 = 6.0;
 /// Radians of rotation per pixel of mouse drag.
 const ORBIT_SPEED: f32 = 0.005;
-/// Distance factor per wheel notch.
-const ZOOM_STEP: f32 = 0.9;
 /// Pixels of trackpad scroll counted as one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 50.0;
 const DEFAULT_SEED: u64 = 1;
@@ -85,12 +85,6 @@ const DEFAULT_SEED: u64 = 1;
 const AMBIENT_SEED: u64 = 0xa1b;
 /// Frame duration used to advance the air when capturing (60 frames per second).
 const CAPTURE_STEP: f32 = 1.0 / 60.0;
-/// The camera looks at this point above the feet (about the chest).
-const LOOK_HEIGHT: f32 = 1.2;
-/// How fast the camera catches up with the player (1/s): a slight, smooth lag.
-const FOLLOW_EASING: f32 = 6.0;
-/// Radius of the scene framed around the player at start (sets the camera distance).
-const FOLLOW_FRAME: f32 = 7.0;
 
 /// Window and renderer are created together on `resumed`, so they are either both present or both absent.
 struct Graphics {
@@ -135,7 +129,11 @@ struct App {
     naturalist: Naturalist,
     start: Instant,
     last_frame: Instant,
-    camera: OrbitCamera,
+    /// The camera following the naturalist (see `camera_rig`).
+    rig: CameraRig,
+    /// Where the naturalist's feet were drawn before the last fixed step: the body is drawn
+    /// between that and where it is now, by how far the frame is into the next step.
+    previous_feet: Vec3,
     dragging: bool,
     last_cursor: Option<PhysicalPosition<f64>>,
     /// Where the right button went down (a click or the start of a drag).
@@ -266,8 +264,8 @@ impl App {
         };
         // The local player is the first.
         let me: PlayerId = 0;
-        let feet = state.body(me).position;
-        let camera = OrbitCamera::framing(feet + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
+        let feet = state.body(me).shown_position();
+        let rig = CameraRig::new(feet);
         // Plants born since the world was made, and those gone; all drawn at their size.
         let mut sprouted = Vec::new();
         for i in world.plants().len()..state.plants().len() {
@@ -311,7 +309,8 @@ impl App {
             naturalist: Naturalist::new(),
             start,
             last_frame: Instant::now(),
-            camera,
+            rig,
+            previous_feet: feet,
             dragging: false,
             last_cursor: None,
             right_down: None,
@@ -356,16 +355,8 @@ impl App {
         }
         let body = self.state.body(self.me);
         let (feet, velocity) = (body.position, body.velocity());
-        let goal = body.shown_position() + Vec3::Y * LOOK_HEIGHT;
-        // The planet closes on itself: when the naturalist crosses an edge, the camera goes
-        // with them to the other side instead of sweeping back across the world.
-        let [x, z] = self.world.nearest(
-            [goal.x, goal.z],
-            [self.camera.target.x, self.camera.target.z],
-        );
-        self.camera.target.x = x;
-        self.camera.target.z = z;
-        self.camera.target += (goal - self.camera.target) * (1.0 - (-FOLLOW_EASING * dt).exp());
+        let drawn = self.drawn_feet();
+        self.rig.update(dt, drawn, &self.world);
         let around = [feet.x, feet.z];
         let wind = wind::direction(self.clock.days()).to_array();
         self.ambient.wind = wind;
@@ -411,6 +402,26 @@ impl App {
             .update(dt, feet, velocity, |plant, bend| data.set_bend(plant, bend));
     }
 
+    /// Where the naturalist's feet are drawn: between where they were before the last fixed
+    /// step and where they are now, by how far the frame is into the next step. Steps come
+    /// at a fixed rate and frames at the screen's: without this, the body (and the camera)
+    /// would move by one step some frames and by none or two others, a visible stutter.
+    fn drawn_feet(&self) -> Vec3 {
+        let now = self.state.body(self.me).shown_position();
+        let before = self.previous_feet;
+        let [x, z] = self.world.nearest([now.x, now.z], [before.x, before.z]);
+        Vec3::new(x, before.y, z).lerp(now, (self.accumulator / state::STEP).clamp(0.0, 1.0))
+    }
+
+    /// The naturalist's drawn feet, at their copy nearest the point looked at: what stands
+    /// between them and the eye is cut away.
+    fn focus(&self) -> Vec3 {
+        let feet = self.drawn_feet();
+        let t = self.rig.camera.target;
+        let [x, z] = self.world.nearest([t.x, t.z], [feet.x, feet.z]);
+        Vec3::new(x, feet.y, z)
+    }
+
     /// Turns frame time into fixed steps of the game: each step, the keys held become a
     /// steering command, pending commands are applied, then time advances by `state::STEP`.
     fn run_steps(&mut self, dt: f32) {
@@ -419,10 +430,11 @@ impl App {
         let now = self.clock.conditions(self.weather.rain());
         while self.accumulator >= state::STEP {
             self.accumulator -= state::STEP;
+            self.previous_feet = self.state.body(self.me).shown_position();
             let steer = Command::Steer {
                 player: self.me,
                 controls: self.controls,
-                camera_yaw: self.camera.yaw,
+                camera_yaw: self.rig.camera.yaw,
             };
             self.state.apply(&self.world, steer);
             // A jump is one press, not held.
@@ -549,7 +561,7 @@ impl App {
                 let feet = self.state.body(self.me).position;
                 let offset = at - glam::Vec2::new(feet.x, feet.z);
                 let loudness = (1.0 - offset.length() / reach).clamp(0.0, 1.0).powi(2);
-                let right = glam::Vec2::new(self.camera.yaw.cos(), -self.camera.yaw.sin());
+                let right = glam::Vec2::new(self.rig.camera.yaw.cos(), -self.rig.camera.yaw.sin());
                 let pan = (offset.normalize_or_zero().dot(right)).clamp(-1.0, 1.0) * 0.8;
                 if loudness > 0.0
                     && let Some(audio) = &self.audio
@@ -1132,6 +1144,7 @@ impl ApplicationHandler for App {
                 }
                 self.tick(dt, time);
                 let mut motion = self.state.body(self.me).motion(time);
+                motion.position = self.drawn_feet();
                 motion.gesture = self.current_gesture(time);
                 // Out of `self` while drawing, so `self`'s methods can draw with it.
                 if let Some(mut graphics) = self.graphics.take() {
@@ -1141,8 +1154,10 @@ impl ApplicationHandler for App {
                         self.data
                             .ground_dug(&self.world, cell, flooded, Some(renderer));
                     }
-                    let t = self.camera.target;
-                    self.data.set_view(glam::Vec2::new(t.x, t.z));
+                    let t = self.rig.camera.target;
+                    let reach = self.rig.camera.reach(renderer.aspect());
+                    self.data.set_view(glam::Vec2::new(t.x, t.z), reach);
+                    renderer.set_focus(self.focus());
                     self.data.upload_changes(renderer);
                     self.weather.draw(renderer);
                     set_sky(
@@ -1164,7 +1179,7 @@ impl ApplicationHandler for App {
                         self.me,
                         self.selected,
                         &self.clock,
-                        self.camera.yaw,
+                        self.rig.camera.yaw,
                         &self.message,
                         self.bag_open,
                         self.notebook_open
@@ -1180,7 +1195,7 @@ impl ApplicationHandler for App {
                             (2.0 * c.x / width as f64 - 1.0) as f32,
                             (1.0 - 2.0 * c.y / height as f64) as f32,
                         );
-                        pointed_ground(&self.world, &self.camera, renderer.aspect(), ndc)
+                        pointed_ground(&self.world, &self.rig.camera, renderer.aspect(), ndc)
                     });
                     if let Some(at) = self.hover {
                         let laying = self
@@ -1202,7 +1217,7 @@ impl ApplicationHandler for App {
                         });
                     }
                     renderer.upload_particles(&self.particles);
-                    renderer.render(&self.camera, time);
+                    renderer.render(&self.rig.camera, time);
                     self.take_sketches(renderer);
                     self.graphics = Some(graphics);
                 }
@@ -1274,7 +1289,7 @@ impl ApplicationHandler for App {
                         let dx = (position.x - last.x) as f32;
                         let dy = (position.y - last.y) as f32;
                         // Dragging right turns the scene right; dragging down raises the camera.
-                        self.camera.orbit(-dx * ORBIT_SPEED, dy * ORBIT_SPEED);
+                        self.rig.orbit(-dx * ORBIT_SPEED, dy * ORBIT_SPEED);
                     }
                 }
                 self.last_cursor = Some(position);
@@ -1284,7 +1299,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_NOTCH,
                 };
-                self.camera.zoom(ZOOM_STEP.powf(notches));
+                self.rig.zoom_by(notches);
             }
             _ => {}
         }
@@ -1389,7 +1404,7 @@ fn sandbox(app: &mut App) {
     }
     // Facing the stock, a step back.
     app.state.place(me, centre - Vec3::new(0.0, 0.0, 0.6));
-    app.camera.target = centre + Vec3::Y * LOOK_HEIGHT;
+    app.rig.snap(centre);
     app.message = Some((
         "Mode test : des matériaux sont posés devant vous.".to_owned(),
         5.0,
@@ -1401,7 +1416,7 @@ fn demo_fire(app: &mut App) {
     let Some(centre) = level_spot(app) else {
         return;
     };
-    app.camera.target = centre + Vec3::Y * LOOK_HEIGHT;
+    app.rig.snap(centre);
     // Laying at a point: stand 0.8 behind it (the body faces +z at first).
     let lay_at = |app: &mut App, at: Vec3, matter: items::Matter| {
         app.state.place(me, at - Vec3::new(0.0, 0.0, 0.8));
@@ -1701,19 +1716,20 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         );
         let y = app.world.ground_top(xi as usize, zi as usize) as f32 + 0.001;
         app.state.place(app.me, Vec3::new(x, y, z));
-        app.camera.target = Vec3::new(x, y, z) + Vec3::Y * LOOK_HEIGHT;
+        app.previous_feet = Vec3::new(x, y, z);
+        app.rig.snap(Vec3::new(x, y, z));
     }
     if options.rain {
         app.weather.forced = true;
         app.weather.start_shower();
     }
     if let Some(yaw) = options.yaw {
-        app.camera.yaw = yaw.to_radians();
+        app.rig.set_yaw(yaw.to_radians());
     }
+    app.rig.set_zoom_factor(options.zoom);
     if let Some(pitch) = options.pitch {
-        app.camera.orbit(0.0, pitch.to_radians() - app.camera.pitch);
+        app.rig.set_pitch(pitch.to_radians());
     }
-    app.camera.zoom(options.zoom);
     if std::env::args().any(|a| a == "--test") {
         sandbox(&mut app);
     }
@@ -1764,7 +1780,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     }
     // `--at` overrides the follow camera.
     if let Some((x, z)) = options.at {
-        app.camera.target = Vec3::new(x, app.camera.target.y, z);
+        app.rig.camera.target = Vec3::new(x, app.rig.camera.target.y, z);
     }
     let time = (still + walking) as f32 * CAPTURE_STEP;
     for (cell, flooded) in std::mem::take(&mut app.dug_cells) {
@@ -1783,8 +1799,10 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         None => app.current_gesture(time),
     };
     app.draw_creatures(&mut renderer, &motion, time);
-    let t = app.camera.target;
-    app.data.set_view(glam::Vec2::new(t.x, t.z));
+    let t = app.rig.camera.target;
+    let reach = app.rig.camera.reach(renderer.aspect());
+    app.data.set_view(glam::Vec2::new(t.x, t.z), reach);
+    renderer.set_focus(app.focus());
     app.data.upload_changes(&mut renderer);
     app.weather.install(&mut renderer);
     app.weather.draw(&mut renderer);
@@ -1805,7 +1823,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.me,
         app.selected,
         &app.clock,
-        app.camera.yaw,
+        app.rig.camera.yaw,
         &app.message,
         app.bag_open || options.bag,
         None,
@@ -1814,7 +1832,7 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
     let (ripples, prints) = app.traces.marks();
     renderer.set_marks(ripples, prints);
     renderer.upload_particles(&app.particles);
-    renderer.render(&app.camera, time);
+    renderer.render(&app.rig.camera, time);
     // The notebook's sketches come from this frame; `--notebook` shows it open, drawn again.
     app.take_sketches(&renderer);
     if options.notebook {
@@ -1829,13 +1847,13 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
             app.me,
             app.selected,
             &app.clock,
-            app.camera.yaw,
+            app.rig.camera.yaw,
             &app.message,
             false,
             Some((page, app.sketches.get(&page))),
             &mut renderer,
         );
-        renderer.render(&app.camera, time);
+        renderer.render(&app.rig.camera, time);
     }
     let (width, height, pixels) = renderer
         .capture()
@@ -1899,7 +1917,7 @@ mod tests {
     fn the_centre_of_the_screen_points_at_the_ground_the_camera_looks_at() {
         let world = World::generate(WorldConfig::small(1));
         let feet = player::spawn_point(&world);
-        let camera = OrbitCamera::framing(feet + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
+        let camera = CameraRig::new(feet).camera;
         let hit = pointed_ground(&world, &camera, 1.6, glam::Vec2::ZERO).expect("no ground");
         // The camera looks at the chest: the ray meets the ground just beyond the feet.
         let offset = glam::Vec2::new(hit.x - feet.x, hit.z - feet.z).length();

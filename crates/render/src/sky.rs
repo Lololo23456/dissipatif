@@ -211,7 +211,7 @@ fn sun_path(hour: f32) -> [f32; 3] {
     [-0.9 * theta.cos(), 0.85 * theta.sin(), -0.45]
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }

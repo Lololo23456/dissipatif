@@ -16,6 +16,8 @@ struct Camera {
     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
     world: vec4<f32>,        // offset 160: size of the world in x, z (0: it has edges); zw:
                              // the point looked at
+    inverse_view_proj: mat4x4<f32>,  // offset 176, size 64: clip space → world
+    focus: vec4<f32>,        // offset 240: feet of the one followed (xyz), w = reach
 }
 
 // The world closes on itself (a planet): a point is drawn at its copy nearest the point the
@@ -37,8 +39,13 @@ fn wrap_shift(anchor: vec3<f32>) -> vec3<f32> {
     );
 }
 
-// The anchor of a volume vertex: the cell its face belongs to.
-fn cell_anchor(cell: u32) -> vec3<f32> {
+// The anchor of a volume vertex: the cell its face belongs to. A vertex that carries its
+// material (a micro-voxel of a dug cell) has no cell packed in: it anchors at its own position.
+// The corners of such a face lie a quarter of a cell apart, far closer than half a world.
+fn cell_anchor(cell: u32, position: vec3<f32>) -> vec3<f32> {
+    if ((cell & DIRECT_MATERIAL) != 0u) {
+        return position + volume.origin.xyz;
+    }
     return vec3<f32>(unpack_cell(cell)) + volume.origin.xyz;
 }
 
@@ -111,19 +118,23 @@ struct VertexOutput {
     @location(3) ao: f32,
     // Colour multiplier of foliage (plant models: each tree its own shade; 1 elsewhere).
     @location(4) tint: vec3<f32>,
+    // 1 where it may be cut away when it hides the one followed (ground, plants), 0 for the
+    // characters themselves.
+    @location(5) cuttable: f32,
 }
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     // Mesh positions are in grid cells; the volume's origin places them in the world.
-    let world_position = in.position + volume.origin.xyz + wrap_shift(cell_anchor(in.cell));
+    let world_position = in.position + volume.origin.xyz + wrap_shift(cell_anchor(in.cell, in.position));
     out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
     out.world_position = world_position;
     out.normal = in.normal;
     out.cell = in.cell;
     out.ao = in.ao;
     out.tint = vec3<f32>(1.0);
+    out.cuttable = 1.0;
     return out;
 }
 
@@ -386,7 +397,59 @@ fn haze(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
         let mist_color = mix(atmosphere.fog_color.rgb, vec3<f32>(1.0), 0.25) * 1.05;
         hazed = mix(hazed, mist_color, thickness);
     }
+    // Edge of what is drawn: the ground melts into the haze before it ends, as the sky meets
+    // the land at the horizon.
+    let reach = camera.focus.w;
+    if (reach > 0.0) {
+        let from_look = length(world_position.xz - camera.world.zw);
+        hazed = mix(hazed, atmosphere.fog_color.rgb, smoothstep(reach * 0.6, reach * 0.95, from_look));
+    }
     return hazed;
+}
+
+// ---------- Cut-away: nothing hides the one followed ----------
+
+// What stands between the eye and the one followed, and rises above their feet (a tree, a
+// hill), is not drawn inside a cone from the eye to them: a round window on the screen, this
+// wide at their place (cells), with a dithered rim. Flat ground at their feet is never cut,
+// nor what stands just in front of them, nor the shadows (the shadow pass has no fragments).
+const CUT_RADIUS: f32 = 2.2;
+const CUT_RIM: f32 = 0.5;
+const CUT_SPARED: f32 = 1.0;
+const CUT_ABOVE_FEET: f32 = 0.3;
+// Close to the eye (a canopy it looks out of), all that rises above the feet goes, fading over
+// a rim: within this many cells, or less on a short view.
+const CUT_NEAR_EYE: f32 = 3.0;
+const CUT_NEAR_RIM: f32 = 1.0;
+
+// A number in [0, 1) that changes from pixel to pixel without visible pattern ("interleaved
+// gradient noise"): it dithers the rim of the window into a soft edge.
+fn pixel_noise(pixel: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+fn cut_away(p: vec3<f32>, pixel: vec2<f32>) -> bool {
+    let feet = camera.focus.xyz;
+    if (camera.focus.w <= 0.0 || p.y < feet.y + CUT_ABOVE_FEET) {
+        return false;
+    }
+    let eye = camera.eye.xyz;
+    let axis = feet + vec3<f32>(0.0, 1.0, 0.0) - eye;
+    let span = length(axis);
+    let along_axis = axis / span;
+    let along = dot(p - eye, along_axis);
+    if (along <= 0.0 || along > span - CUT_SPARED) {
+        return false;
+    }
+    let noise = pixel_noise(pixel);
+    if ((min(CUT_NEAR_EYE, span * 0.4) - along) / CUT_NEAR_RIM > noise) {
+        return true;
+    }
+    // The cone narrows towards the eye: the window keeps its size on the screen.
+    let scale = along / span;
+    let off = length(p - eye - along_axis * along);
+    let inside = (CUT_RADIUS * scale - off) / (CUT_RIM * scale);
+    return inside > noise;
 }
 
 // ---------- Marks: footprints and ripples ----------
@@ -464,6 +527,9 @@ fn ripple_rings(p: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (in.cuttable > 0.5 && cut_away(in.world_position, in.clip_position.xy)) {
+        discard;
+    }
     // Albedo: the inert colour, covered by the overlay colour as the overlay value grows.
     let direct = (in.cell & DIRECT_MATERIAL) != 0u;
     let value = base_value(in.cell);
@@ -685,7 +751,9 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     let sky_p = sky_plane(mirrored_sky);
     let pixel = max(max(length(dpdx(sky_p)), length(dpdy(sky_p))), 1.0e-4);
     let top_face = step(0.5, in.normal.y);
-    color += night_sky(mirrored_sky, pixel) * atmosphere.fog.w * calm * top_face * (0.5 + 0.5 * fresnel);
+    // Seen at a grazing angle (from low), the stars low in the sky are dimmed, as above.
+    let low_sky = smoothstep(0.02, 0.35, mirrored_sky.y);
+    color += night_sky(mirrored_sky, pixel) * atmosphere.fog.w * calm * top_face * (0.5 + 0.5 * fresnel) * low_sky;
 
     // Glint: the sun (or moon) mirrored by the surface, seen when the reflection points at
     // the eye.
@@ -699,6 +767,49 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // Shallow water lets the ground show through; deep water, foam and ice hide it.
     let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.4 * foam + ice, 0.0, 1.0);
     return vec4<f32>(haze(color, in.world_position), alpha);
+}
+
+// ---------- Sky: the background, seen when the view is low ----------
+
+// Brightness of the stars seen directly, against their reflections.
+const STARS_SEEN: f32 = 0.35;
+
+// No vertex buffer: the vertex shader makes the three corners of a triangle large enough to
+// cover the whole screen from the vertex index (0, 1, 2) alone.
+struct SkyOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+}
+
+@vertex
+fn vs_sky(@builtin(vertex_index) index: u32) -> SkyOutput {
+    // (−1, −1), (3, −1), (−1, 3): the screen square [−1, 1]² lies inside.
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u)) * 2.0 - 1.0;
+    var out: SkyOutput;
+    out.clip_position = vec4<f32>(corner, 1.0, 1.0);
+    out.ndc = corner;
+    return out;
+}
+
+@fragment
+fn fs_sky(in: SkyOutput) -> @location(0) vec4<f32> {
+    // The direction this pixel looks along: its point on the far plane, seen from the eye.
+    let far = camera.inverse_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
+    let d = normalize(far.xyz / far.w - camera.eye.xyz);
+    // The haze at the horizon (where the ground fades into it), the sky's colour above.
+    let up = max(d.y, 0.0);
+    var color = mix(atmosphere.fog_color.rgb, atmosphere.sky_color.rgb, smoothstep(0.0, 0.5, pow(up, 0.8)));
+    // By day, the air glows around the sun, more at the horizon.
+    let daylight = smoothstep(0.3, 0.8, dot(atmosphere.sun_color.rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    let towards_sun = max(dot(d, atmosphere.sun_direction.xyz), 0.0);
+    color += atmosphere.sun_color.rgb * pow(towards_sun, 6.0) * (0.35 - 0.2 * up) * daylight;
+    // At night, the stars and the moon (derivatives taken outside any branch). Seen directly
+    // they are fainter than their glitter on the water, and dimmed near the horizon, where
+    // their light crosses the most air.
+    let sky_p = sky_plane(d);
+    let pixel = max(max(length(dpdx(sky_p)), length(dpdy(sky_p))), 1.0e-4);
+    let stars = night_sky(d, pixel) * atmosphere.fog.w * STARS_SEEN * smoothstep(0.02, 0.35, d.y);
+    return vec4<f32>(color + stars, 1.0);
 }
 
 // ---------- Particles: one cube mesh drawn once per instance ----------
@@ -754,7 +865,7 @@ fn fs_particle(in: ParticleOutput) -> @location(0) vec4<f32> {
 // Only the position matters: the depth buffer of this pass is the shadow map.
 @vertex
 fn vs_shadow(in: VertexInput) -> @builtin(position) vec4<f32> {
-    let p = in.position + volume.origin.xyz + wrap_shift(cell_anchor(in.cell));
+    let p = in.position + volume.origin.xyz + wrap_shift(cell_anchor(in.cell, in.position));
     return camera.light_view_proj * vec4<f32>(p, 1.0);
 }
 
@@ -822,6 +933,7 @@ fn vs_model(in: VertexInput, instance: ModelInstance) -> VertexOutput {
     out.cell = in.cell;
     out.ao = in.ao;
     out.tint = instance.tint.rgb;
+    out.cuttable = 1.0;
     return out;
 }
 
@@ -860,6 +972,7 @@ fn vs_part(in: VertexInput, instance: PartInstance) -> VertexOutput {
     out.cell = in.cell;
     out.ao = in.ao;
     out.tint = instance.tint.rgb;
+    out.cuttable = 0.0;
     return out;
 }
 

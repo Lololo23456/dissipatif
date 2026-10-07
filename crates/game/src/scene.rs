@@ -102,9 +102,8 @@ fn drawn_size(plant: Plant, size: f32) -> f32 {
 /// Seed offset of the per-voxel brightness variation.
 const VARIATION_SEED: u64 = 0x5eed;
 
-/// Plants are drawn within this many cells of where the camera looks, and chosen again when
-/// the view has moved this far.
-const VIEW_RADIUS: f32 = 110.0;
+/// Plants are chosen again when the view has moved this far, or its reach has changed this
+/// much.
 const VIEW_STEP: f32 = 8.0;
 
 /// The world, ready to upload.
@@ -139,9 +138,10 @@ pub struct SceneData {
     dirty: Vec<bool>,
     /// The ground's look changed since it was last uploaded.
     look_dirty: bool,
-    /// Plants are drawn within `VIEW_RADIUS` of this point (where the camera looks), on a
+    /// Plants are drawn within `view_radius` of this point (where the camera looks), on a
     /// world of this size that closes on itself.
     view: Option<glam::Vec2>,
+    view_radius: f32,
     world_size: (f32, f32),
     visible: Vec<ModelInstance>,
     /// No overlays yet: zero fields with the shapes of the textures above.
@@ -232,6 +232,7 @@ impl SceneData {
             dirty: vec![false; groups],
             look_dirty: false,
             view: None,
+            view_radius: 0.0,
             world_size: (world.dims().nx as f32, world.dims().nz as f32),
             visible: Vec::new(),
             no_overlay_solid: Field3::filled(dims, 0.0),
@@ -437,17 +438,20 @@ impl SceneData {
         self.look_dirty = true;
     }
 
-    /// Where the camera looks: only the plants around are drawn (the planet holds tens of
-    /// thousands). Chosen again when the view has moved a few cells.
-    pub fn set_view(&mut self, at: glam::Vec2) {
+    /// Where the camera looks, and how far from there the ground is drawn: only the plants
+    /// within reach are drawn (the planet holds tens of thousands), with a margin so that
+    /// they need choosing again only when the view has moved a few cells.
+    pub fn set_view(&mut self, at: glam::Vec2, reach: f32) {
         let (nx, nz) = self.world_size;
         let moved = self.view.is_none_or(|v| {
             let d = at - v;
             let d = glam::Vec2::new(d.x - nx * (d.x / nx).round(), d.y - nz * (d.y / nz).round());
             d.length() > VIEW_STEP
         });
-        if moved {
+        let radius = reach + VIEW_STEP;
+        if moved || (radius - self.view_radius).abs() > VIEW_STEP {
             self.view = Some(at);
+            self.view_radius = radius;
             self.dirty.iter_mut().for_each(|d| *d = true);
         }
     }
@@ -472,7 +476,7 @@ impl SceneData {
                             let (dx, dz) = (x - view.x, z - view.y);
                             let dx = dx - nx * (dx / nx).round();
                             let dz = dz - nz * (dz / nz).round();
-                            dx * dx + dz * dz < VIEW_RADIUS * VIEW_RADIUS
+                            dx * dx + dz * dz < self.view_radius * self.view_radius
                         }));
                         renderer.set_model_instances(id, &self.visible);
                     }
