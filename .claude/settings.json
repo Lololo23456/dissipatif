@@ -13,12 +13,12 @@
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",
-      "Bash(git show *)"
+      "Bash(git show *)",
+      "Bash(git push *)"
     ],
     "deny": [
       "Read(./.env)",
       "Read(./.env.*)",
-      "Bash(git push *)",
       "Bash(git reset --hard *)",
       "Bash(rm -rf *)",
       "Bash(cargo publish *)"
