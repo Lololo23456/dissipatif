@@ -1736,6 +1736,14 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.tick(CAPTURE_STEP, (still + walking) as f32 * CAPTURE_STEP);
     }
     if std::env::var_os("DISSIPATIF_DEBUG_DEER").is_some()
+        && let Some(squirrels) = app.state.squirrels()
+    {
+        for q in &squirrels.squirrels {
+            eprintln!("écureuil {:?} {:?}", q.position, q.doing);
+        }
+        eprintln!("caches : {}", squirrels.caches.len());
+    }
+    if std::env::var_os("DISSIPATIF_DEBUG_DEER").is_some()
         && let Some(herd) = app.state.herd()
     {
         for d in &herd.deer {
@@ -1743,12 +1751,6 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
                 "cerf {:?} {:?} tête {:.2} couché {:.2}",
                 d.position, d.activity, d.head, d.lying
             );
-        }
-        if let Some(squirrels) = app.state.squirrels() {
-            for q in &squirrels.squirrels {
-                eprintln!("écureuil {:?} {:?}", q.position, q.doing);
-            }
-            eprintln!("caches : {}", squirrels.caches.len());
         }
         eprintln!(
             "cercle {:?} lueur {:.2} vent vers {:?}",

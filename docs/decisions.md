@@ -328,3 +328,7 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Coût** : n'est dessiné que ce qui est à moins de 110 cases (plantes, choisies de nouveau tous les 8 cases) ou 150 cases (morceaux de relief, par leur boîte) du regard. 11 → ~54 images/s ; le jeu est alors limité par la carte graphique. L'écologie fait des pas plus longs (jusqu'à 30 s de jeu) quand le jour est accéléré : même coût par seconde réelle, toujours stable.
 - **Limites** : les traces (empreintes, ondes) ne passent pas la couture ; des palmiers peuvent pousser sur les plages froides (la plage ne dépend pas du climat).
 - Sauvegarde : version 6 (les anciennes, d'un monde de 256, sont ignorées).
+
+## 2026-10-07 — Écureuils visibles ; une harde sur chaque planète
+- Sur la planète de 512, aucune prairie ne remplissait les critères de la harde : pas de cerfs. La recherche se fait maintenant par paliers (plus dégagée et plate d'abord, puis moins, et plus loin, jusqu'à 220 cases). Vérifié sur 6 graines : une harde à chaque fois.
+- Écureuils : dérangés, ils grimpent sur le tronc et s'y plaquent, tête en bas, visibles (seule la nuit les cache, dans leur nid) ; actifs de 7 h à 19 h 30 ; fuient à 4 cases, redescendent après 10 à 20 s ; un défaut les faisait à peine bouger (ils n'avançaient qu'à l'instant d'une décision) ; modèle agrandi (×1,8 la taille réelle) pour la caméra haute.

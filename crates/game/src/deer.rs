@@ -1006,9 +1006,18 @@ pub fn home(world: &World, start: Vec2) -> Option<(Vec2, Vec2)> {
         })
     };
     // The most open meadow there is: clear of trees over 8 cells around, else 6, else 4.
-    let ring = [8, 6, 4]
-        .into_iter()
-        .find_map(|clear| meadow(world, start, |x, z| open(x, z, clear)))?;
+    // The most open, flattest meadow near enough; else less open, less flat, farther, in
+    // turn (every world has some place where deer graze).
+    let tiers = [
+        (8, 1, 90.0),
+        (6, 1, 90.0),
+        (4, 1, 130.0),
+        (4, 2, 160.0),
+        (3, 2, 220.0),
+    ];
+    let ring = tiers.into_iter().find_map(|(clear, slope, far)| {
+        meadow(world, start, slope, far, |x, z| open(x, z, clear))
+    })?;
     // The nearest wood: forest ground within 35 cells, else a spot beside the meadow.
     let mut cover: Option<(f32, Vec2)> = None;
     for dz in -35i64..=35 {
@@ -1037,7 +1046,15 @@ pub fn home(world: &World, start: Vec2) -> Option<(Vec2, Vec2)> {
 
 /// A flat, dry, grassy place 30 to 90 cells from `start` where `open` holds, the nearest to
 /// 55 cells away.
-fn meadow(world: &World, start: Vec2, open: impl Fn(usize, usize) -> bool) -> Option<Vec2> {
+/// `slope`: how many cells the ground may rise or fall over the circle; `far`: farthest from
+/// the start.
+fn meadow(
+    world: &World,
+    start: Vec2,
+    slope: i64,
+    far: f32,
+    open: impl Fn(usize, usize) -> bool,
+) -> Option<Vec2> {
     let dims = world.dims();
     let height = |x: usize, z: usize| world.ground_top(x, z) as i64;
     let mut best: Option<(f32, Vec2)> = None;
@@ -1045,7 +1062,7 @@ fn meadow(world: &World, start: Vec2, open: impl Fn(usize, usize) -> bool) -> Op
         for x in (8..dims.nx - 8).step_by(2) {
             let at = Vec2::new(x as f32 + 0.5, z as f32 + 0.5);
             let distance = at.distance(start);
-            if !(30.0..90.0).contains(&distance)
+            if !(30.0..far).contains(&distance)
                 || !matches!(world.biome(x, z), Biome::Plains | Biome::Savanna)
             {
                 continue;
@@ -1053,10 +1070,10 @@ fn meadow(world: &World, start: Vec2, open: impl Fn(usize, usize) -> bool) -> Op
             // Flat and dry over the circle and around it.
             let h = height(x, z);
             let mut flat = true;
-            'around: for dz in -6i64..=6 {
-                for dx in -6i64..=6 {
+            'around: for dz in -5i64..=5 {
+                for dx in -5i64..=5 {
                     let (cx, cz) = ((x as i64 + dx) as usize, (z as i64 + dz) as usize);
-                    if (height(cx, cz) - h).abs() > 1 || world.water_level(cx, cz).is_some() {
+                    if (height(cx, cz) - h).abs() > slope || world.water_level(cx, cz).is_some() {
                         flat = false;
                         break 'around;
                     }

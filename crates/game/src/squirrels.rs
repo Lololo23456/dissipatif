@@ -34,7 +34,9 @@ const SMELL: f32 = 1.5;
 /// Nuts a squirrel eats in a game day in the lean months (from its caches).
 const NUTS_PER_DAY: f32 = 3.0;
 /// It flees when the naturalist comes this close.
-const FLIGHT_DISTANCE: f32 = 5.0;
+const FLIGHT_DISTANCE: f32 = 4.0;
+/// Up its tree after a fright, a squirrel clings to the trunk this high, head down, watching.
+pub const PERCH_HEIGHT: f32 = 1.8;
 /// Caches at most (the oldest rot first).
 const MAX_CACHES: usize = 2000;
 
@@ -66,7 +68,8 @@ pub struct Cache {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Doing {
-    /// In its tree, out of sight (at night, by the cold, or after a fright).
+    /// In its tree: clinging to the trunk, watching, after a fright by day; in its nest, out
+    /// of sight, at night.
     InTree,
     /// Hopping about on the ground near its tree.
     Roaming,
@@ -96,6 +99,10 @@ pub struct Squirrel {
     timer: f32,
     /// Nuts it owes its stomach (it eats from its caches in the lean months).
     hunger: f32,
+    /// Where it hops to, roaming.
+    wander: Vec2,
+    /// By day, in its tree: clinging to the trunk, in sight (at night, in its nest).
+    pub perched: bool,
 }
 
 /// What happened, for the presentation.
@@ -169,6 +176,8 @@ impl Squirrels {
                     speed: 0.0,
                     timer: rng.next_f32() * 5.0,
                     hunger: 0.0,
+                    wander: home,
+                    perched: false,
                 }
             })
             .collect();
@@ -213,7 +222,8 @@ impl Squirrels {
             crate::season::Season::Winter | crate::season::Season::Spring
         ) && year > 0.6
             || year < 0.15;
-        let daytime = (7.5..18.0).contains(&now.hour);
+        // Active from the morning to dusk.
+        let daytime = (7.0..19.5).contains(&now.hour);
         let days = dt / crate::clock::DAY_SECONDS;
         for i in 0..self.squirrels.len() {
             let here = {
@@ -231,6 +241,7 @@ impl Squirrels {
             if threatened && !matches!(s.doing, Doing::InTree | Doing::Fleeing) {
                 s.doing = Doing::Fleeing;
             }
+            s.perched = daytime;
             s.timer -= dt;
             let decide = s.timer <= 0.0;
             let doing = s.doing;
@@ -238,7 +249,7 @@ impl Squirrels {
                 Doing::Fleeing => {
                     if here.distance(s.home) < 0.5 {
                         s.doing = Doing::InTree;
-                        s.timer = 20.0 + 20.0 * self.rng.next_f32();
+                        s.timer = 10.0 + 10.0 * self.rng.next_f32();
                     }
                     (s.home, DASH_SPEED)
                 }
@@ -286,14 +297,19 @@ impl Squirrels {
                             }
                         }
                     }
-                    let angle = s.heading + (self.rng.next_f32() - 0.5) * 2.0;
-                    let wander = here + Vec2::new(angle.sin(), angle.cos()) * 1.5;
-                    let goal = if wander.distance(s.home) > 10.0 {
-                        s.home
-                    } else {
-                        wander
-                    };
-                    (goal, if decide { HOP_SPEED * 0.6 } else { 0.0 })
+                    // Hops from place to place about its tree, pausing between.
+                    if decide {
+                        let angle = self.rng.next_f32() * std::f32::consts::TAU;
+                        let step = 1.0 + 3.0 * self.rng.next_f32();
+                        let next = here + Vec2::new(angle.sin(), angle.cos()) * step;
+                        s.wander = if next.distance(s.home) > 9.0 {
+                            s.home
+                        } else {
+                            next
+                        };
+                    }
+                    let arrived = here.distance(s.wander) < 0.3;
+                    (s.wander, if arrived { 0.0 } else { HOP_SPEED * 0.6 })
                 }
                 Doing::Carrying(nut, spot) => {
                     if here.distance(spot) < 0.4 {
@@ -436,6 +452,8 @@ impl crate::save::Persist for Squirrel {
             home: r.get()?,
             sources: r.get()?,
             hunger: r.get()?,
+            wander: Vec2::ZERO,
+            perched: false,
             doing: Doing::InTree,
             hop: 0.0,
             speed: 0.0,
