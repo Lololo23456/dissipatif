@@ -168,6 +168,8 @@ struct App {
     deer_stride: f32,
     /// Real seconds until the next automatic save.
     save_in: f32,
+    /// Frames counted and their time, for `DISSIPATIF_FPS`.
+    frames: (u32, f32),
 }
 
 /// The game saves itself this often (real seconds), and when the window closes.
@@ -325,6 +327,7 @@ impl App {
             page: 0,
             sketches,
             save_in: AUTOSAVE_SECONDS,
+            frames: (0, 0.0),
             sketch_pending: Vec::new(),
             cast_at: None,
             deer_stride: 0.0,
@@ -354,6 +357,14 @@ impl App {
         let body = self.state.body(self.me);
         let (feet, velocity) = (body.position, body.velocity());
         let goal = body.shown_position() + Vec3::Y * LOOK_HEIGHT;
+        // The planet closes on itself: when the naturalist crosses an edge, the camera goes
+        // with them to the other side instead of sweeping back across the world.
+        let [x, z] = self.world.nearest(
+            [goal.x, goal.z],
+            [self.camera.target.x, self.camera.target.z],
+        );
+        self.camera.target.x = x;
+        self.camera.target.z = z;
         self.camera.target += (goal - self.camera.target) * (1.0 - (-FOLLOW_EASING * dt).exp());
         let around = [feet.x, feet.z];
         let wind = wind::direction(self.clock.days()).to_array();
@@ -1075,6 +1086,8 @@ impl ApplicationHandler for App {
             size.height,
         );
         let mut renderer = Renderer::new(gpu);
+        let dims = self.world.dims();
+        renderer.set_world_size(dims.nx as f32, dims.nz as f32);
         self.data.install(&mut renderer);
         self.naturalist.install(&mut renderer);
         self.fauna.install(&mut renderer);
@@ -1104,6 +1117,19 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
                 let time = (now - self.start).as_secs_f32();
+                // `DISSIPATIF_FPS=1`: the mean frame time, every two seconds.
+                if std::env::var_os("DISSIPATIF_FPS").is_some() {
+                    self.frames.0 += 1;
+                    self.frames.1 += dt;
+                    if self.frames.1 >= 2.0 {
+                        println!(
+                            "image : {:.1} ms ({:.0} i/s)",
+                            1000.0 * self.frames.1 / self.frames.0 as f32,
+                            self.frames.0 as f32 / self.frames.1
+                        );
+                        self.frames = (0, 0.0);
+                    }
+                }
                 self.tick(dt, time);
                 let mut motion = self.state.body(self.me).motion(time);
                 motion.gesture = self.current_gesture(time);
@@ -1115,6 +1141,8 @@ impl ApplicationHandler for App {
                         self.data
                             .ground_dug(&self.world, cell, flooded, Some(renderer));
                     }
+                    let t = self.camera.target;
+                    self.data.set_view(glam::Vec2::new(t.x, t.z));
                     self.data.upload_changes(renderer);
                     self.weather.draw(renderer);
                     set_sky(
@@ -1502,23 +1530,23 @@ fn pointed_ground(
     let step = 0.05;
     for _ in 0..12_000 {
         p += direction * step;
-        if p.x < 0.0 || p.z < 0.0 || p.y < 0.0 {
+        if p.y < 0.0 {
             return None;
         }
-        let (x, y, z) = (p.x as usize, p.y as usize, p.z as usize);
-        if x >= dims.nx || z >= dims.nz {
-            return None;
-        }
+        let y = p.y as usize;
         if y >= dims.ny {
             continue;
         }
+        // The world closes on itself: the point, brought back into it.
+        let (wx, wz) = world.wrap(p.x, p.z);
+        let (x, z) = (wx as usize, wz as usize);
         if world.water_level(x, z).is_some_and(|level| p.y <= level) {
-            return Some(p);
+            return Some(Vec3::new(wx, p.y, wz));
         }
         let material = world.block(x, y, z);
         if material.is_solid() && !material.is_plant() {
             // Back to the surface: the top of the cell entered.
-            return Some(Vec3::new(p.x, (y + 1) as f32, p.z));
+            return Some(Vec3::new(wx, (y + 1) as f32, wz));
         }
     }
     None
@@ -1741,6 +1769,8 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         app.data.ground_dug(&app.world, cell, flooded, None);
     }
     let mut renderer = Renderer::new(Gpu::offscreen(options.width, options.height));
+    let dims = app.world.dims();
+    renderer.set_world_size(dims.nx as f32, dims.nz as f32);
     app.data.install(&mut renderer);
     app.naturalist.install(&mut renderer);
     app.deer_view.install(&mut renderer);
@@ -1751,6 +1781,8 @@ fn capture(seed: u64, options: &CaptureOptions) -> Result<(), String> {
         None => app.current_gesture(time),
     };
     app.draw_creatures(&mut renderer, &motion, time);
+    let t = app.camera.target;
+    app.data.set_view(glam::Vec2::new(t.x, t.z));
     app.data.upload_changes(&mut renderer);
     app.weather.install(&mut renderer);
     app.weather.draw(&mut renderer);
@@ -1863,7 +1895,7 @@ mod tests {
 
     #[test]
     fn the_centre_of_the_screen_points_at_the_ground_the_camera_looks_at() {
-        let world = World::generate(WorldConfig::standard(1));
+        let world = World::generate(WorldConfig::small(1));
         let feet = player::spawn_point(&world);
         let camera = OrbitCamera::framing(feet + Vec3::Y * LOOK_HEIGHT, FOLLOW_FRAME);
         let hit = pointed_ground(&world, &camera, 1.6, glam::Vec2::ZERO).expect("no ground");

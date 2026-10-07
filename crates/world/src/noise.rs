@@ -86,6 +86,58 @@ pub fn ridged(x: f32, z: f32, scale: f32, octaves: u32, seed: u64) -> f32 {
     sum / total
 }
 
+/// Smooth 2D noise that tiles: like `value`, but periodic with period `period` (px, pz) in
+/// each axis (a planet that closes on itself). The lattice indices wrap around; the lattice
+/// spacing is adjusted so that a whole number of cells fits in a period.
+pub fn value_tiled(x: f32, z: f32, scale: f32, seed: u64, period: (f32, f32)) -> f32 {
+    let lx = (period.0 / scale).round().max(1.0);
+    let lz = (period.1 / scale).round().max(1.0);
+    let (qx, qz) = (x / (period.0 / lx), z / (period.1 / lz));
+    let (cx, cz) = (qx.floor(), qz.floor());
+    let smooth = |f: f32| f * f * (3.0 - 2.0 * f);
+    let (tx, tz) = (smooth(qx - cx), smooth(qz - cz));
+    let (ix, iz) = (cx as i64, cz as i64);
+    let (lx, lz) = (lx as i64, lz as i64);
+    let corner =
+        |dx: i64, dz: i64| hash_unit(seed, &[(ix + dx).rem_euclid(lx), (iz + dz).rem_euclid(lz)]);
+    let top = corner(0, 0) * (1.0 - tx) + corner(1, 0) * tx;
+    let bottom = corner(0, 1) * (1.0 - tx) + corner(1, 1) * tx;
+    top * (1.0 - tz) + bottom * tz
+}
+
+/// `fbm` that tiles with period `period` (see `value_tiled`).
+pub fn fbm_tiled(x: f32, z: f32, scale: f32, octaves: u32, seed: u64, period: (f32, f32)) -> f32 {
+    let (mut sum, mut weight, mut total, mut s) = (0.0, 1.0, 0.0, scale);
+    for octave in 0..octaves {
+        sum += weight * value_tiled(x, z, s, seed.wrapping_add(octave as u64 * 1013), period);
+        total += weight;
+        weight *= 0.5;
+        s *= 0.5;
+    }
+    sum / total
+}
+
+/// `ridged` that tiles with period `period` (see `value_tiled`).
+pub fn ridged_tiled(
+    x: f32,
+    z: f32,
+    scale: f32,
+    octaves: u32,
+    seed: u64,
+    period: (f32, f32),
+) -> f32 {
+    let (mut sum, mut weight, mut total, mut s) = (0.0, 1.0, 0.0, scale);
+    for octave in 0..octaves {
+        let n = value_tiled(x, z, s, seed.wrapping_add(octave as u64 * 7919), period);
+        let crest = 1.0 - (2.0 * n - 1.0).abs();
+        sum += weight * crest * crest;
+        total += weight;
+        weight *= 0.5;
+        s *= 0.5;
+    }
+    sum / total
+}
+
 /// Smoothstep from `edge0` to `edge1`: 0 below, 1 above, a smooth S in between.
 #[inline]
 pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -123,5 +175,16 @@ mod tests {
         // Two points a hundredth of a cell apart have almost the same value.
         let (a, b) = (value(5.0, 5.0, 8.0, 4), value(5.01, 5.0, 8.0, 4));
         assert!((a - b).abs() < 0.01);
+    }
+
+    #[test]
+    fn tiled_noise_closes_on_itself() {
+        let period = (96.0, 64.0);
+        for i in 0..200 {
+            let (x, z) = (i as f32 * 0.73, i as f32 * 0.41);
+            let a = fbm_tiled(x, z, 20.0, 4, 5, period);
+            assert!((a - fbm_tiled(x + 96.0, z, 20.0, 4, 5, period)).abs() < 1e-5);
+            assert!((a - fbm_tiled(x, z - 64.0, 20.0, 4, 5, period)).abs() < 1e-5);
+        }
     }
 }

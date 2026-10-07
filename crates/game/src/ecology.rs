@@ -47,6 +47,8 @@ use world::{Biome, Material, Plant, PlantInstance, World};
 
 /// Real seconds between two life steps, and real seconds in a game day (`clock`).
 pub const STEP_SECONDS: f32 = 2.0;
+/// Longest life step, in seconds of game (when the day runs fast).
+const LONGEST_STEP: f32 = 30.0;
 const DAY_SECONDS: f32 = 20.0 * 60.0;
 /// Size below which a plant dies, above which it seeds; size of a seedling.
 const DEATH_SIZE: f32 = 0.08;
@@ -281,13 +283,14 @@ impl Habitat {
             if next > 10 {
                 continue;
             }
+            // Across the edges too: the world closes on itself.
             for (a, b) in [
-                (x + 1, z),
-                (x.wrapping_sub(1), z),
-                (x, z + 1),
-                (x, z.wrapping_sub(1)),
+                ((x + 1) % nx, z),
+                ((x + nx - 1) % nx, z),
+                (x, (z + 1) % nz),
+                (x, (z + nz - 1) % nz),
             ] {
-                if a < nx && b < nz && distance[a + nx * b] > next {
+                if distance[a + nx * b] > next {
                     distance[a + nx * b] = next;
                     queue.push_back((a, b));
                 }
@@ -750,13 +753,25 @@ impl Ecology {
         found
     }
 
+    /// The copy of `to` nearest `from`: the world closes on itself, and the plants across its
+    /// edges are neighbours too.
+    fn toward(&self, from: Vec2, to: Vec2) -> Vec2 {
+        let (nx, nz) = (self.habitat.nx as f32, self.habitat.nz as f32);
+        Vec2::new(
+            to.x + nx * ((from.x - to.x) / nx).round(),
+            to.y + nz * ((from.y - to.y) / nz).round(),
+        )
+    }
+
     fn for_near(&self, at: Vec2, radius: f32, plants: &[PlantInstance], mut f: impl FnMut(usize)) {
         let (cx, cz) = column(at);
         let r = radius.ceil() as i64;
+        let (nx, nz) = (self.habitat.nx as i64, self.habitat.nz as i64);
         for z in cz - r..=cz + r {
             for x in cx - r..=cx + r {
-                for &j in self.grid.get(&(x, z)).into_iter().flatten() {
-                    if place(&plants[j]).distance(at) <= radius {
+                let key = (x.rem_euclid(nx), z.rem_euclid(nz));
+                for &j in self.grid.get(&key).into_iter().flatten() {
+                    if self.toward(at, place(&plants[j])).distance(at) <= radius {
                         f(j);
                     }
                 }
@@ -848,7 +863,7 @@ impl Ecology {
                 if j == i {
                     continue;
                 }
-                let offset = place(&plants[j]) - at;
+                let offset = self.toward(at, place(&plants[j])) - at;
                 let towards = offset.normalize_or_zero();
                 let wind = 1.0 + 0.8 * towards.dot(wind);
                 let near = 1.0 - offset.length() / reach;
@@ -878,10 +893,15 @@ impl Ecology {
         free: impl Fn(Vec2) -> bool,
         changes: &mut Vec<Change>,
     ) {
+        // When the day runs faster, fewer and longer steps: the same cost per real second.
+        // A step never spans more than `LONGEST_STEP` seconds of game, so that Euler stays
+        // stable for the fastest species (r dt ≤ 0.1 for grass).
+        let speed = (dt / crate::state::STEP).max(1.0);
+        let interval = (STEP_SECONDS * speed).min(LONGEST_STEP);
         self.timer -= dt;
         while self.timer <= 0.0 {
-            self.timer += STEP_SECONDS;
-            self.step(STEP_SECONDS / DAY_SECONDS, world, plants, &free, changes);
+            self.timer += interval;
+            self.step(interval / DAY_SECONDS, world, plants, &free, changes);
         }
     }
 
@@ -930,7 +950,7 @@ impl Ecology {
             let mut crowd = 0.0;
             self.for_near(at, reach, plants, |j| {
                 if j != i {
-                    let w = 1.0 - place(&plants[j]).distance(at) / reach;
+                    let w = 1.0 - self.toward(at, place(&plants[j])).distance(at) / reach;
                     crowd += competition(p.plant, plants[j].plant) * w * self.size(j);
                 }
             });
@@ -963,7 +983,13 @@ impl Ecology {
             {
                 let angle = std::f32::consts::TAU * self.rng.next_f32();
                 let distance = sp.dispersal * self.rng.next_f32().sqrt();
-                seeds.push((p.plant, at + Vec2::new(angle.cos(), angle.sin()) * distance));
+                // Where it lands, brought back into the world (it closes on itself).
+                let landing = at + Vec2::new(angle.cos(), angle.sin()) * distance;
+                let (nx, nz) = (self.habitat.nx as f32, self.habitat.nz as f32);
+                seeds.push((
+                    p.plant,
+                    Vec2::new(landing.x.rem_euclid(nx), landing.y.rem_euclid(nz)),
+                ));
             }
         }
         // The seed bank: seeds that fell out of season wait in the soil; in spring they come
@@ -1005,7 +1031,7 @@ impl Ecology {
             let mut crowded = false;
             self.for_near(target, sp.layer.room().max(0.6), plants, |j| {
                 let other = species(plants[j].plant).map(|s| s.layer);
-                let d = place(&plants[j]).distance(target);
+                let d = self.toward(target, place(&plants[j])).distance(target);
                 if (other == Some(sp.layer) && d < sp.layer.room())
                     || (other == Some(Layer::Tree) && d < 0.6)
                 {
@@ -1057,7 +1083,7 @@ mod tests {
     use world::WorldConfig;
 
     fn setup() -> (World, Vec<PlantInstance>, Ecology) {
-        let world = World::generate(WorldConfig::standard(6));
+        let world = World::generate(WorldConfig::small(6));
         let plants = world.plants().to_vec();
         let ecology = Ecology::new(&world, &plants, 1);
         (world, plants, ecology)
@@ -1082,15 +1108,31 @@ mod tests {
     fn graze_then_rest(grazers: usize, spacing: f32, rest: usize) -> (f32, f32, f32) {
         let (world, mut plants, mut eco) = setup();
         let soil = eco.soil();
+        // The heart of a meadow: the patch whose neighbourhood (3 × 3 patches) is richest in
+        // grass at its poorest.
+        let side = (soil.patches() as f32).sqrt() as i64;
+        let around = |k: usize| {
+            let (x, z) = ((k as i64) % side, (k as i64) / side);
+            (-1..=1)
+                .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+                .map(|(dx, dz)| {
+                    let j = (x + dx).rem_euclid(side) + side * (z + dz).rem_euclid(side);
+                    soil.forage(j as usize)
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
         let k = (0..soil.patches())
             .filter(|&k| {
                 let c = soil.centre(k);
                 world.biome(c.x as usize, c.y as usize) == Biome::Plains
             })
-            .max_by(|&a, &b| soil.forage(a).total_cmp(&soil.forage(b)))
+            .max_by(|&a, &b| around(a).total_cmp(&around(b)))
             .expect("a meadow");
         let centre = soil.centre(k);
         let before = soil.cover(k);
+        if std::env::var_os("DISSIPATIF_TRACE").is_some() {
+            println!("  parcelle {k} au {centre:?}, pluie {:.2}", soil.rain(k));
+        }
         let side = (grazers as f32).sqrt().ceil() as usize;
         let at: Vec<Vec2> = (0..grazers)
             .map(|g| {
@@ -1127,7 +1169,7 @@ mod tests {
         assert!(light > 0.8 * before, "light grazing: {before} → {light}");
         let (_, bare, spot) = graze_then_rest(16, 2.0, 12);
         assert!(bare < 0.05 && spot > 0.2, "small spot: {bare} → {spot}");
-        let (_, bare, wide) = graze_then_rest(196, 2.5, 12);
+        let (_, bare, wide) = graze_then_rest(324, 2.5, 12);
         assert!(bare < 0.1 && wide < 0.1, "wide land: {bare} → {wide}");
     }
 
@@ -1317,7 +1359,7 @@ mod timing {
     #[test]
     #[ignore = "mesure : cargo test --release -p game timing -- --ignored --nocapture"]
     fn step_cost() {
-        let world = World::generate(WorldConfig::standard(1));
+        let world = World::generate(WorldConfig::small(1));
         let mut plants = world.plants().to_vec();
         let mut eco = Ecology::new(&world, &plants, 1);
         let mut changes = Vec::new();

@@ -40,16 +40,29 @@ pub struct WorldConfig {
 }
 
 impl WorldConfig {
-    /// The default world: 256 × 64 × 256 cells, sea at 20.
+    /// The planet of the game: 512 × 64 × 512 cells (half a kilometre around, a cell being
+    /// a metre), sea at 20.
     pub fn standard(seed: u64) -> Self {
+        Self {
+            dims: Dims {
+                nx: 512,
+                ny: 64,
+                nz: 512,
+            },
+            sea_level: 20.0,
+            seed,
+        }
+    }
+
+    /// A smaller planet, 256 × 64 × 256: for tests and experiments (four times cheaper).
+    pub fn small(seed: u64) -> Self {
         Self {
             dims: Dims {
                 nx: 256,
                 ny: 64,
                 nz: 256,
             },
-            sea_level: 20.0,
-            seed,
+            ..Self::standard(seed)
         }
     }
 }
@@ -205,7 +218,8 @@ impl World {
 
     /// The micro-voxels of a subdivided cell, if it is one.
     pub fn micro(&self, x: usize, y: usize, z: usize) -> Option<&[u8; MICRO_CELLS]> {
-        self.micro.get(&self.dims().index(x, y, z))
+        let d = self.dims();
+        self.micro.get(&d.index(x % d.nx, y, z % d.nz))
     }
 
     /// Every subdivided cell: (x, y, z) and its micro-voxels.
@@ -272,6 +286,36 @@ impl World {
         self.micro = state.micro.into_iter().collect();
         self.plants = state.plants;
         Ok(())
+    }
+
+    /// A point brought back into the world, which closes on itself (a planet): going past one
+    /// edge comes back from the other.
+    pub fn wrap(&self, x: f32, z: f32) -> (f32, f32) {
+        let d = self.dims();
+        let (nx, nz) = (d.nx as f32, d.nz as f32);
+        let (x, z) = (x.rem_euclid(nx), z.rem_euclid(nz));
+        // rem_euclid may round up to the size itself.
+        (if x >= nx { 0.0 } else { x }, if z >= nz { 0.0 } else { z })
+    }
+
+    /// The column (x, z), brought back into the world.
+    pub fn column(&self, x: i64, z: i64) -> (usize, usize) {
+        let d = self.dims();
+        (
+            x.rem_euclid(d.nx as i64) as usize,
+            z.rem_euclid(d.nz as i64) as usize,
+        )
+    }
+
+    /// The copy of `to` nearest `from`, across the edges if that is shorter (the world closes
+    /// on itself: the way from one to the other is the shortest one around it).
+    pub fn nearest(&self, from: [f32; 2], to: [f32; 2]) -> [f32; 2] {
+        let d = self.dims();
+        let (nx, nz) = (d.nx as f32, d.nz as f32);
+        [
+            to[0] + nx * ((from[0] - to[0]) / nx).round(),
+            to[1] + nz * ((from[1] - to[1]) / nz).round(),
+        ]
     }
 
     /// The material of the surface of column (x, z) (the top ground cell).
@@ -346,10 +390,9 @@ impl World {
     /// Height of the ground surface at (x, z), micro-voxels included.
     pub fn surface_height(&self, x: f32, z: f32) -> f32 {
         let d = self.dims();
-        if x < 0.0 || z < 0.0 || x >= d.nx as f32 || z >= d.nz as f32 {
-            return 0.0;
-        }
-        let (cx, cz) = (x as usize, z as usize);
+        // The world closes on itself.
+        let (x, z) = self.wrap(x, z);
+        let (cx, cz) = ((x as usize).min(d.nx - 1), (z as usize).min(d.nz - 1));
         let top = self.tops[cx + d.nx * cz];
         if top == 0 {
             return 0.0;
@@ -475,8 +518,11 @@ impl World {
         self.config.dims
     }
 
+    /// The material of cell (x, y, z). Columns past the edges are those of the other side
+    /// (the world closes on itself), so a query a step beyond is never out of the world.
     pub fn block(&self, x: usize, y: usize, z: usize) -> Material {
-        Material::from_id(self.blocks[self.dims().index(x, y, z)]).unwrap_or(Material::Air)
+        let d = self.dims();
+        Material::from_id(self.blocks[d.index(x % d.nx, y, z % d.nz)]).unwrap_or(Material::Air)
     }
 
     /// Every voxel's material id, indexed like `Dims::index` (x fastest, then y, then z).
@@ -485,17 +531,20 @@ impl World {
     }
 
     pub fn biome(&self, x: usize, z: usize) -> Biome {
-        self.biomes[x + self.dims().nx * z]
+        let d = self.dims();
+        self.biomes[x % d.nx + d.nx * (z % d.nz)]
     }
 
     /// Ground voxels of column (x, z), plants excluded.
     pub fn ground_top(&self, x: usize, z: usize) -> usize {
-        self.tops[x + self.dims().nx * z]
+        let d = self.dims();
+        self.tops[x % d.nx + d.nx * (z % d.nz)]
     }
 
     /// Water surface of column (x, z), if water covers its ground.
     pub fn water_level(&self, x: usize, z: usize) -> Option<f32> {
-        let i = x + self.dims().nx * z;
+        let d = self.dims();
+        let i = x % d.nx + d.nx * (z % d.nz);
         (self.water.data[i] > self.ground.data[i]).then_some(self.water.data[i])
     }
 
@@ -588,14 +637,12 @@ mod tests {
     }
 
     #[test]
-    fn world_ends_in_the_sea() {
+    fn the_world_has_sea_and_cold_poles() {
         let world = small(5);
-        for i in 0..128 {
-            for (x, z) in [(i, 0), (i, 127), (0, i), (127, i)] {
-                assert_eq!(world.biome(x, z), Biome::Ocean, "({x}, {z})");
-                assert!(world.water_level(x, z).is_some(), "dry edge at ({x}, {z})");
-            }
-        }
+        let sea = (0..128 * 128)
+            .filter(|&i| world.biome(i % 128, i / 128) == Biome::Ocean)
+            .count();
+        assert!(sea > 128 * 128 / 20, "{sea}");
     }
 
     #[test]

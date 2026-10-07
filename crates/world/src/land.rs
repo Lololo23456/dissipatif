@@ -1,12 +1,17 @@
 //! Relief and climate: the heightmap (sea, plains, hills, mountain ranges, dunes) and the
 //! temperature and moisture of every column.
+//!
+//! The world is a small planet that closes on itself: walking east one comes back from the
+//! west, walking north one comes back from the south (a torus). All the noise tiles with the
+//! size of the world, and every neighbourhood wraps around. The climate follows the latitude:
+//! cold around z = 0 (the poles), warm halfway (the equator).
 
 use std::collections::VecDeque;
 
 use sim::grid::Field2;
 
 use crate::biome::desert_weight;
-use crate::noise::{fbm, ridged, smoothstep, value};
+use crate::noise::{fbm_tiled, ridged_tiled, smoothstep, value_tiled};
 
 /// Seed offsets, so that each layer of noise is independent of the others.
 mod layer {
@@ -22,9 +27,9 @@ mod layer {
 
 /// Shape of the relief, in cells. The sea level itself comes from the world configuration.
 mod shape {
-    /// Width of the band along the edges of the world that is pushed under the sea, as a share
-    /// of half the world: the world always ends in water.
-    pub const EDGE_BAND: f32 = 0.5;
+    /// Continentalness above which there is land; and what is added to the noise (about half
+    /// the planet is land).
+    pub const LAND_BIAS: f32 = 0.16;
     /// Continentalness above which there is land.
     pub const COAST: f32 = 0.5;
     /// How fast the sea floor drops and the land rises with continentalness.
@@ -44,7 +49,7 @@ pub struct Land {
     pub mountain: Field2,
     pub temperature: Field2,
     pub moisture: Field2,
-    /// Open sea: below sea level and connected to the edge of the world.
+    /// Open sea: the large bodies of water below sea level (small ones become lakes).
     pub ocean: Vec<bool>,
     /// Distance to the open sea, in cells (4-neighbour steps).
     pub coast_distance: Vec<u32>,
@@ -72,16 +77,22 @@ fn relief(nx: usize, nz: usize, sea_level: f32, seed: u64) -> (Field2, Field2) {
     let mut height = Field2::filled(nx, nz, 0.0);
     let mut mountain = Field2::filled(nx, nz, 0.0);
     let size = nx.min(nz) as f32;
+    let period = (nx as f32, nz as f32);
+    let fbm = |x: f32, z: f32, scale: f32, octaves: u32, seed: u64| {
+        fbm_tiled(x, z, scale, octaves, seed, period)
+    };
+    let ridged = |x: f32, z: f32, scale: f32, octaves: u32, seed: u64| {
+        ridged_tiled(x, z, scale, octaves, seed, period)
+    };
     for z in 0..nz {
         for x in 0..nx {
             let (fx, fz) = (x as f32, z as f32);
-            // 1 in the middle of the world, 0 on its edges.
-            let to_edge = x.min(z).min(nx - 1 - x).min(nz - 1 - z) as f32 / (0.5 * size);
-            let inland = smoothstep(0.0, EDGE_BAND, to_edge);
-            // Continentalness: large noise, pushed down near the edges. Where it crosses
-            // `COAST` is the shoreline; its shape (island, archipelago, coast) depends on the seed.
+            // Continentalness: large noise. Where it crosses `COAST` is the shoreline; its
+            // shape (continents, islands, inland seas) depends on the seed.
             let continent =
-                0.75 * fbm(fx, fz, size * 0.4, 5, seed ^ layer::CONTINENT) + 0.45 * inland - 0.19;
+                0.75 * stretch(fbm(fx, fz, size * 0.4, 5, seed ^ layer::CONTINENT)) * 0.75
+                    + LAND_BIAS
+                    + 0.1;
             let shore = continent - COAST;
             let base = if shore < 0.0 {
                 sea_level + shore * SEA_DEPTH
@@ -110,27 +121,36 @@ fn relief(nx: usize, nz: usize, sea_level: f32, seed: u64) -> (Field2, Field2) {
     (height, mountain)
 }
 
-/// Open sea: columns below sea level reachable from the edge of the world through columns
-/// below sea level. Depressions inland are not sea: they become lakes later.
+/// Open sea: the large connected bodies of columns below sea level (at least `OCEAN_SHARE`
+/// of the world). Smaller depressions are not sea: they become lakes later.
 fn open_sea(height: &Field2, sea_level: f32) -> Vec<bool> {
+    /// Share of the world a body of water must cover to be sea.
+    const OCEAN_SHARE: f32 = 0.01;
     let (nx, nz) = (height.nx, height.nz);
-    let mut ocean = vec![false; nx * nz];
+    let n = nx * nz;
+    let mut ocean = vec![false; n];
+    let mut seen = vec![false; n];
     let mut queue = VecDeque::new();
-    for z in 0..nz {
-        for x in 0..nx {
-            let on_edge = x == 0 || z == 0 || x == nx - 1 || z == nz - 1;
-            let i = x + nx * z;
-            if on_edge && height.data[i] < sea_level {
-                ocean[i] = true;
-                queue.push_back(i);
+    for start in 0..n {
+        if seen[start] || height.data[start] >= sea_level {
+            continue;
+        }
+        // One body of water, by breadth-first search.
+        let mut body = vec![start];
+        seen[start] = true;
+        queue.push_back(start);
+        while let Some(i) = queue.pop_front() {
+            for j in neighbours4(i, nx, nz) {
+                if !seen[j] && height.data[j] < sea_level {
+                    seen[j] = true;
+                    body.push(j);
+                    queue.push_back(j);
+                }
             }
         }
-    }
-    while let Some(i) = queue.pop_front() {
-        for n in neighbours4(i, nx, nz) {
-            if !ocean[n] && height.data[n] < sea_level {
-                ocean[n] = true;
-                queue.push_back(n);
+        if body.len() as f32 >= OCEAN_SHARE * n as f32 {
+            for i in body {
+                ocean[i] = true;
             }
         }
     }
@@ -161,8 +181,8 @@ pub fn distance_to(mask: &[bool], nx: usize, nz: usize) -> Vec<u32> {
 
 /// Temperature and moisture in [0, 1].
 ///
-/// - Temperature: a north–south gradient (colder at small z) plus noise, minus a lapse rate:
-///   it gets colder with altitude.
+/// - Temperature: the latitude (cold at the poles, z = 0, warm at the equator, halfway) plus
+///   noise, minus a lapse rate: it gets colder with altitude.
 /// - Moisture: noise, plus the sea's influence fading inland.
 ///
 /// A little fine noise is added to both so that biome borders wander instead of following
@@ -170,6 +190,10 @@ pub fn distance_to(mask: &[bool], nx: usize, nz: usize) -> Vec<u32> {
 fn climate(height: &Field2, coast_distance: &[u32], sea_level: f32, seed: u64) -> (Field2, Field2) {
     let (nx, nz) = (height.nx, height.nz);
     let size = nx.min(nz) as f32;
+    let period = (nx as f32, nz as f32);
+    let fbm = |x: f32, z: f32, scale: f32, octaves: u32, seed: u64| {
+        fbm_tiled(x, z, scale, octaves, seed, period)
+    };
     let mut temperature = Field2::filled(nx, nz, 0.0);
     let mut moisture = Field2::filled(nx, nz, 0.0);
     for z in 0..nz {
@@ -178,11 +202,13 @@ fn climate(height: &Field2, coast_distance: &[u32], sea_level: f32, seed: u64) -
             let i = x + nx * z;
             let altitude = (height.data[i] - sea_level).max(0.0);
             let jitter = |offset: u64| {
-                0.08 * (value(fx, fz, 6.0, seed ^ layer::CLIMATE_JITTER ^ offset) - 0.5)
+                0.08 * (value_tiled(fx, fz, 6.0, seed ^ layer::CLIMATE_JITTER ^ offset, period)
+                    - 0.5)
             };
-            let warm = 0.6 * stretch(fbm(fx, fz, size * 0.22, 3, seed ^ layer::TEMPERATURE))
-                + 0.4 * (fz / nz as f32)
-                + 0.1
+            let latitude = 0.5 - 0.5 * (std::f32::consts::TAU * fz / nz as f32).cos();
+            let warm = 0.5 * stretch(fbm(fx, fz, size * 0.22, 3, seed ^ layer::TEMPERATURE))
+                + 0.5 * latitude
+                + 0.05
                 - 0.015 * altitude
                 + jitter(1);
             let sea = (-(coast_distance[i] as f32) / (size * 0.12)).exp();
@@ -211,7 +237,7 @@ fn raise_dunes(
     coast_distance: &[u32],
     seed: u64,
 ) {
-    let nx = height.nx;
+    let (nx, nz) = (height.nx, height.nz);
     for (i, h) in height.data.iter_mut().enumerate() {
         let weight = desert_weight(temperature.data[i], moisture.data[i])
             * smoothstep(3.0, 10.0, coast_distance[i] as f32);
@@ -219,44 +245,50 @@ fn raise_dunes(
             continue;
         }
         let (x, z) = ((i % nx) as f32, (i / nx) as f32);
-        // Wind from the south-west: crests run across it, short in one direction, long in
-        // the other.
-        let (along, across) = (0.8 * x + 0.6 * z, -0.6 * x + 0.8 * z);
-        let dune = ridged(along, across * 0.3, 9.0, 2, seed ^ layer::DUNES);
+        // Wind from the west: crests run north–south, short across the wind, long along
+        // their line (the noise is stretched along z; it tiles like the rest).
+        let period = (nx as f32, 0.3 * nz as f32);
+        let dune = ridged_tiled(x, z * 0.3, 9.0, 2, seed ^ layer::DUNES, period);
         *h += weight * shape::DUNE_HEIGHT * dune;
     }
 }
 
-/// The 4 horizontal neighbours of column `i` inside the world.
+/// The 4 horizontal neighbours of column `i`, across the edges of the world (it closes on
+/// itself).
 pub fn neighbours4(i: usize, nx: usize, nz: usize) -> impl Iterator<Item = usize> {
     let (x, z) = (i % nx, i / nx);
     [
-        (x > 0).then(|| i - 1),
-        (x + 1 < nx).then(|| i + 1),
-        (z > 0).then(|| i - nx),
-        (z + 1 < nz).then(|| i + nx),
+        (x + nx - 1) % nx + nx * z,
+        (x + 1) % nx + nx * z,
+        x + nx * ((z + nz - 1) % nz),
+        x + nx * ((z + 1) % nz),
     ]
     .into_iter()
-    .flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The planet closes on itself: across its edges the relief goes on as smoothly as
+    /// anywhere else; and it has both land and sea.
     #[test]
-    fn edges_are_sea_and_middle_has_land() {
-        let land = generate(96, 96, 20.0, 3);
-        for i in 0..96 {
-            for &(x, z) in &[(i, 0), (i, 95), (0, i), (95, i)] {
-                assert!(land.ocean[x + 96 * z], "({x}, {z}) is not sea");
+    fn the_planet_closes_on_itself_with_land_and_sea() {
+        let n = 128;
+        let land = generate(n, n, 20.0, 3);
+        let h = |x: usize, z: usize| land.height.data[x % n + n * (z % n)];
+        let mut inside: f32 = 0.0;
+        let mut seam: f32 = 0.0;
+        for k in 0..n {
+            for x in 0..n - 1 {
+                inside = inside.max((h(x, k) - h(x + 1, k)).abs());
             }
+            seam = seam.max((h(n - 1, k) - h(0, k)).abs());
+            seam = seam.max((h(k, n - 1) - h(k, 0)).abs());
         }
-        let land_columns = land.ocean.iter().filter(|o| !**o).count();
-        assert!(
-            land_columns > 96 * 96 / 10,
-            "almost no land: {land_columns}"
-        );
+        assert!(seam <= inside * 1.2 + 0.5, "seam {seam}, inside {inside}");
+        let sea = land.ocean.iter().filter(|o| **o).count() as f32 / (n * n) as f32;
+        assert!((0.1..0.8).contains(&sea), "sea share {sea}");
     }
 
     #[test]
@@ -274,7 +306,8 @@ mod tests {
     #[test]
     fn distance_to_mask_counts_steps() {
         let mask = [true, false, false, false];
-        assert_eq!(distance_to(&mask, 4, 1), vec![0, 1, 2, 3]);
+        // Across the edge: the last column is next to the first.
+        assert_eq!(distance_to(&mask, 4, 1), vec![0, 1, 2, 1]);
     }
 
     #[test]

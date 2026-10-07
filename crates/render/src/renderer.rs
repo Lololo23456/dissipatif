@@ -25,6 +25,38 @@ use crate::volume::{Volume, VolumeStyle};
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Side of the shadow map in texels. Must match `SHADOW_TEXEL` in the shader.
 const SHADOW_SIZE: u32 = 2048;
+/// On a planet, shadows are cast over this many cells around the eye (each way).
+const SHADOW_REACH: f32 = 72.0;
+/// On a planet, the pieces of ground farther than this from the point looked at are not
+/// drawn (and not shadowed beyond `SHADOW_REACH`).
+const VIEW_REACH: f32 = 150.0;
+
+/// Whether a mesh comes within `reach` of `target` (x, z), on a world of `size` that closes
+/// on itself (0: with edges, everything is near).
+fn near(bounds: [f32; 4], target: Vec3, size: [f32; 2], reach: f32) -> bool {
+    if size[0] <= 0.0 || bounds[0] > bounds[2] {
+        return true;
+    }
+    // Distance from a coordinate to an interval, around the world.
+    let gap = |t: f32, lo: f32, hi: f32, n: f32| {
+        [-n, 0.0, n]
+            .iter()
+            .map(|&k| {
+                let t = t + k;
+                if t < lo {
+                    lo - t
+                } else if t > hi {
+                    t - hi
+                } else {
+                    0.0
+                }
+            })
+            .fold(f32::INFINITY, f32::min)
+    };
+    let dx = gap(target.x, bounds[0], bounds[2], size[0]);
+    let dz = gap(target.z, bounds[1], bounds[3], size[1]);
+    dx * dx + dz * dz < reach * reach
+}
 
 /// Handle to a model added with `Renderer::add_model`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +118,8 @@ pub struct Renderer {
     post: Post,
     /// The interface, drawn over the final image.
     ui: UiPass,
+    /// Size of the world when it closes on itself (0: it has edges).
+    world_size: [f32; 2],
 }
 
 impl Renderer {
@@ -378,6 +412,7 @@ impl Renderer {
             shadow_view,
             sun_direction: Vec3::from(atmosphere.sun_direction),
             scene_bounds: (Vec3::ZERO, Vec3::splat(64.0)),
+            world_size: [0.0, 0.0],
             weather: [0.0, 0.0, 0.0],
             clear_color,
             volume_layout,
@@ -441,6 +476,12 @@ impl Renderer {
     /// and how wet the ground is (0 dry to 1 soaked: darker, glossy).
     pub fn set_weather(&mut self, mist: f32, wet: f32, floor: f32) {
         self.weather = [mist, wet, floor];
+    }
+
+    /// The world closes on itself, `nx` × `nz` cells (a planet): what lies across its edges is
+    /// drawn next to the eye, and shadows follow the eye.
+    pub fn set_world_size(&mut self, nx: f32, nz: f32) {
+        self.world_size = [nx, nz];
     }
 
     /// The box (world coordinates) that casts and receives shadows. Outside it, everything is
@@ -603,9 +644,22 @@ impl Renderer {
         let Some(frame) = self.gpu.acquire_frame() else {
             return;
         };
-        let (min, max) = self.scene_bounds;
+        let (mut min, mut max) = self.scene_bounds;
+        // On a planet, the shadows cover what is around the eye (across the edges too).
+        if self.world_size[0] > 0.0 {
+            let t = camera.target;
+            min = Vec3::new(t.x - SHADOW_REACH, min.y, t.z - SHADOW_REACH);
+            max = Vec3::new(t.x + SHADOW_REACH, max.y, t.z + SHADOW_REACH);
+        }
         let light = light_view_proj(self.sun_direction, min, max);
-        let uniform = CameraUniform::new(camera, self.aspect(), time, self.weather, light);
+        let uniform = CameraUniform::new(
+            camera,
+            self.aspect(),
+            time,
+            self.weather,
+            light,
+            self.world_size,
+        );
         self.gpu
             .queue()
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -642,7 +696,10 @@ impl Renderer {
                     continue;
                 };
                 pass.set_bind_group(1, &fields.bind_group, &[]);
-                for mesh in volume.meshes.iter().flatten().filter(|m| m.index_count > 0) {
+                for mesh in volume.meshes.iter().flatten().filter(|m| {
+                    m.index_count > 0
+                        && near(m.bounds, camera.target, self.world_size, SHADOW_REACH * 1.5)
+                }) {
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -701,7 +758,10 @@ impl Renderer {
                         continue;
                     };
                     pass.set_bind_group(1, &fields.bind_group, &[]);
-                    for mesh in volume.meshes.iter().flatten().filter(|m| m.index_count > 0) {
+                    for mesh in volume.meshes.iter().flatten().filter(|m| {
+                        m.index_count > 0
+                            && near(m.bounds, camera.target, self.world_size, VIEW_REACH)
+                    }) {
                         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                         pass.set_index_buffer(
                             mesh.index_buffer.slice(..),

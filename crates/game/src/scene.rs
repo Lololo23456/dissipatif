@@ -102,6 +102,11 @@ fn drawn_size(plant: Plant, size: f32) -> f32 {
 /// Seed offset of the per-voxel brightness variation.
 const VARIATION_SEED: u64 = 0x5eed;
 
+/// Plants are drawn within this many cells of where the camera looks, and chosen again when
+/// the view has moved this far.
+const VIEW_RADIUS: f32 = 110.0;
+const VIEW_STEP: f32 = 8.0;
+
 /// The world, ready to upload.
 pub struct SceneData {
     dims: Dims,
@@ -134,6 +139,11 @@ pub struct SceneData {
     dirty: Vec<bool>,
     /// The ground's look changed since it was last uploaded.
     look_dirty: bool,
+    /// Plants are drawn within `VIEW_RADIUS` of this point (where the camera looks), on a
+    /// world of this size that closes on itself.
+    view: Option<glam::Vec2>,
+    world_size: (f32, f32),
+    visible: Vec<ModelInstance>,
     /// No overlays yet: zero fields with the shapes of the textures above.
     no_overlay_solid: Field3,
     no_overlay_water: Field3,
@@ -221,6 +231,9 @@ impl SceneData {
             model_ids: Vec::new(),
             dirty: vec![false; groups],
             look_dirty: false,
+            view: None,
+            world_size: (world.dims().nx as f32, world.dims().nz as f32),
+            visible: Vec::new(),
             no_overlay_solid: Field3::filled(dims, 0.0),
             no_overlay_water: Field3::filled(columns, 0.0),
             water_id: None,
@@ -424,6 +437,21 @@ impl SceneData {
         self.look_dirty = true;
     }
 
+    /// Where the camera looks: only the plants around are drawn (the planet holds tens of
+    /// thousands). Chosen again when the view has moved a few cells.
+    pub fn set_view(&mut self, at: glam::Vec2) {
+        let (nx, nz) = self.world_size;
+        let moved = self.view.is_none_or(|v| {
+            let d = at - v;
+            let d = glam::Vec2::new(d.x - nx * (d.x / nx).round(), d.y - nz * (d.y / nz).round());
+            d.length() > VIEW_STEP
+        });
+        if moved {
+            self.view = Some(at);
+            self.dirty.iter_mut().for_each(|d| *d = true);
+        }
+    }
+
     pub fn upload_changes(&mut self, renderer: &mut Renderer) {
         if self.look_dirty
             && let Some(id) = self.solid_id
@@ -431,9 +459,25 @@ impl SceneData {
             renderer.upload_base(id, &self.solid_look);
             self.look_dirty = false;
         }
+        let (nx, nz) = self.world_size;
         for (group, dirty) in self.dirty.iter_mut().enumerate() {
             if *dirty && let Some(&id) = self.model_ids.get(group) {
-                renderer.set_model_instances(id, &self.plant_models[group].1);
+                let instances = &self.plant_models[group].1;
+                match self.view {
+                    Some(view) => {
+                        // Those near the view, across the edges of the world too.
+                        self.visible.clear();
+                        self.visible.extend(instances.iter().filter(|i| {
+                            let [x, _, z, _] = i.position_turns;
+                            let (dx, dz) = (x - view.x, z - view.y);
+                            let dx = dx - nx * (dx / nx).round();
+                            let dz = dz - nz * (dz / nz).round();
+                            dx * dx + dz * dz < VIEW_RADIUS * VIEW_RADIUS
+                        }));
+                        renderer.set_model_instances(id, &self.visible);
+                    }
+                    None => renderer.set_model_instances(id, instances),
+                }
                 *dirty = false;
             }
         }
@@ -526,7 +570,7 @@ mod tests {
     #[test]
     #[ignore = "mesure de temps : cargo test --release -p game remesh -- --ignored --nocapture"]
     fn remesh_timing() {
-        let mut world = World::generate(WorldConfig::standard(1));
+        let mut world = World::generate(WorldConfig::small(1));
         let mut data = SceneData::build(&world);
         let start = std::time::Instant::now();
         let _ = ground_fields(&world);

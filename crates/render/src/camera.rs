@@ -79,6 +79,8 @@ impl OrbitCamera {
 ///     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
 ///     time: vec4<f32>,         // offset 80: x = seconds, y = mist, z = wetness, w = mist floor
 ///     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
+///     world: vec4<f32>,        // offset 160: size of the world in x, z (0: it has edges);
+///                              // zw: the point looked at (x, z)
 /// }
 /// ```
 #[repr(C)]
@@ -94,6 +96,9 @@ pub struct CameraUniform {
     pub time: [f32; 4],
     /// World → clip space of the sun, for shadows (see `light_view_proj`).
     pub light_view_proj: [[f32; 4]; 4],
+    /// Size of the world in x and z when it closes on itself (a planet): what lies across its
+    /// edges is drawn next to the eye. 0 when it has edges.
+    pub world: [f32; 4],
 }
 
 impl CameraUniform {
@@ -104,12 +109,14 @@ impl CameraUniform {
         time: f32,
         weather: [f32; 3],
         light_view_proj: Mat4,
+        world: [f32; 2],
     ) -> Self {
         Self {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
             eye: camera.eye().extend(camera.distance).to_array(),
             time: [time, weather[0], weather[1], weather[2]],
             light_view_proj: light_view_proj.to_cols_array_2d(),
+            world: [world[0], world[1], camera.target.x, camera.target.z],
         }
     }
 }
@@ -183,7 +190,8 @@ mod tests {
     #[test]
     fn uniform_layout_matches_wgsl() {
         // Uniform structs must be a multiple of 16 bytes.
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 160);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 176);
+        assert_eq!(std::mem::offset_of!(CameraUniform, world), 160);
         assert_eq!(std::mem::offset_of!(CameraUniform, light_view_proj), 96);
         assert_eq!(std::mem::offset_of!(CameraUniform, eye), 64);
         assert_eq!(std::mem::offset_of!(CameraUniform, time), 80);

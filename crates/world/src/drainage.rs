@@ -92,14 +92,18 @@ fn priority_flood(height: &Field2, ocean: &[bool]) -> (Vec<f32>, Vec<usize>, Vec
     // Heights are ≥ 0, so the bits of an f32 sort like the f32 itself.
     let mut heap = BinaryHeap::new();
     let mut count = 0u64;
-    for i in 0..n {
-        let (x, z) = (i % nx, i / nx);
-        let on_edge = x == 0 || z == 0 || x == nx - 1 || z == nz - 1;
-        if ocean[i] || on_edge {
-            done[i] = true;
-            heap.push(Reverse((filled[i].max(0.0).to_bits(), count, i)));
-            count += 1;
-        }
+    // The flood starts from the sea; a planet with no sea drains to its lowest column.
+    let mut seeds: Vec<usize> = (0..n).filter(|&i| ocean[i]).collect();
+    if seeds.is_empty() {
+        let lowest = (0..n)
+            .min_by(|&a, &b| height.data[a].total_cmp(&height.data[b]))
+            .unwrap_or(0);
+        seeds.push(lowest);
+    }
+    for i in seeds {
+        done[i] = true;
+        heap.push(Reverse((filled[i].max(0.0).to_bits(), count, i)));
+        count += 1;
     }
     while let Some(Reverse((_, _, i))) = heap.pop() {
         order.push(i);
@@ -143,10 +147,11 @@ fn carve_rivers(
         let reach = radius.ceil() as isize;
         for dz in -reach..=reach {
             for dx in -reach..=reach {
-                let (cx, cz) = (x + dx, z + dz);
-                if cx < 0 || cz < 0 || cx >= nx as isize || cz >= nz as isize {
-                    continue;
-                }
+                // Across the edges of the world.
+                let (cx, cz) = (
+                    (x + dx).rem_euclid(nx as isize),
+                    (z + dz).rem_euclid(nz as isize),
+                );
                 let d = ((dx * dx + dz * dz) as f32).sqrt();
                 if d > radius {
                     continue;

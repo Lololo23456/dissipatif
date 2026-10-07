@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn a_shower_wets_the_ground_which_then_dries() {
-        let world = World::generate(WorldConfig::standard(6));
+        let world = World::generate(WorldConfig::small(6));
         let player = crate::player::spawn_point(&world);
         let mut w = Weather::new(1);
         w.forced = true;

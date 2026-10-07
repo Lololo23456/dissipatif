@@ -216,16 +216,15 @@ impl Soil {
                 let k = x + nx * z;
                 let mut sum = 0.0;
                 let mut count = 0.0;
+                // Across the edges too: the world closes on itself.
                 for (a, b) in [
-                    (x.wrapping_sub(1), z),
-                    (x + 1, z),
-                    (x, z.wrapping_sub(1)),
-                    (x, z + 1),
+                    ((x + nx - 1) % nx, z),
+                    ((x + 1) % nx, z),
+                    (x, (z + nz - 1) % nz),
+                    (x, (z + 1) % nz),
                 ] {
-                    if a < nx && b < nz {
-                        sum += before[a + nx * b];
-                        count += 1.0;
-                    }
+                    sum += before[a + nx * b];
+                    count += 1.0;
                 }
                 self.water[k] += rate * (sum - count * before[k]);
             }
@@ -246,6 +245,12 @@ impl Soil {
         if let Some(k) = self.patch(at) {
             self.humus[k] = (self.humus[k] + amount).min(1.2);
         }
+    }
+
+    /// Rain reaching patch `k`, in [0, 1].
+    #[cfg(test)]
+    pub fn rain(&self, k: usize) -> f32 {
+        self.rain[k]
     }
 
     /// How bare patch `k` has grown, 0 (as at the start) to 1 (stripped): it shows from

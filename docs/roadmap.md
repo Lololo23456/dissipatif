@@ -31,7 +31,7 @@ Objectif : qu'on puisse **vivre** longtemps au même endroit.
   - Poissons : remontée des rivières pour frayer.
   - Écureuils : caches à l'automne, recherche l'hiver, petits au printemps.
 - ✅ **Le sol se voit** : une parcelle qui a perdu l'essentiel de ses plantes montre de la terre nue (un vrai changement du monde, sauvegardé), qui reverdit quand elle se remet ; l'anneau du rituel est repris par l'herbe après deux lunes sans rituel, et refoulé quand il revient.
-- ⬜ **La planète se referme** : bords du monde raccordés (on fait le tour), carte plus grande.
+- ✅ **La planète se referme** : 512 × 512 cases (un demi-kilomètre de tour), sans bord : on fait le tour d'est en ouest et du nord au sud ; continents et mers ; climat par la latitude (pôles froids, équateur chaud). Seuls la vue et ses environs sont dessinés.
 - ✅ **Sons de la harde** : aboiement d'alarme, coup de sabot (aussi celui qui fait le tour du cercle pendant l'incantation), brame ; synthétisés, atténués par la distance, placés à gauche ou à droite.
 
 C'est fini quand : on peut quitter le jeu, revenir, et retrouver le monde tel qu'on l'a laissé, une saison plus tard.

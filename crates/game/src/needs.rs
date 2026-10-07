@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn deserts_are_hot_by_day_and_cold_at_night_peaks_are_cold() {
-        let world = World::generate(WorldConfig::standard(6));
+        let world = World::generate(WorldConfig::small(6));
         let dims = world.dims();
         let mut desert = None;
         let mut peak = None;

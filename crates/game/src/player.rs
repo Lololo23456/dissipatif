@@ -303,10 +303,10 @@ impl Player {
             let below = self.position - Vec3::Y * 0.05;
             self.on_ground = blocked(world, obstacles, below);
         }
-        // Stay inside the world.
-        let dims = world.dims();
-        self.position.x = self.position.x.clamp(1.0, dims.nx as f32 - 1.0);
-        self.position.z = self.position.z.clamp(1.0, dims.nz as f32 - 1.0);
+        // The world closes on itself: past an edge, the other side.
+        let (x, z) = world.wrap(self.position.x, self.position.z);
+        self.position.x = x;
+        self.position.z = z;
     }
 
     /// Walking cycle, lean, and where the curious naturalist looks.
@@ -410,14 +410,16 @@ fn blocked(world: &World, obstacles: &Obstacles, feet: Vec3) -> bool {
                 if y < 0 {
                     return true;
                 }
-                let inside = x >= 0 && z >= 0 && (x as usize) < dims.nx && (z as usize) < dims.nz;
-                if !inside || (y as usize) >= dims.ny {
+                if (y as usize) >= dims.ny {
                     continue;
                 }
-                let (cx, cy, cz) = (x as usize, y as usize, z as usize);
+                // The world closes on itself: past an edge is the other side.
+                let (cx, cz) = world.column(x, z);
+                let cy = y as usize;
                 // A dug cell: only its remaining micro-voxels are solid.
                 if let Some(micro) = world.micro(cx, cy, cz) {
-                    if micro_hit(micro, [cx, cy, cz], min, max) {
+                    // The cell where the box is, not its copy across the edge.
+                    if micro_hit(micro, [x, y, z], min, max) {
                         return true;
                     }
                     continue;
@@ -432,10 +434,10 @@ fn blocked(world: &World, obstacles: &Obstacles, feet: Vec3) -> bool {
 }
 
 /// Whether the box [min, max] overlaps a micro-voxel of the brick filling `cell`.
-fn micro_hit(micro: &[u8; world::MICRO_CELLS], cell: [usize; 3], min: Vec3, max: Vec3) -> bool {
+fn micro_hit(micro: &[u8; world::MICRO_CELLS], cell: [i64; 3], min: Vec3, max: Vec3) -> bool {
     let m = world::MICRO as f32;
-    let local = |v: f32, c: usize| ((v - c as f32) * m).clamp(0.0, m);
-    let range = |lo: f32, hi: f32, c: usize| {
+    let local = |v: f32, c: i64| ((v - c as f32) * m).clamp(0.0, m);
+    let range = |lo: f32, hi: f32, c: i64| {
         let (a, b) = (local(lo, c), local(hi, c));
         (a.floor() as usize)..(b.ceil() as usize).min(world::MICRO)
     };
@@ -453,30 +455,22 @@ fn micro_hit(micro: &[u8; world::MICRO_CELLS], cell: [usize; 3], min: Vec3, max:
 
 /// Water surface at the column of `feet`, if there is water there.
 fn water_surface(world: &World, feet: Vec3) -> Option<f32> {
-    let dims = world.dims();
-    let (x, z) = (feet.x.floor(), feet.z.floor());
-    if x < 0.0 || z < 0.0 || x as usize >= dims.nx || z as usize >= dims.nz {
-        return None;
-    }
-    world.water_level(x as usize, z as usize)
+    let (x, z) = world.column(feet.x.floor() as i64, feet.z.floor() as i64);
+    world.water_level(x, z)
 }
 
 /// A good place to start: dry, open ground near the middle of the world, in a welcoming biome
 /// (meadow, forest, savanna, beach) if there is one, searched in growing squares from the
 /// centre.
 pub fn spawn_point(world: &World) -> Vec3 {
-    let welcoming = |b: Biome| {
-        matches!(
-            b,
-            Biome::Plains | Biome::Forest | Biome::Savanna | Biome::Beach
-        )
-    };
-    search_spawn(world, welcoming).unwrap_or_else(|| {
-        search_spawn(world, |b| b != Biome::Ocean).unwrap_or_else(|| {
+    // A meadow or a wood first; else a savanna or a beach; else any land.
+    search_spawn(world, |b| matches!(b, Biome::Plains | Biome::Forest))
+        .or_else(|| search_spawn(world, |b| matches!(b, Biome::Savanna | Biome::Beach)))
+        .or_else(|| search_spawn(world, |b| b != Biome::Ocean))
+        .unwrap_or_else(|| {
             let dims = world.dims();
             Vec3::new(dims.nx as f32 / 2.0, dims.ny as f32, dims.nz as f32 / 2.0)
         })
-    })
 }
 
 fn search_spawn(world: &World, accept: impl Fn(Biome) -> bool) -> Option<Vec3> {
@@ -715,5 +709,34 @@ mod tests {
     fn angles_wrap() {
         assert!((wrap_angle(3.0 * std::f32::consts::PI) - std::f32::consts::PI).abs() < 1e-5);
         assert!((wrap_angle(-0.5) + 0.5).abs() < 1e-6);
+    }
+
+    /// The world closes on itself: walking west past its edge, one comes out on its east side,
+    /// on the ground, and walks on.
+    #[test]
+    fn walking_off_an_edge_comes_back_from_the_other() {
+        let world = world();
+        let (nx, nz) = (world.dims().nx, world.dims().nz);
+        // A row where the ground is dry and gentle across the edge.
+        let columns: Vec<usize> = (nx - 10..nx).chain(0..4).collect();
+        let z = (0..nz)
+            .find(|&z| {
+                columns.iter().all(|&x| world.water_level(x, z).is_none())
+                    && columns.windows(2).all(|w| {
+                        (world.ground_top(w[0], z) as i64 - world.ground_top(w[1], z) as i64).abs()
+                            <= 1
+                    })
+            })
+            .expect("a dry row across the edge");
+        let top = world.ground_top(1, z) as f32;
+        let mut player = Player::new(Vec3::new(1.5, top + 0.001, z as f32 + 0.5));
+        let west = Controls {
+            left: true,
+            ..Controls::default()
+        };
+        settle(&mut player, &world, west, 2.0);
+        let x = player.position.x;
+        assert!(x > nx as f32 - 8.0 && x < nx as f32, "x = {x}");
+        assert!((player.position.y - world.ground_top(x as usize, z) as f32).abs() < 1.2);
     }
 }

@@ -14,6 +14,32 @@ struct Camera {
     eye: vec4<f32>,          // offset 64: eye position, w = distance to the target
     time: vec4<f32>,         // offset 80: x = seconds, y = mist, z = wetness, w = mist floor
     light_view_proj: mat4x4<f32>,  // offset 96, size 64: world → sun's shadow map
+    world: vec4<f32>,        // offset 160: size of the world in x, z (0: it has edges); zw:
+                             // the point looked at
+}
+
+// The world closes on itself (a planet): a point is drawn at its copy nearest the point the
+// camera looks at (not the eye, which may stand far off), a whole number of worlds away. The
+// vertices of a face move together (they are much closer to one another than half a world),
+// so nothing tears where one looks.
+//
+// The shift is taken from an anchor shared by every vertex of a thing (a face's cell, a plant's
+// foot, a part's origin, a particle's centre): a thing moves as a whole, and none is torn in
+// two when it lies half a world away.
+fn wrap_shift(anchor: vec3<f32>) -> vec3<f32> {
+    if (camera.world.x <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    return vec3<f32>(
+        camera.world.x * round((camera.world.z - anchor.x) / camera.world.x),
+        0.0,
+        camera.world.y * round((camera.world.w - anchor.z) / camera.world.y),
+    );
+}
+
+// The anchor of a volume vertex: the cell its face belongs to.
+fn cell_anchor(cell: u32) -> vec3<f32> {
+    return vec3<f32>(unpack_cell(cell)) + volume.origin.xyz;
 }
 
 // Rust side: `AtmosphereUniform` in src/palette.rs. `w` unused unless stated.
@@ -91,7 +117,7 @@ struct VertexOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     // Mesh positions are in grid cells; the volume's origin places them in the world.
-    let world_position = in.position + volume.origin.xyz;
+    let world_position = in.position + volume.origin.xyz + wrap_shift(cell_anchor(in.cell));
     out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
     out.world_position = world_position;
     out.normal = in.normal;
@@ -696,7 +722,8 @@ struct ParticleOutput {
 @vertex
 fn vs_particle(in: ParticleInput) -> ParticleOutput {
     var out: ParticleOutput;
-    let world_position = in.centre_size.xyz + in.corner * in.centre_size.w;
+    let world_position = in.centre_size.xyz + wrap_shift(in.centre_size.xyz)
+        + in.corner * in.centre_size.w;
     out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
     out.world_position = world_position;
     out.normal = in.normal;
@@ -727,7 +754,8 @@ fn fs_particle(in: ParticleOutput) -> @location(0) vec4<f32> {
 // Only the position matters: the depth buffer of this pass is the shadow map.
 @vertex
 fn vs_shadow(in: VertexInput) -> @builtin(position) vec4<f32> {
-    return camera.light_view_proj * vec4<f32>(in.position + volume.origin.xyz, 1.0);
+    let p = in.position + volume.origin.xyz + wrap_shift(cell_anchor(in.cell));
+    return camera.light_view_proj * vec4<f32>(p, 1.0);
 }
 
 // ---------- Models: one mesh drawn at many places (plants) ----------
@@ -786,7 +814,7 @@ fn bend_plant(local: vec3<f32>, bend: vec2<f32>) -> vec3<f32> {
 @vertex
 fn vs_model(in: VertexInput, instance: ModelInstance) -> VertexOutput {
     var out: VertexOutput;
-    let world_position = model_position(in, instance);
+    let world_position = model_position(in, instance) + wrap_shift(instance.position_turns.xyz);
     out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
     out.world_position = world_position;
     // Mirroring flips the normal's x like the positions'.
@@ -800,7 +828,8 @@ fn vs_model(in: VertexInput, instance: ModelInstance) -> VertexOutput {
 @vertex
 fn vs_model_shadow(in: VertexInput, instance: ModelInstance) -> @builtin(position) vec4<f32> {
     // Same wind as the main pass: shadows move with the plants.
-    return camera.light_view_proj * vec4<f32>(model_position(in, instance), 1.0);
+    let p = model_position(in, instance) + wrap_shift(instance.position_turns.xyz);
+    return camera.light_view_proj * vec4<f32>(p, 1.0);
 }
 
 // ---------- Articulated parts: a full transform per instance (characters) ----------
@@ -822,7 +851,8 @@ fn part_transform(instance: PartInstance) -> mat4x4<f32> {
 fn vs_part(in: VertexInput, instance: PartInstance) -> VertexOutput {
     var out: VertexOutput;
     let transform = part_transform(instance);
-    let world_position = (transform * vec4<f32>(in.position, 1.0)).xyz;
+    let world_position = (transform * vec4<f32>(in.position, 1.0)).xyz
+        + wrap_shift(instance.column3.xyz);
     out.clip_position = camera.view_proj * vec4<f32>(world_position, 1.0);
     out.world_position = world_position;
     // Rotation and uniform scale only: the matrix turns normals too (renormalised later).
@@ -835,6 +865,7 @@ fn vs_part(in: VertexInput, instance: PartInstance) -> VertexOutput {
 
 @vertex
 fn vs_part_shadow(in: VertexInput, instance: PartInstance) -> @builtin(position) vec4<f32> {
-    let world_position = (part_transform(instance) * vec4<f32>(in.position, 1.0)).xyz;
+    let world_position = (part_transform(instance) * vec4<f32>(in.position, 1.0)).xyz
+        + wrap_shift(instance.column3.xyz);
     return camera.light_view_proj * vec4<f32>(world_position, 1.0);
 }

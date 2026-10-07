@@ -383,17 +383,15 @@ impl Squirrels {
 }
 
 fn world_walkable(world: &World, at: Vec2) -> bool {
-    let d = world.dims();
-    at.x > 1.0
-        && at.y > 1.0
-        && at.x < d.nx as f32 - 1.0
-        && at.y < d.nz as f32 - 1.0
-        && world.water_level(at.x as usize, at.y as usize).is_none()
+    let (x, z) = world.wrap(at.x, at.y);
+    world.water_level(x as usize, z as usize).is_none()
 }
 
 /// Hops towards `goal` at `speed`.
 fn step(s: &mut Squirrel, world: &World, goal: Vec2, speed: f32, dt: f32) {
     let here = Vec2::new(s.position.x, s.position.z);
+    // The shortest way, across the edges of the world if need be.
+    let goal = Vec2::from(world.nearest(here.to_array(), goal.to_array()));
     let to = goal - here;
     s.speed += (speed - s.speed) * (1.0 - (-dt * 8.0).exp());
     if to.length() < 0.05 || s.speed < 0.01 {
@@ -404,7 +402,8 @@ fn step(s: &mut Squirrel, world: &World, goal: Vec2, speed: f32, dt: f32) {
     if !world_walkable(world, next) {
         return;
     }
-    s.position = Vec3::new(next.x, world.surface_height(next.x, next.y), next.y);
+    let (x, z) = world.wrap(next.x, next.y);
+    s.position = Vec3::new(x, world.surface_height(x, z), z);
     s.hop += s.speed * dt * std::f32::consts::TAU / 0.6;
 }
 
@@ -475,7 +474,7 @@ mod tests {
     /// to the soil in spring.
     #[test]
     fn squirrels_hoard_in_autumn_eat_in_winter_and_leave_some_to_sprout() {
-        let world = World::generate(WorldConfig::standard(1));
+        let world = World::generate(WorldConfig::small(1));
         let start = crate::player::spawn_point(&world);
         let mut squirrels = Squirrels::new(world.plants(), &world, Vec2::new(start.x, start.z), 3);
         assert!(!squirrels.squirrels.is_empty(), "no oak in this world?");

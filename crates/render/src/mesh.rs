@@ -180,6 +180,9 @@ pub struct GpuMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+    /// The horizontal extent of its vertices: min (x, z) and max (x, z). Lets the renderer
+    /// skip a mesh that lies far from the view.
+    pub bounds: [f32; 4],
 }
 
 impl GpuMesh {
@@ -188,12 +191,25 @@ impl GpuMesh {
             vertex_buffer: create_buffer(device, "voxel vertices", wgpu::BufferUsages::VERTEX, 0),
             index_buffer: create_buffer(device, "voxel indices", wgpu::BufferUsages::INDEX, 0),
             index_count: 0,
+            bounds: [0.0; 4],
         };
         mesh.update(device, queue, data);
         mesh
     }
 
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: &MeshData) {
+        self.bounds = data.vertices.iter().fold(
+            [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |[a, b, c, d], v| {
+                let [x, _, z] = v.position;
+                [a.min(x), b.min(z), c.max(x), d.max(z)]
+            },
+        );
         let vertices: &[u8] = bytemuck::cast_slice(&data.vertices);
         let indices: &[u8] = bytemuck::cast_slice(&data.indices);
         // Too small: replace with a buffer 50 % larger than needed, so a slowly growing

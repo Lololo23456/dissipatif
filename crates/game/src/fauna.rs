@@ -92,10 +92,8 @@ pub struct Fauna {
 /// Ground height (top of the solid ground, or of the water) at (x, z), and whether it is
 /// water. None outside the world.
 fn floor_at(world: &World, x: f32, z: f32) -> Option<(f32, bool, Material)> {
-    let dims = world.dims();
-    if x < 0.0 || z < 0.0 || x >= dims.nx as f32 || z >= dims.nz as f32 {
-        return None;
-    }
+    // The world closes on itself.
+    let (x, z) = world.wrap(x, z);
     let (xi, zi) = (x as usize, z as usize);
     // `ground_top` is the first empty cell above the ground: the surface block is below it.
     let top = world.ground_top(xi, zi);
@@ -579,7 +577,7 @@ mod tests {
     use world::WorldConfig;
 
     fn world() -> World {
-        World::generate(WorldConfig::standard(6))
+        World::generate(WorldConfig::small(6))
     }
 
     #[test]

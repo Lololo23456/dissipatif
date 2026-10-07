@@ -978,6 +978,9 @@ impl GameState {
                 Some(Event::Ate { player, matter })
             }
             Command::LayAt { player, slot, at } => {
+                // The point as seen from the player, across the edges if need be.
+                let feet = self.player(player)?.body.position;
+                let at = Vec2::from(world.nearest([feet.x, feet.z], at.to_array()));
                 let Some(at) = self.lay_point_at(world, player, at) else {
                     return Some(Event::Failed {
                         player,
@@ -988,6 +991,7 @@ impl GameState {
             }
             Command::PickAt { player, at } => {
                 let feet = self.player(player)?.body.position;
+                let at = Vec2::from(world.nearest([feet.x, feet.z], at.to_array()));
                 if Vec2::new(feet.x, feet.z).distance(at) > ARM_REACH {
                     return Some(Event::Failed {
                         player,
@@ -1796,7 +1800,7 @@ mod tests {
     use world::WorldConfig;
 
     fn setup() -> (World, GameState, PlayerId) {
-        let world = World::generate(WorldConfig::standard(6));
+        let world = World::generate(WorldConfig::small(6));
         let mut state = GameState::new(&world);
         let id = state.join(crate::player::spawn_point(&world));
         (world, state, id)
@@ -1809,14 +1813,28 @@ mod tests {
         id: PlayerId,
         want: fn(Matter) -> bool,
     ) -> usize {
-        let (i, p) = world
-            .plants()
+        // One with nothing else to pick close by, so the hands find it and nothing else.
+        let plants = world.plants();
+        let pickable = |p: &world::PlantInstance| harvest(p).is_some();
+        let (i, p) = plants
             .iter()
             .enumerate()
-            .find(|(_, p)| matches!(harvest(p), Some(Harvest::Whole(m) | Harvest::Part(m)) if want(m)))
+            .find(|&(i, p)| {
+                matches!(harvest(p), Some(Harvest::Whole(m) | Harvest::Part(m)) if want(m))
+                    && plants.iter().enumerate().all(|(j, q)| {
+                        j == i || !pickable(q) || {
+                            let (a, b) = (position(p), position(q));
+                            (a.0 - b.0).hypot(a.1 - b.1) > 0.7
+                        }
+                    })
+            })
             .expect("no such plant in the world");
+        // Facing +z (as a new body does), the hands right on it.
         let (x, z) = position(p);
-        state.place(id, Vec3::new(x + 0.3, p.base[1] as f32 + 0.001, z));
+        state.place(
+            id,
+            Vec3::new(x, p.base[1] as f32 + 0.001, z - LAY_DISTANCE * 0.6),
+        );
         i
     }
 
@@ -2174,7 +2192,7 @@ mod tests {
     #[test]
     fn watching_the_rite_unseen_teaches_the_deer_shape_even_fast_forwarded() {
         for fast in [false, true] {
-            let mut world = World::generate(WorldConfig::standard(1));
+            let mut world = World::generate(WorldConfig::small(1));
             let spawn = crate::player::spawn_point(&world);
             let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
             deer::wear_ring(&mut world, ring, 1);
@@ -2207,7 +2225,7 @@ mod tests {
     #[test]
     #[ignore = "mesure lente"]
     fn meadow_and_herd_over_weeks() {
-        let mut world = World::generate(WorldConfig::standard(1));
+        let mut world = World::generate(WorldConfig::small(1));
         let spawn = crate::player::spawn_point(&world);
         let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
         deer::wear_ring(&mut world, ring, 1);
@@ -2253,7 +2271,7 @@ mod tests {
     #[test]
     fn a_saved_game_goes_on_exactly_as_before() {
         let setup = || {
-            let mut world = World::generate(WorldConfig::standard(1));
+            let mut world = World::generate(WorldConfig::small(1));
             let spawn = crate::player::spawn_point(&world);
             let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
             deer::wear_ring(&mut world, ring, 1);
@@ -2335,7 +2353,7 @@ mod tests {
     /// bare again when it is.
     #[test]
     fn an_unkept_circle_grows_over() {
-        let mut world = World::generate(WorldConfig::standard(1));
+        let mut world = World::generate(WorldConfig::small(1));
         let spawn = crate::player::spawn_point(&world);
         let (ring, cover) = deer::home(&world, Vec2::new(spawn.x, spawn.z)).expect("a meadow");
         deer::wear_ring(&mut world, ring, 1);

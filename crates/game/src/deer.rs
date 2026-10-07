@@ -533,7 +533,7 @@ impl Herd {
             self.rite = None;
             return;
         }
-        self.sense(dt, now, observers, fires, events);
+        self.sense(dt, world, now, observers, fires, events);
         let mode = self.mode(now);
         let rite = rite_progress(now).filter(|_| mode == Mode::Ritual);
         self.rite = rite;
@@ -702,6 +702,7 @@ impl Herd {
     fn sense(
         &mut self,
         dt: f32,
+        world: &World,
         now: &Conditions,
         observers: &[Observer],
         fires: &[Vec2],
@@ -727,7 +728,8 @@ impl Herd {
             let mut rate = -CALMING;
             let mut strongest = (0.0, Cause::Sight, here);
             for o in observers {
-                let at = Vec2::new(o.at.x, o.at.z);
+                // Where the naturalist is, as seen from here (across the edges if nearer).
+                let at = Vec2::from(world.nearest(here.to_array(), [o.at.x, o.at.z]));
                 let distance = here.distance(at);
                 // Sight: movement, in the light, out in the open.
                 let moving = (o.speed / WALK_SPEED_PERSON).clamp(0.04, 2.0);
@@ -765,6 +767,7 @@ impl Herd {
             }
             // A fire at night: they keep wary of the glow.
             for &fire in fires {
+                let fire = Vec2::from(world.nearest(here.to_array(), fire.to_array()));
                 let value = 0.12 * (1.0 - here.distance(fire) / 30.0).max(0.0) * (1.0 - light);
                 rate += value;
                 if value > strongest.0 {
@@ -888,6 +891,8 @@ fn turn_towards(d: &mut Deer, target: f32, dt: f32) {
 /// Steps towards `goal` at `speed`, turning first, around water and steep steps.
 fn move_towards(d: &mut Deer, world: &World, goal: Vec2, speed: f32, dt: f32) {
     let here = Vec2::new(d.position.x, d.position.z);
+    // The shortest way, across the edges of the world if need be.
+    let goal = Vec2::from(world.nearest(here.to_array(), goal.to_array()));
     let to = goal - here;
     let k = 1.0 - (-dt * 3.0).exp();
     if to.length() < 0.1 || speed <= 0.0 {
@@ -904,18 +909,28 @@ fn move_towards(d: &mut Deer, world: &World, goal: Vec2, speed: f32, dt: f32) {
         return;
     }
     let step = d.speed * dt;
-    // Try straight on, then veering more and more.
-    for veer in [0.0, 0.5, -0.5, 1.1, -1.1, 1.8, -1.8] {
+    // Try straight on, then veering more and more; hemmed in by trunks, squeeze through them
+    // (a deer slips between trees), never into water or up a cliff.
+    let tries = [0.0, 0.5, -0.5, 1.1, -1.1, 1.8, -1.8];
+    for (k, veer) in tries.iter().chain(tries.iter()).enumerate() {
+        let veer = *veer;
         let angle = d.heading + veer;
         let next =
             here + Vec2::new(angle.sin(), angle.cos()) * step.min(to.length().max(step * 0.2));
-        if walkable(world, d.position.y, next) {
+        let free = if k < tries.len() {
+            walkable(world, d.position.y, next)
+        } else {
+            open_ground(world, d.position.y, next)
+        };
+        if free {
             d.heading = if veer == 0.0 {
                 d.heading
             } else {
                 d.heading + veer * 0.2
             };
-            d.position = ground(world, next).with_y(d.position.y);
+            // Back into the world (it closes on itself).
+            let (x, z) = world.wrap(next.x, next.y);
+            d.position = Vec3::new(x, d.position.y, z);
             let height = world.surface_height(next.x, next.y);
             d.position.y += (height - d.position.y) * (1.0 - (-dt * 10.0).exp());
             d.stride += step * std::f32::consts::TAU / stride_length(d.speed, d.size);
@@ -925,18 +940,18 @@ fn move_towards(d: &mut Deer, world: &World, goal: Vec2, speed: f32, dt: f32) {
     d.speed = 0.0;
 }
 
-fn inside(world: &World, at: Vec2) -> bool {
-    let dims = world.dims();
-    at.x >= 1.0 && at.y >= 1.0 && at.x < dims.nx as f32 - 1.0 && at.y < dims.nz as f32 - 1.0
+/// Dry ground no higher than a deer steps up (a cell and a bit), trunks or not.
+fn open_ground(world: &World, from_height: f32, at: Vec2) -> bool {
+    let (x, z) = world.wrap(at.x, at.y);
+    world.water_level(x as usize, z as usize).is_none()
+        && (world.surface_height(x, z) - from_height).abs() < 1.3
 }
 
 /// Dry ground no higher than a deer steps up (a cell and a bit), within the world, and no
 /// trunk standing there.
 fn walkable(world: &World, from_height: f32, at: Vec2) -> bool {
-    if !inside(world, at) {
-        return false;
-    }
-    let (x, z) = (at.x as usize, at.y as usize);
+    let (x, z) = world.wrap(at.x, at.y);
+    let (x, z) = (x as usize, z as usize);
     if world.water_level(x, z).is_some() {
         return false;
     }
@@ -1167,7 +1182,7 @@ mod tests {
     use world::WorldConfig;
 
     fn setup() -> (World, Herd) {
-        let mut world = World::generate(WorldConfig::standard(1));
+        let mut world = World::generate(WorldConfig::small(1));
         let start = crate::player::spawn_point(&world);
         let (ring, cover) = home(&world, Vec2::new(start.x, start.z)).expect("a meadow");
         wear_ring(&mut world, ring, 1);

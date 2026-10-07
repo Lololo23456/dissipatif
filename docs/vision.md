@@ -22,7 +22,7 @@ Cette page est la boussole du projet (décidée en octobre 2026, « vision B »)
 
 ## Le monde
 
-- **Une planète finie qui se referme sur elle-même** : en marchant assez longtemps vers l'est, on revient par l'ouest. Grande (plusieurs heures pour en faire le tour), mais sans « ailleurs » infini : les conséquences restent.
+- **Une planète finie qui se referme sur elle-même** (en jeu : 512 × 512 cases) : en marchant assez longtemps vers l'est, on revient par l'ouest, et vers le nord, par le sud ; froide aux pôles, chaude à l'équateur. Sans « ailleurs » infini : les conséquences restent.
 - **Le temps long** : jours, lunes, saisons, années.
 - **La source** : un grand cycle, une onde lente qui parcourt la planète. Toutes les anomalies en sont des rides locales et battent à son rythme. Le joueur peut finir par la comprendre et **prédire la grande marée**, un rendez-vous qui revient, plus fort quand la planète est saine.
 
