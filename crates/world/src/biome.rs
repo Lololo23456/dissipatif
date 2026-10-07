@@ -53,10 +53,13 @@ pub enum Plant {
     Oak,
     /// Hazel: a shrub of several thin stems from the ground; hazelnuts in autumn.
     Hazel,
+    /// Common reed: tall stems topped by a brown plume, rooted in the mud of a marsh's edge
+    /// and shallows (placed by `World::make_marsh`, not by the biomes).
+    Reed,
 }
 
 impl Plant {
-    pub const ALL: [Plant; 17] = [
+    pub const ALL: [Plant; 18] = [
         Plant::Broadleaf,
         Plant::Pine,
         Plant::Acacia,
@@ -74,9 +77,12 @@ impl Plant {
         Plant::DryShrub,
         Plant::Oak,
         Plant::Hazel,
+        Plant::Reed,
     ];
 
-    /// Small things on the ground, scattered densely, not trees.
+    /// Small things on the ground, scattered densely, not trees. Reeds too: a reed bed is
+    /// many thin stems, never a woody plant (no trunk in the world grid, open to the deer's
+    /// eyes when they look for a meadow).
     pub const fn is_ground_cover(self) -> bool {
         matches!(
             self,
@@ -86,6 +92,7 @@ impl Plant {
                 | Plant::Mushroom
                 | Plant::Stone
                 | Plant::DryShrub
+                | Plant::Reed
         )
     }
 }

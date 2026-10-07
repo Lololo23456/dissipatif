@@ -11,6 +11,8 @@ use sim::grid::Field3;
 use wgpu::util::DeviceExt;
 
 use crate::camera::{CameraUniform, OrbitCamera, light_view_proj};
+use crate::effects::{EffectsUniform, MARSH_FIELD_SIZE};
+use crate::field_texture::FieldTexture;
 use crate::gpu::Gpu;
 use crate::marks::{MarksUniform, Print, Ripple};
 use crate::mesh::{MeshData, Vertex};
@@ -80,9 +82,19 @@ pub struct Renderer {
     particle_count: u32,
     camera_buffer: wgpu::Buffer,
     atmosphere_buffer: wgpu::Buffer,
+    materials_buffer: wgpu::Buffer,
     marks_buffer: wgpu::Buffer,
-    /// Group 0: camera, atmosphere, materials, shadow map.
+    /// Effects drawn over the world (see `effects`): the marsh's medium, mist, a wave, sight.
+    effects_buffer: wgpu::Buffer,
+    /// Litter on the ground, one texel per soil patch (1 × 1 × 1 and empty until uploaded).
+    litter_field: FieldTexture,
+    /// The marsh's medium, in the corner of a fixed texture (see `MARSH_FIELD_SIZE`).
+    marsh_field: FieldTexture,
+    /// Group 0: camera, atmosphere, materials, shadow map, marks, effects and their fields.
+    /// Rebuilt with its layout when a field of it is replaced by one of another size.
+    frame_layout: wgpu::BindGroupLayout,
     frame_bind_group: wgpu::BindGroup,
+    shadow_sampler: wgpu::Sampler,
     /// Draws depth only, from the sun.
     shadow_pipeline: wgpu::RenderPipeline,
     /// Models (plants): drawn by instancing, in the main pass and in the shadow pass.
@@ -154,6 +166,28 @@ impl Renderer {
             contents: bytemuck::bytes_of(&MarksUniform::new(&[], &[])),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        // Effects over the world, all off until the game sets them (see `set_effects`).
+        let effects_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("effects"),
+            contents: bytemuck::bytes_of(&EffectsUniform::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        // Their fields: textures start at zero (wgpu clears them), so nothing shows. The
+        // litter's size follows the world's, known once it is uploaded.
+        let one = sim::grid::Dims {
+            nx: 1,
+            ny: 1,
+            nz: 1,
+        };
+        let litter_field = FieldTexture::new(device, one);
+        let marsh_field = FieldTexture::new(
+            device,
+            sim::grid::Dims {
+                nx: MARSH_FIELD_SIZE,
+                ny: 1,
+                nz: MARSH_FIELD_SIZE,
+            },
+        );
         // Shadow map: a depth texture drawn by the shadow pass and read by the main pass.
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow map"),
@@ -183,8 +217,9 @@ impl Renderer {
         let clear_color = wgpu::Color { r, g, b, a: 1.0 };
 
         // Bind group layout: the "signature" of a group of resources, i.e. what the shader
-        // expects at each `@binding` of a `@group`. Group 0: three uniform buffers, the camera
-        // (binding 0), the atmosphere (binding 1) and the material colours (binding 2).
+        // expects at each `@binding` of a `@group`. Group 0, the frame: the camera (binding 0),
+        // the atmosphere (1), the material colours (2), the shadow map and its sampler (3, 4),
+        // the marks (5), the effects (6) and their two fields, litter and marsh (7, 8).
         let uniform_entry = |binding, visibility| wgpu::BindGroupLayoutEntry {
             binding,
             visibility,
@@ -192,6 +227,17 @@ impl Renderer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: None,
+            },
+            count: None,
+        };
+        // A field of group 0, read texel by texel by the fragment shader (as volumes' fields).
+        let frame_field_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
             },
             count: None,
         };
@@ -220,39 +266,28 @@ impl Renderer {
                     count: None,
                 },
                 uniform_entry(5, wgpu::ShaderStages::FRAGMENT),
+                // Effects may move vertices (a wave) as well as colour fragments.
+                uniform_entry(6, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                frame_field_entry(7),
+                frame_field_entry(8),
             ],
         });
         // Bind group: the actual resources plugged into that signature.
-        let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame"),
-            layout: &frame_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: atmosphere_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: materials_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&shadow_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: marks_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let frame_bind_group = create_frame_bind_group(
+            device,
+            &frame_layout,
+            FrameResources {
+                camera: &camera_buffer,
+                atmosphere: &atmosphere_buffer,
+                materials: &materials_buffer,
+                shadow_view: &shadow_view,
+                shadow_sampler: &shadow_sampler,
+                marks: &marks_buffer,
+                effects: &effects_buffer,
+                litter: &litter_field,
+                marsh: &marsh_field,
+            },
+        );
         let shadow_frame_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("shadow frame layout"),
@@ -400,8 +435,14 @@ impl Renderer {
             particle_count: 0,
             camera_buffer,
             atmosphere_buffer,
+            materials_buffer,
             marks_buffer,
+            effects_buffer,
+            litter_field,
+            marsh_field,
+            frame_layout,
             frame_bind_group,
+            shadow_sampler,
             shadow_pipeline,
             model_pipeline,
             model_shadow_pipeline,
@@ -482,6 +523,45 @@ impl Renderer {
             .write_buffer(&self.marks_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    /// The effects drawn over the world (see `effects::EffectsUniform`).
+    pub fn set_effects(&mut self, effects: &EffectsUniform) {
+        self.gpu
+            .queue()
+            .write_buffer(&self.effects_buffer, 0, bytemuck::bytes_of(effects));
+    }
+
+    /// The litter lying on the ground, one value per soil patch: a 2D grid (`ny` = 1) covering
+    /// the world evenly. Cheap (a few thousand texels): send it again when it changes.
+    pub fn upload_litter(&mut self, field: &Field3) {
+        if self.litter_field.dims() != field.dims {
+            self.litter_field = FieldTexture::new(self.gpu.device(), field.dims);
+            self.frame_bind_group = create_frame_bind_group(
+                self.gpu.device(),
+                &self.frame_layout,
+                FrameResources {
+                    camera: &self.camera_buffer,
+                    atmosphere: &self.atmosphere_buffer,
+                    materials: &self.materials_buffer,
+                    shadow_view: &self.shadow_view,
+                    shadow_sampler: &self.shadow_sampler,
+                    marks: &self.marks_buffer,
+                    effects: &self.effects_buffer,
+                    litter: &self.litter_field,
+                    marsh: &self.marsh_field,
+                },
+            );
+        }
+        self.litter_field.upload(self.gpu.queue(), field);
+    }
+
+    /// The marsh's medium: a 2D grid (`ny` = 1) of at most `MARSH_FIELD_SIZE` texels each way,
+    /// written in the corner of its texture. Where it lies and how it shows is in the effects
+    /// (`EffectsUniform::with_marsh`). Cheap: send it after each step of the medium.
+    pub fn upload_marsh(&mut self, field: &Field3) {
+        self.marsh_field
+            .upload_region(self.gpu.queue(), [0, 0, 0], field);
+    }
+
     /// Mist (0 to 1) lying around `floor` (height in cells: thick below it, thinning above),
     /// and how wet the ground is (0 dry to 1 soaked: darker, glossy).
     pub fn set_weather(&mut self, mist: f32, wet: f32, floor: f32) {
@@ -556,6 +636,13 @@ impl Renderer {
     pub fn upload_base(&mut self, id: VolumeId, field: &Field3) {
         let (device, queue) = (self.gpu.device(), self.gpu.queue());
         self.volumes[id.0].upload_base(device, queue, &self.volume_layout, field);
+    }
+
+    /// Copies `region`, a packed box of a volume's base field, with its first cell at `at`: a
+    /// few cells changed, without sending the whole field again (the ground's is 67 MB). The
+    /// base field must have been uploaded whole first.
+    pub fn upload_base_region(&mut self, id: VolumeId, at: [usize; 3], region: &Field3) {
+        self.volumes[id.0].upload_base_region(self.gpu.queue(), at, region);
     }
 
     /// Copies the life field of a volume to the GPU. Same dimensions as the base field.
@@ -802,6 +889,69 @@ impl Renderer {
         self.gpu.queue().submit([encoder.finish()]);
         self.gpu.present(frame);
     }
+}
+
+/// What group 0 holds (see the frame layout in `Renderer::new`).
+struct FrameResources<'a> {
+    camera: &'a wgpu::Buffer,
+    atmosphere: &'a wgpu::Buffer,
+    materials: &'a wgpu::Buffer,
+    shadow_view: &'a wgpu::TextureView,
+    shadow_sampler: &'a wgpu::Sampler,
+    marks: &'a wgpu::Buffer,
+    effects: &'a wgpu::Buffer,
+    litter: &'a FieldTexture,
+    marsh: &'a FieldTexture,
+}
+
+/// Group 0's bind group: the resources plugged into the frame layout, binding by binding.
+fn create_frame_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    r: FrameResources,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("frame"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: r.camera.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: r.atmosphere.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: r.materials.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(r.shadow_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(r.shadow_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: r.marks.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: r.effects.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&r.litter.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&r.marsh.view),
+            },
+        ],
+    })
 }
 
 /// Depth only, from the sun. Back faces are culled like in the main pass; a depth bias

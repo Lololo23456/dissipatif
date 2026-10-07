@@ -1,8 +1,8 @@
 // Voxel volumes. Two fragment entry points share the same vertex stage and lighting:
 // - `fs_main`, opaque (ground): inert base colour blended with the "life" overlay (e.g. a wet
 //   film), ambient occlusion;
-// - `fs_water`, transparent: colour by depth, foam where the current is fast, animated ripples,
-//   sun glint, opacity growing with depth.
+// - `fs_water`, transparent: colour by depth, murky still water and what floats on it (algae,
+//   duckweed), animated ripples, sun glint, opacity growing with depth.
 // Particles (`vs_particle`, `fs_particle`) are small instanced cubes using only group 0.
 // Lighting: warm sun, cool sky light in the shadows, haze with distance.
 
@@ -81,6 +81,29 @@ struct Marks {
 }
 @group(0) @binding(5) var<uniform> marks: Marks;
 
+// Rust side: `EffectsUniform` in src/effects.rs. Effects drawn over the world when the game
+// asks for them; all zero, nothing shows.
+struct Effects {
+    marsh: vec4<f32>,             // offset 0: origin x, z (world cells), texels per cell,
+                                  //   strength (0 = not drawn)
+    marsh_size: vec4<f32>,        // offset 16: texels used along x, z; zw free
+    mist: vec4<f32>,              // offset 32: centre x, z, radius (cells), amount (0 = none)
+    wave: vec4<f32>,              // offset 48: origin x, z, distance travelled, width (cells)
+    wave_style: vec4<f32>,        // offset 64: colour (linear rgb), strength (0 = none)
+    vision: vec4<f32>,            // offset 80: night sight, dazzle (0 to 1); zw free
+    spare: array<vec4<f32>, 2>,   // offset 96: free for later effects
+}
+@group(0) @binding(6) var<uniform> effects: Effects;
+// Litter on the ground: one value per soil patch, the patches covering the world evenly
+// (Rust side: `Renderer::upload_litter`). 1 × 1 × 1 and zero until the game sends it.
+@group(0) @binding(7) var litter_field: texture_3d<f32>;
+// The marsh's medium, in the corner of a 128 × 1 × 128 texture (`Renderer::upload_marsh`);
+// where it lies and how big it is: `effects.marsh`, `effects.marsh_size`.
+@group(0) @binding(8) var marsh_field: texture_3d<f32>;
+// The pipelines of the shadow pass have only bindings 0 and 1 of group 0, and the particles
+// and the sky no group 1: what they reach (`haze`, `wind`, `wrap_shift`…) reads only what
+// they have.
+
 // ---------- Group 1: the volume being drawn (terrain, water…) ----------
 
 // Rust side: `VolumeUniform` in src/volume.rs.
@@ -148,12 +171,13 @@ const MATERIAL_FERN: u32 = 21u;
 const MATERIAL_BIRCH_LEAVES: u32 = 25u;
 const MATERIAL_PALM_LEAVES: u32 = 27u;
 const MATERIAL_WILLOW_LEAVES: u32 = 30u;
+const MATERIAL_REED: u32 = 48u;
 
 // Green parts of plants: their shade varies from plant to plant (`tint`).
 fn is_foliage(id: u32) -> bool {
     return id == MATERIAL_LEAVES || id == MATERIAL_PINE_NEEDLES || id == MATERIAL_TALL_GRASS
         || id == MATERIAL_FERN || id == MATERIAL_BIRCH_LEAVES || id == MATERIAL_PALM_LEAVES
-        || id == MATERIAL_WILLOW_LEAVES;
+        || id == MATERIAL_WILLOW_LEAVES || id == MATERIAL_REED;
 }
 
 const MATERIAL_GRASS: u32 = 1u;
@@ -523,6 +547,57 @@ fn ripple_rings(p: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(tilt, crest);
 }
 
+// ---------- Effects: reading their fields ----------
+
+// Litter lying at world point `p` (x, z): the value of the soil patch it falls in, the patches
+// covering the world evenly (across its edge, those of the other side). 0 until the game sends
+// the field. Rust mirror: `effects::litter_patch`.
+fn litter_at(p: vec2<f32>) -> f32 {
+    let size = textureDimensions(litter_field);
+    if (camera.world.x <= 0.0) {
+        return 0.0;
+    }
+    let wrapped = p - camera.world.xy * floor(p / camera.world.xy);
+    let soil_patch = min(vec2<u32>(wrapped / camera.world.xy * vec2<f32>(size.xz)), size.xz - 1u);
+    return textureLoad(litter_field, vec3<u32>(soil_patch.x, 0u, soil_patch.y), 0).r;
+}
+
+// Where world point `p` (x, z) falls in the marsh's grid, in texels (texel (i, j) spans
+// [i, i + 1) × [j, j + 1)): the copy of `p` ahead of the grid's origin, on a world that closes
+// on itself. Rust mirror: `EffectsUniform::marsh_texel`.
+fn marsh_texel(p: vec2<f32>) -> vec2<f32> {
+    var d = p - effects.marsh.xy;
+    if (camera.world.x > 0.0) {
+        d -= camera.world.xy * floor(d / camera.world.xy);
+    }
+    return d * effects.marsh.z;
+}
+
+fn marsh_texel_value(i: vec2<i32>) -> f32 {
+    let last = vec2<i32>(effects.marsh_size.xy) - 1;
+    let c = clamp(i, vec2<i32>(0), last);
+    return textureLoad(marsh_field, vec3<i32>(c.x, 0, c.y), 0).r;
+}
+
+// The marsh's medium at `p`, blended between the four nearest texels (the field is read texel
+// by texel): smooth fronts rather than squares. 0 outside its grid, or when it is not drawn.
+fn marsh_value(p: vec2<f32>) -> f32 {
+    let size = effects.marsh_size.xy;
+    if (effects.marsh.w <= 0.0 || size.x < 1.0 || size.y < 1.0) {
+        return 0.0;
+    }
+    let t = marsh_texel(p);
+    if (t.x >= size.x || t.y >= size.y) {
+        return 0.0;
+    }
+    let q = t - 0.5;
+    let i = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    let low = mix(marsh_texel_value(i), marsh_texel_value(i + vec2<i32>(1, 0)), f.x);
+    let high = mix(marsh_texel_value(i + vec2<i32>(0, 1)), marsh_texel_value(i + vec2<i32>(1, 1)), f.x);
+    return mix(low, high, f.y);
+}
+
 // ---------- Opaque volumes ----------
 
 @fragment
@@ -567,7 +642,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         albedo = mix(albedo, autumn_leaf(id, fract(grain * 7.13)), atmosphere.season.x);
     }
-    if (materials_drawn && (id == MATERIAL_GRASS || id == MATERIAL_TALL_GRASS)) {
+    // Grass and reeds dry to straw as the season turns.
+    if (materials_drawn && (id == MATERIAL_GRASS || id == MATERIAL_TALL_GRASS || id == MATERIAL_REED)) {
         let straw = vec3<f32>(0.62, 0.55, 0.3) * (0.85 + 0.3 * grain);
         albedo = mix(albedo, straw, atmosphere.fog_color.w * 0.85);
     }
@@ -705,15 +781,42 @@ fn night_sky(d: vec3<f32>, pixel: f32) -> vec3<f32> {
     return light;
 }
 
+// The life field of the water at column `c` (one value per column), across the edge of the
+// world those of the other side.
+fn water_life_at(c: vec2<i32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(life_field).xz);
+    let w = ((c % size) + size) % size;
+    return textureLoad(life_field, vec3<i32>(w.x, 0, w.y), 0).r;
+}
+
+// What lives in the water at world point `p` (x, z), blended between the four nearest columns:
+// patches of algae and duckweed are round, not square.
+fn water_life(p: vec2<f32>) -> f32 {
+    let q = p - volume.origin.xz - 0.5;
+    let i = vec2<i32>(floor(q));
+    let f = q - floor(q);
+    let low = mix(water_life_at(i), water_life_at(i + vec2<i32>(1, 0)), f.x);
+    let high = mix(water_life_at(i + vec2<i32>(0, 1)), water_life_at(i + vec2<i32>(1, 1)), f.x);
+    return mix(low, high, f.y);
+}
+
 @fragment
 fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Base field: water depth. Life field: speed of the current, shown as foam.
+    // Base field: water depth. Life field: what lives in still water (0 in open, clear water).
+    // Up to `life_range.x`, the water turns murky: its colour comes from the life palette and
+    // it lets less of its bed show. From there to `life_range.y`, life floats on it (algae,
+    // duckweed): opaque, matte, the colour climbing the palette. Rust side: `scene.rs`.
     let cell = unpack_cell(in.cell);
     let depth_t = unit(textureLoad(base_field, cell, 0).r, volume.base_range.x, volume.base_range.y);
-    let speed = textureLoad(life_field, cell, 0).r;
-    let foam = smoothstep(volume.life_range.x, volume.life_range.y, speed);
-    let foam_color = life_palette(unit(speed, volume.life_range.z, volume.life_range.w));
-    let albedo = mix(base_palette(depth_t), foam_color, foam);
+    let p = in.world_position.xz;
+    let life = water_life(p);
+    let murk = smoothstep(0.0, volume.life_range.x, life);
+    // Ragged edges and a grain finer than a cell: duckweed is a crowd of tiny leaves.
+    let ragged = (0.2 * (value_noise(p * 2.3) - 0.5) + 0.12 * (value_noise(p * 11.0) - 0.5)) * murk;
+    let living = life + ragged;
+    let floating = smoothstep(volume.life_range.x, volume.life_range.y, living);
+    let life_color = life_palette(unit(living, volume.life_range.z, volume.life_range.w));
+    let albedo = mix(base_palette(depth_t), life_color, murk);
 
     var n = normalize(in.normal);
     let sunlit = sun_visibility(in.world_position, n);
@@ -737,7 +840,8 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // stars. The reflected direction picks a star in a grid laid over the sky.
     let to_eye = normalize(camera.eye.xyz - in.world_position);
     let fresnel = 0.15 + 0.85 * pow(1.0 - max(dot(n, to_eye), 0.0), 3.0);
-    let calm = 1.0 - foam;
+    // What floats on the water is matte: it mirrors nothing.
+    let calm = 1.0 - floating;
     color = mix(color, atmosphere.sky_color.rgb, fresnel * 0.5 * calm);
     // The sky is mirrored by a still surface, with only a slow shiver: the ripples that move
     // the light would shatter the stars into arcs.
@@ -759,13 +863,14 @@ fn fs_water(in: VertexOutput) -> @location(0) vec4<f32> {
     // the eye.
     let mirrored = reflect(-atmosphere.sun_direction.xyz, n);
     let glint = pow(max(dot(mirrored, to_eye), 0.0), GLINT_SHARPNESS) * GLINT_STRENGTH;
-    color += atmosphere.sun_color.rgb * glint * (1.0 - foam) * sunlit;
+    color += atmosphere.sun_color.rgb * glint * calm * sunlit;
 
     // Crests of the rings catch the light of the sky.
     color += atmosphere.sky_color.rgb * crest * 0.5;
 
-    // Shallow water lets the ground show through; deep water, foam and ice hide it.
-    let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.4 * foam + ice, 0.0, 1.0);
+    // Shallow water lets the ground show through; deep or murky water, what floats on it and
+    // ice hide it.
+    let alpha = clamp(mix(WATER_ALPHA_MIN, WATER_ALPHA_MAX, depth_t) + 0.25 * murk + 0.4 * floating + ice, 0.0, 1.0);
     return vec4<f32>(haze(color, in.world_position), alpha);
 }
 

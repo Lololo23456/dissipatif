@@ -7,10 +7,14 @@
 //! 3. biomes (`biome`) : diagramme de Whittaker, plages le long de la côte ;
 //! 4. voxels : surface, sous-sol et roche selon le biome, roche sur les pentes raides ;
 //! 5. végétation (`vegetation`) : arbres, cactus, buissons.
+//!
+//! Une fois le monde fait, `World::make_marsh` y creuse un marais (`marsh`) près d'un lieu
+//! donné (la prairie des cerfs).
 
 pub mod biome;
 pub mod drainage;
 pub mod land;
+pub mod marsh;
 pub mod material;
 pub mod noise;
 pub mod plants;
@@ -19,6 +23,7 @@ pub mod vegetation;
 use sim::grid::{Dims, Field2};
 
 pub use biome::{Biome, Plant};
+pub use marsh::Marsh;
 pub use material::{MATERIAL_COUNT, Material};
 pub use plants::Model;
 pub use vegetation::PlantInstance;

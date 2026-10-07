@@ -83,6 +83,7 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::DryShrub => Builder::new(32, 20, seed),
         Plant::Oak => Builder::new(72, 58, seed),
         Plant::Hazel => Builder::new(44, 34, seed),
+        Plant::Reed => Builder::new(24, 26, seed),
     };
     match plant {
         Plant::Broadleaf => broadleaf(&mut b),
@@ -102,6 +103,7 @@ pub fn model(plant: Plant, variant: u32, seed: u64) -> Model {
         Plant::DryShrub => dry_shrub(&mut b),
         Plant::Oak => oak(&mut b),
         Plant::Hazel => hazel(&mut b),
+        Plant::Reed => reed(&mut b),
     }
     let mut model = b.crop();
     model.resolution = resolution(plant);
@@ -1016,11 +1018,78 @@ fn bush(b: &mut Builder) {
     b.blob([0.0, r * 0.5, 0.0], r, r * 0.6, Material::Leaves);
 }
 
+/// A clump of common reed (fine resolution): stiff stems rising close together from one
+/// rhizome, taller than a person (one and a half to two and a half cells), each with a few
+/// long leaves held out and bending down, most topped by a brown plume nodding to one side.
+fn reed(b: &mut Builder) {
+    let stems = 7 + (b.rand() * 6.0) as usize;
+    for _ in 0..stems {
+        let angle = std::f32::consts::TAU * b.rand();
+        let out = 2.5 * b.rand().sqrt();
+        let (x, z) = (angle.cos() * out, angle.sin() * out);
+        // 13 to 20 voxels of an eighth of a cell.
+        let height = 13.0 + (b.rand() * 8.0).floor();
+        // A stiff stem: it leans a little, more towards its top.
+        let lean = std::f32::consts::TAU * b.rand();
+        let tilt = 1.0 + 2.0 * b.rand();
+        let at = |y: f32| {
+            let t = (y / height).powi(2) * tilt;
+            (x + lean.cos() * t, z + lean.sin() * t)
+        };
+        let mut y = 0.0;
+        while y < height {
+            let (sx, sz) = at(y);
+            b.set(sx, y, sz, Material::Reed);
+            y += 1.0;
+        }
+        // Leaves: long blades from the stem, out then down.
+        let leaves = 1 + (b.rand() * 2.0) as usize;
+        for _ in 0..leaves {
+            let from = (3.0 + b.rand() * (height * 0.5)).floor();
+            let (sx, sz) = at(from);
+            let side = std::f32::consts::TAU * b.rand();
+            let length = 4.0 + 3.0 * b.rand();
+            let mut s = 1.0;
+            while s <= length {
+                let y = from + 0.8 * s - 0.12 * s * s;
+                b.set(
+                    sx + side.cos() * s,
+                    y.max(0.0),
+                    sz + side.sin() * s,
+                    Material::Reed,
+                );
+                s += 1.0;
+            }
+        }
+        // The plume: a dense brown head on the tallest stems (and a few others), nodding the
+        // way its stem leans.
+        if height >= 15.0 || b.rand() < 0.4 {
+            let (hx, hz) = at(height);
+            let length = 4.0 + (b.rand() * 2.0).floor();
+            for k in 0..length as usize {
+                let k = k as f32;
+                let droop = 0.12 * k * k;
+                let (px, pz) = (hx + lean.cos() * droop, hz + lean.sin() * droop);
+                b.set(px, height + k - 0.3 * droop, pz, Material::ReedHead);
+                // Fuller in the middle of the head.
+                if (1.0..length - 1.0).contains(&k) {
+                    b.set(
+                        px - lean.sin(),
+                        height + k - 0.3 * droop,
+                        pz + lean.cos(),
+                        Material::ReedHead,
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const KINDS: [Plant; 17] = Plant::ALL;
+    const KINDS: [Plant; 18] = Plant::ALL;
 
     #[test]
     fn every_model_has_matter_and_stands_on_its_anchor() {
@@ -1044,6 +1113,28 @@ mod tests {
     fn variants_differ_and_are_deterministic() {
         assert_eq!(model(Plant::Broadleaf, 0, 3), model(Plant::Broadleaf, 0, 3));
         assert_ne!(model(Plant::Broadleaf, 0, 3), model(Plant::Broadleaf, 1, 3));
+    }
+
+    #[test]
+    fn reeds_stand_tall_and_carry_brown_plumes() {
+        for variant in 0..VARIANTS {
+            let reed = model(Plant::Reed, variant, 5);
+            let grass = model(Plant::Grass, variant, 5);
+            assert_eq!(reed.resolution, FINE, "reed {variant} is not finely drawn");
+            assert!(
+                reed.dims.ny as f32 / reed.resolution as f32 >= 1.6,
+                "reed {variant} only {} voxels tall",
+                reed.dims.ny
+            );
+            assert!(
+                reed.dims.ny > 2 * grass.dims.ny,
+                "reed {variant} hardly taller than grass"
+            );
+            assert!(
+                reed.voxels.contains(&Material::ReedHead.id()),
+                "reed {variant} has no plume"
+            );
+        }
     }
 
     #[test]

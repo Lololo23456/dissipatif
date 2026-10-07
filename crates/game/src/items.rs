@@ -80,6 +80,9 @@ pub enum Matter {
     Acorn,
     /// A hazelnut: rich food.
     Hazelnut,
+    /// A sheaf of reed stems pulled from the marsh's edge: light, supple, long fibres; dry,
+    /// they catch at once, and laid thick they shed the rain (the best thatch).
+    Reed,
 }
 
 /// Cuts a knife makes before its grass binding gives way.
@@ -256,6 +259,14 @@ impl Matter {
                 nutrition: 0.03,
                 ..base
             },
+            Matter::Reed => Properties {
+                mass: 0.08,
+                hardness: 0.15,
+                flexibility: 0.7,
+                fragility: 0.2,
+                flammability: 0.7,
+                ..base
+            },
             Matter::Mushroom { spotted } => Properties {
                 mass: 0.06,
                 fragility: 0.8,
@@ -304,6 +315,7 @@ impl Matter {
             Matter::Antler => "Bois de cerf",
             Matter::Acorn => "Gland",
             Matter::Hazelnut => "Noisette",
+            Matter::Reed => "Roseaux",
         }
     }
 
@@ -348,6 +360,8 @@ pub fn harvest(plant: &PlantInstance) -> Option<Harvest> {
         Plant::Mushroom => Some(Harvest::Whole(Matter::Mushroom {
             spotted: mushroom_is_spotted(plant.variant),
         })),
+        // Rooted in soft mud, a clump comes away whole when pulled.
+        Plant::Reed => Some(Harvest::Whole(Matter::Reed)),
         _ => None,
     }
 }
@@ -460,6 +474,8 @@ impl crate::save::Persist for Matter {
             Matter::Antler => (17, 0, None),
             Matter::Acorn => (18, 0, None),
             Matter::Hazelnut => (19, 0, None),
+            // 20 is the fallen leaves' (see docs/phase-2-architecture.md).
+            Matter::Reed => (21, 0, None),
         };
         w.put(&tag);
         w.put(&a);
@@ -500,6 +516,7 @@ impl crate::save::Persist for Matter {
             17 => Matter::Antler,
             18 => Matter::Acorn,
             19 => Matter::Hazelnut,
+            21 => Matter::Reed,
             _ => return Err("matière inconnue".into()),
         })
     }
@@ -532,6 +549,30 @@ mod tests {
             assert_eq!(bag.take(0), Some(Matter::GrassFibre));
         }
         assert_eq!(bag.stacks().len(), 1);
+    }
+
+    #[test]
+    fn reeds_are_pulled_whole_and_make_light_supple_tinder() {
+        let reed = PlantInstance {
+            plant: Plant::Reed,
+            variant: 3,
+            rotation: 0,
+            mirrored: false,
+            scale: 1.0,
+            base: [10, 20, 10],
+            offset: [0.0; 2],
+        };
+        assert_eq!(harvest(&reed), Some(Harvest::Whole(Matter::Reed)));
+        let p = Matter::Reed.properties();
+        assert!(p.flexibility > Matter::Stick.properties().flexibility);
+        assert!(p.flammability > 0.5 && p.mass < 0.1, "{p:?}");
+        assert!(!Matter::Reed.edible());
+        // Saved under its own tag, and read back.
+        let mut w = crate::save::Writer::default();
+        w.put(&Matter::Reed);
+        assert_eq!(w.bytes[0], 21);
+        let mut r = crate::save::Reader::new(&w.bytes);
+        assert_eq!(r.get::<Matter>(), Ok(Matter::Reed));
     }
 
     #[test]

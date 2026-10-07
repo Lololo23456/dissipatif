@@ -297,6 +297,9 @@ pub struct GameState {
     notebook_lying: Option<Vec3>,
     /// The moment of the last step.
     now: Conditions,
+    /// The marsh dug near the deer's meadow, if the world has one. Not saved: the world's
+    /// generation gives it again (see `set_marsh`).
+    marsh: Option<world::Marsh>,
 }
 
 impl GameState {
@@ -343,6 +346,7 @@ impl GameState {
                 wind: Vec2::X,
                 year: 0.375,
             },
+            marsh: None,
         }
     }
 
@@ -434,6 +438,17 @@ impl GameState {
 
     pub fn herd(&self) -> Option<&Herd> {
         self.herd.as_ref()
+    }
+
+    /// Where the marsh is (as dug by `World::make_marsh`). Given after `new` or `load`, every
+    /// time the game starts: it is part of the world, not of what is saved.
+    pub fn set_marsh(&mut self, marsh: Option<world::Marsh>) {
+        self.marsh = marsh;
+    }
+
+    /// The marsh near the deer's meadow, if the world has one.
+    pub fn marsh(&self) -> Option<&world::Marsh> {
+        self.marsh.as_ref()
     }
 
     /// Lays the notebook on the ground at `at`.

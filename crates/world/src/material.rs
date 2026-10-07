@@ -171,23 +171,25 @@ impl Material {
 
     /// Part of a plant or of what lies on the ground (stones), not of the ground itself.
     pub const fn is_plant(self) -> bool {
-        matches!(self, Material::BarkDark | Material::Reed | Material::ReedHead)
-            || (self as u8) < Material::Skin as u8
-                && !matches!(
-                    self,
-                    Material::Air
-                        | Material::Grass
-                        | Material::ForestFloor
-                        | Material::Dirt
-                        | Material::Sand
-                        | Material::DesertSand
-                        | Material::Sandstone
-                        | Material::Rock
-                        | Material::Snow
-                        | Material::Gravel
-                        | Material::DryGrass
-                        | Material::Clay
-                )
+        matches!(
+            self,
+            Material::BarkDark | Material::Reed | Material::ReedHead
+        ) || (self as u8) < Material::Skin as u8
+            && !matches!(
+                self,
+                Material::Air
+                    | Material::Grass
+                    | Material::ForestFloor
+                    | Material::Dirt
+                    | Material::Sand
+                    | Material::DesertSand
+                    | Material::Sandstone
+                    | Material::Rock
+                    | Material::Snow
+                    | Material::Gravel
+                    | Material::DryGrass
+                    | Material::Clay
+            )
     }
 
     /// Built by the naturalist (posts, walls, floors, roofs): solid, never dug, never a plant.

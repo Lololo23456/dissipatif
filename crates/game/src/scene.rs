@@ -1,6 +1,7 @@
 //! Turns a generated `World` into what the renderer draws: the ground voxels (one opaque
 //! volume coloured by material), the plants (micro-voxel models drawn by instancing) and the
-//! water surface (one transparent volume).
+//! water surface (one transparent volume, its life field the murk, algae and duckweed of the
+//! marsh).
 
 use glam::Vec3;
 use render::mesh::MeshData;
@@ -9,9 +10,9 @@ use render::palette;
 use render::water_mesher::mesh_water;
 use render::{LifeStyle, ModelId, ModelInstance, Renderer, VolumeStyle};
 use sim::grid::{Dims, Field2, Field3};
-use world::noise::hash_unit;
+use world::noise::{hash_unit, smoothstep, value};
 use world::plants::VARIANTS;
-use world::{Biome, Material, Plant, World};
+use world::{Biome, Marsh, Material, Plant, World};
 
 use crate::trample::Pliable;
 
@@ -82,6 +83,111 @@ fn water(world: &World) -> (Field3, MeshData) {
     (depth, mesh)
 }
 
+/// The water's life field (see `fs_water` in voxel.wgsl): still water this rich is murky…
+const MURK: f32 = 0.2;
+/// …and from this much on, life floats on it, fully (algae, then duckweed).
+const FLOATING: f32 = 0.5;
+/// Water joined to the marsh (a channel dug from it) turns murky this many columns out.
+const MURK_SPREAD: u32 = 4;
+/// Seed offset of the patches of algae and duckweed.
+const DUCKWEED_SEED: u64 = 0xd0c3;
+
+/// How the life of the water shows (see `fs_water`): murky up to `MURK`, then algae and
+/// duckweed floating on it, matte and opaque, climbing the palette up to 1.
+fn water_life_style() -> LifeStyle {
+    LifeStyle {
+        palette: palette::marsh_water(),
+        fade: (MURK, FLOATING),
+        value_range: (0.0, 1.0),
+    }
+}
+
+/// What lives in the water, per column (a 2D grid stored with a height of 1), 0 in clear water.
+///
+/// In the marsh, the water is murky everywhere, and algae and duckweed float on it in patches,
+/// thicker towards the edges, where the reeds shelter them from the wind and the waves.
+/// Water joined to the marsh since (a channel dug from it) is murky a few columns out. Dry
+/// columns along that water get the murk too: nothing is drawn there, but the water's colour,
+/// blended between columns, does not pale towards its bank.
+fn water_life(world: &World, marsh: Option<&Marsh>) -> Field3 {
+    let dims = world.dims();
+    let (nx, nz) = (dims.nx, dims.nz);
+    let mut life = Field3::filled(Dims { nx, ny: 1, nz }, 0.0);
+    let Some(marsh) = marsh else {
+        return life;
+    };
+    let seed = world.config.seed ^ DUCKWEED_SEED;
+    // Steps from the bank, by rings inwards (1 on the edge).
+    let mut edge: Vec<u32> = vec![0; marsh.cells.len()];
+    let neighbours = |[x, z]: [usize; 2]| {
+        [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(a, b)| world.column(x as i64 + a, z as i64 + b))
+    };
+    for ring in 1.. {
+        let mut changed = false;
+        for (i, &cell) in marsh.cells.iter().enumerate() {
+            if edge[i] != 0 {
+                continue;
+            }
+            let near_bank = neighbours(cell).iter().any(|&(x, z)| {
+                match marsh.cells.binary_search(&[x, z]) {
+                    Ok(j) => edge[j] != 0 && edge[j] < ring,
+                    Err(_) => true,
+                }
+            });
+            if near_bank {
+                edge[i] = ring;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut reached = vec![false; nx * nz];
+    let mut front: Vec<[usize; 2]> = Vec::with_capacity(marsh.cells.len());
+    for (&[x, z], &steps) in marsh.cells.iter().zip(&edge) {
+        // Patches drift slowly over a few cells; their place is fixed relative to the marsh, so
+        // nothing changes across the world's edge.
+        let [dx, dz] = world.nearest(marsh.centre, [x as f32 + 0.5, z as f32 + 0.5]);
+        let (dx, dz) = (dx - marsh.centre[0], dz - marsh.centre[1]);
+        let patches = value(dx, dz, 4.5, seed);
+        let sheltered = (-(steps as f32 - 1.0) / 2.5).exp();
+        let cover = smoothstep(0.35, 0.8, 0.55 * sheltered + 0.65 * patches - 0.1);
+        life.set(x, 0, z, MURK + (1.0 - MURK) * cover);
+        reached[x + nx * z] = true;
+        front.push([x, z]);
+    }
+    // Water joined to the marsh, a few columns out.
+    for _ in 0..MURK_SPREAD {
+        let mut next = Vec::new();
+        for &cell in &front {
+            for (x, z) in neighbours(cell) {
+                if !reached[x + nx * z] && world.water_level(x, z).is_some() {
+                    reached[x + nx * z] = true;
+                    life.set(x, 0, z, MURK);
+                    next.push([x, z]);
+                }
+            }
+        }
+        front = next;
+    }
+    // The dry columns along that water.
+    for z in 0..nz {
+        for x in 0..nx {
+            if !reached[x + nx * z] {
+                continue;
+            }
+            for (a, b) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+                let (x, z) = world.column(x as i64 + a, z as i64 + b);
+                if world.water_level(x, z).is_none() && life.get(x, 0, z) == 0.0 {
+                    life.set(x, 0, z, MURK);
+                }
+            }
+        }
+    }
+    life
+}
+
 /// Index of a plant model's group: kind × VARIANTS + variant.
 fn model_index(plant: Plant, variant: u32) -> usize {
     let kind = Plant::ALL.iter().position(|&p| p == plant).unwrap_or(0);
@@ -123,6 +229,9 @@ pub struct SceneData {
     /// Water: depth per column (a 2D grid stored with a height of 1), and its surface mesh.
     water_depth: Field3,
     water_mesh: MeshData,
+    /// What lives in the water, per column (see `water_life`), and the marsh it comes from.
+    water_life: Field3,
+    marsh: Option<Marsh>,
     /// One mesh per plant model (kind × variant) and where each is drawn.
     plant_models: Vec<(MeshData, Vec<ModelInstance>)>,
     /// Plants that bend when walked through, with where their instance is.
@@ -144,13 +253,13 @@ pub struct SceneData {
     view_radius: f32,
     world_size: (f32, f32),
     visible: Vec<ModelInstance>,
-    /// No overlays yet: zero fields with the shapes of the textures above.
+    /// No overlay on the ground yet: a zero field with the shape of its texture.
     no_overlay_solid: Field3,
-    no_overlay_water: Field3,
 }
 
 impl SceneData {
-    pub fn build(world: &World) -> Self {
+    /// The world, and the marsh dug into it (its water is drawn murky and alive).
+    pub fn build(world: &World, marsh: Option<&Marsh>) -> Self {
         let dims = world.dims();
         let seed = world.config.seed ^ VARIATION_SEED;
         let (solid_look, occupied) = ground_fields(world);
@@ -160,11 +269,6 @@ impl SceneData {
             .map(|(cx, cz)| chunk_mesh(world, &occupied, cx, cz))
             .collect();
         let (water_depth, water_mesh) = water(world);
-        let columns = Dims {
-            nx: dims.nx,
-            ny: 1,
-            nz: dims.nz,
-        };
 
         // Plants: one mesh per model, a quarter of a cell per micro-voxel, its origin where the
         // plant stands (centre of the bottom of its base cell).
@@ -236,7 +340,8 @@ impl SceneData {
             world_size: (world.dims().nx as f32, world.dims().nz as f32),
             visible: Vec::new(),
             no_overlay_solid: Field3::filled(dims, 0.0),
-            no_overlay_water: Field3::filled(columns, 0.0),
+            water_life: water_life(world, marsh),
+            marsh: marsh.cloned(),
             water_id: None,
             solid_look,
             occupied,
@@ -287,8 +392,11 @@ impl SceneData {
             let (depth, mesh) = water(world);
             self.water_depth = depth;
             self.water_mesh = mesh;
+            // Water let into a channel from the marsh is the marsh's.
+            self.water_life = water_life(world, self.marsh.as_ref());
             if let (Some(renderer), Some(id)) = (renderer, self.water_id) {
                 renderer.upload_base(id, &self.water_depth);
+                renderer.upload_life(id, &self.water_life);
                 renderer.upload_mesh(id, &self.water_mesh);
             }
         }
@@ -327,7 +435,7 @@ impl SceneData {
             // Depth: turquoise lagoon at 0, deep blue from 2.5 cells.
             value_range: (0.0, 2.5),
             materials: false,
-            life: no_overlay(),
+            life: water_life_style(),
             transparent: true,
         });
         self.solid_id = Some(solid);
@@ -338,7 +446,7 @@ impl SceneData {
         }
         self.water_id = Some(water);
         renderer.upload_base(water, &self.water_depth);
-        renderer.upload_life(water, &self.no_overlay_water);
+        renderer.upload_life(water, &self.water_life);
         renderer.upload_mesh(water, &self.water_mesh);
         self.model_ids = self
             .plant_models
@@ -506,6 +614,8 @@ fn flexibility(plant: Plant) -> f32 {
         Plant::DeadTree => 0.2,
         Plant::Grass => 4.0,
         Plant::Flower => 3.5,
+        // Tall and thin: they sway as a field of grass does, their plumes nodding.
+        Plant::Reed => 2.5,
         Plant::Fern => 2.0,
         Plant::DryShrub => 0.8,
         Plant::Cactus | Plant::Mushroom | Plant::Stone => 0.0,
@@ -517,7 +627,7 @@ fn flexibility(plant: Plant) -> f32 {
 fn yielding(plant: Plant) -> f32 {
     match plant {
         Plant::Grass | Plant::Flower => 1.0,
-        Plant::Fern => 0.8,
+        Plant::Fern | Plant::Reed => 0.8,
         Plant::Bush | Plant::DryShrub | Plant::Hazel => 0.3,
         _ => 0.0,
     }
@@ -575,7 +685,7 @@ mod tests {
     #[ignore = "mesure de temps : cargo test --release -p game remesh -- --ignored --nocapture"]
     fn remesh_timing() {
         let mut world = World::generate(WorldConfig::small(1));
-        let mut data = SceneData::build(&world);
+        let mut data = SceneData::build(&world, None);
         let start = std::time::Instant::now();
         let _ = ground_fields(&world);
         let whole = start.elapsed();
@@ -585,5 +695,78 @@ mod tests {
         data.ground_dug(&world, dug.cell, dug.flooded, None);
         let chunk = start.elapsed();
         println!("champs du sol entier : {whole:?} ; creuser + remailler un tronçon : {chunk:?}");
+    }
+
+    #[test]
+    fn the_marsh_is_murky_with_duckweed_thicker_at_its_edge_and_other_water_stays_clear() {
+        let crate::Generated { world, marsh, .. } = crate::generate(WorldConfig::small(2));
+        let marsh = marsh.expect("a marsh");
+        let life = water_life(&world, Some(&marsh));
+        let at = |[x, z]: [usize; 2]| life.get(x, 0, z);
+        assert!(
+            marsh.cells.iter().all(|&c| (MURK..=1.0).contains(&at(c))),
+            "some of the marsh is clear"
+        );
+        let floating = marsh.cells.iter().filter(|&&c| at(c) >= FLOATING).count();
+        let share = floating as f32 / marsh.cells.len() as f32;
+        assert!(
+            (0.1..0.8).contains(&share),
+            "{share} of the marsh under duckweed"
+        );
+        // Thicker along the bank than out on the water.
+        let on_edge = |&[x, z]: &[usize; 2]| {
+            [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(a, b)| {
+                let (x, z) = world.column(x as i64 + a, z as i64 + b);
+                !marsh.contains(x, z)
+            })
+        };
+        let mean = |cells: Vec<&[usize; 2]>| {
+            cells.iter().map(|&&c| at(c)).sum::<f32>() / cells.len().max(1) as f32
+        };
+        let edge = mean(marsh.cells.iter().filter(|c| on_edge(c)).collect());
+        let open = mean(marsh.cells.iter().filter(|c| !on_edge(c)).collect());
+        assert!(edge > open, "edge {edge}, open water {open}");
+        // Rivers, lakes and the sea are as clear as before.
+        let dims = world.dims();
+        for z in 0..dims.nz {
+            for x in 0..dims.nx {
+                if world.water_level(x, z).is_some() && !marsh.contains(x, z) {
+                    assert_eq!(at([x, z]), 0.0, "murky water at ({x}, {z})");
+                }
+            }
+        }
+        assert!(water_life(&world, None).data.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn a_channel_dug_from_the_marsh_fills_with_its_murky_water() {
+        let crate::Generated {
+            mut world, marsh, ..
+        } = crate::generate(WorldConfig::small(2));
+        let marsh = marsh.expect("a marsh");
+        // A column of the bank, beside the water, away from the world's edge (no digging there).
+        let dims = world.dims();
+        let bank = marsh
+            .cells
+            .iter()
+            .flat_map(|&[x, z]| {
+                [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(a, b)| world.column(x as i64 + a, z as i64 + b))
+            })
+            .find(|&(x, z)| {
+                !marsh.contains(x, z) && (2..dims.nx - 2).contains(&x) && (2..dims.nz - 2).contains(&z)
+            })
+            .expect("a bank");
+        let mut flooded = false;
+        for _ in 0..4 * world::MICRO_CELLS {
+            if let Some(dug) = world.dig(bank.0 as f32 + 0.5, bank.1 as f32 + 0.5) {
+                flooded |= dug.flooded;
+            }
+            if flooded {
+                break;
+            }
+        }
+        assert!(flooded, "the marsh did not flow into the dug bank");
+        let life = water_life(&world, Some(&marsh));
+        assert_eq!(life.get(bank.0, 0, bank.1), MURK);
     }
 }

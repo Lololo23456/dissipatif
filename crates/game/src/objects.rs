@@ -79,6 +79,15 @@ fn body(matter: Matter, base: Vec3, air: f32) -> Body {
         // Bone: dense, does not burn here.
         Matter::Antler => (0.08, 0.9, 1300.0, 0.0, None),
         Matter::Acorn | Matter::Hazelnut => (0.01, 0.005, 1500.0, 0.001, None),
+        // A sheaf of reeds: hollow stems, still a little green at the end of summer; they
+        // flare up like dry grass once the sap is gone.
+        Matter::Reed => (
+            0.06,
+            0.006,
+            1700.0,
+            0.004,
+            Some(wood(0.07, 270.0, 0.08, 0.8)),
+        ),
         Matter::Flower(_) | Matter::Mushroom { .. } => (0.03, 0.03, 3000.0, 0.02, None),
     };
     Body {

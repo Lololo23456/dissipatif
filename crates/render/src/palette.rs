@@ -67,6 +67,22 @@ pub fn foam() -> Palette {
     ]
 }
 
+/// Life of still water (a marsh), from murky water to the duckweed floating on it: peat-dark
+/// water → murky olive → filamentous algae → algae and duckweed → duckweed in the sun.
+///
+/// Luminance strictly increases (L* ≈ 20 → 74): murky water is darker than any clear water of
+/// the same depth, and what floats on it reads as light against it, by luminance and not only
+/// by hue (the greens of algae and duckweed are close).
+pub fn marsh_water() -> Palette {
+    [
+        srgb_hex(0x2c3226), // L* 19.9
+        srgb_hex(0x434a32), // L* 30.2
+        srgb_hex(0x5d6e36), // L* 43.9
+        srgb_hex(0x7c973c), // L* 58.7
+        srgb_hex(0xa4c24c), // L* 74.2
+    ]
+}
+
 /// Number of entries of the material colour table.
 pub const MATERIAL_SLOTS: usize = 64;
 
@@ -365,6 +381,17 @@ mod tests {
         assert!(foam.windows(2).all(|w| w[0] < w[1]), "{foam:?}");
         let brightest_water = water().map(lightness)[0];
         assert!(foam[0] > brightest_water, "{foam:?}");
+    }
+
+    #[test]
+    fn marsh_water_is_darker_than_clear_water_and_what_floats_is_lighter() {
+        let marsh = marsh_water().map(lightness);
+        assert!(marsh.windows(2).all(|w| w[0] < w[1]), "{marsh:?}");
+        // Murky water (the first two stops) is darker than clear water as shallow as a marsh.
+        let shallow = water().map(lightness)[1];
+        assert!(marsh[1] + 20.0 < shallow, "murk {} vs clear {shallow}", marsh[1]);
+        // Duckweed stands out from the murk by lightness alone.
+        assert!(marsh[4] - marsh[1] > 30.0, "{marsh:?}");
     }
 
     #[test]
