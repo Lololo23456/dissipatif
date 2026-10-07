@@ -424,7 +424,7 @@ impl World {
         let y = top - 1;
         let index = d.index(cx, y, cz);
         let material = Material::from_id(self.blocks[index])?;
-        if !material.is_solid() || material.is_plant() {
+        if !material.is_solid() || material.is_plant() || material.is_built() {
             return None;
         }
         let brick = self

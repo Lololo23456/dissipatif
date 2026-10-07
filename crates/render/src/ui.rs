@@ -225,6 +225,9 @@ fn base_glyph(ch: char) -> [u8; 9] {
         'Y' => r(&[0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04]),
         'Z' => r(&[0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F]),
         'a' => r(&[0, 0, 0x0E, 0x01, 0x0F, 0x11, 0x0F]),
+        // The o-e ligatures, squeezed into five columns ("Œil de chouette").
+        'Œ' => r(&[0x0F, 0x14, 0x14, 0x17, 0x14, 0x14, 0x0F]),
+        'œ' => r(&[0, 0, 0x0A, 0x15, 0x17, 0x14, 0x0B]),
         'b' => r(&[0x10, 0x10, 0x16, 0x19, 0x11, 0x11, 0x1E]),
         'c' => r(&[0, 0, 0x0E, 0x10, 0x10, 0x11, 0x0E]),
         'd' => r(&[0x01, 0x01, 0x0D, 0x13, 0x11, 0x11, 0x0F]),
@@ -391,7 +394,7 @@ mod tests {
     #[test]
     fn every_letter_of_the_game_texts_has_a_glyph() {
         let unknown = base_glyph('\u{1}');
-        let texts = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:;'!?-+/()%°";
+        let texts = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,:;'!?-+/()%°Œœ";
         for ch in texts.chars() {
             assert!(ch == ' ' || base_glyph(ch) != unknown, "{ch}");
         }

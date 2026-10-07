@@ -68,7 +68,7 @@ pub fn foam() -> Palette {
 }
 
 /// Number of entries of the material colour table.
-pub const MATERIAL_SLOTS: usize = 48;
+pub const MATERIAL_SLOTS: usize = 64;
 
 /// Colour of each material of the world, indexed by material id (`world::Material`, same
 /// order). Golden-hour tones: yellow-green grass, warm sand, warm grey rock.
@@ -125,7 +125,24 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
         srgb_hex(0xd8c7a2), // 44 deer rump and belly (81)
         srgb_hex(0x2b221c), // 45 hooves, muzzle (14)
         srgb_hex(0x6e4128), // 46 deer back, darker (32)
+        // Phase 2: the marsh, building, the new animals, fallen leaves.
+        srgb_hex(0x4a4033), // 47 marsh mud (28)
+        srgb_hex(0x8f9e55), // 48 reed stems (63)
+        srgb_hex(0x6b4c33), // 49 reed plume (34)
+        srgb_hex(0xa58560), // 50 timber, raw wood (57)
+        srgb_hex(0x7a6a44), // 51 wattle, woven rods (45)
+        srgb_hex(0xbfa27a), // 52 daub, clay and straw (68)
+        srgb_hex(0xd2b46e), // 53 thatch (74)
+        srgb_hex(0x8e6b48), // 54 planks (48)
+        srgb_hex(0x7b5b3e), // 55 owl, mottled brown (41)
+        srgb_hex(0xcdb894), // 56 owl face and belly (75)
+        srgb_hex(0xb5552b), // 57 fox coat (47)
+        srgb_hex(0xece2d0), // 58 fox throat, tail tip (90)
+        srgb_hex(0x2f2621), // 59 fox legs and ears (16)
+        srgb_hex(0x6a5543), // 60 vole fur (38)
+        srgb_hex(0x9a6532), // 61 dead leaves (47)
         // Free slots.
+        srgb_hex(0xff00ff),
         srgb_hex(0xff00ff),
     ]
 }
@@ -135,7 +152,7 @@ pub fn materials() -> [[f32; 3]; MATERIAL_SLOTS] {
 /// WGSL side (`shaders/voxel.wgsl`):
 /// ```wgsl
 /// struct Materials {
-///     colors: array<vec4<f32>, 48>,  // offset 0, size 768 (rgb + unused w)
+///     colors: array<vec4<f32>, 64>,  // offset 0, size 1024 (rgb + unused w)
 /// }
 /// ```
 #[repr(C)]
@@ -296,7 +313,7 @@ mod tests {
 
     #[test]
     fn materials_layout_matches_wgsl() {
-        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 768);
+        assert_eq!(std::mem::size_of::<MaterialsUniform>(), 1024);
     }
 
     #[test]

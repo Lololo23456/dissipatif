@@ -354,3 +354,9 @@ Personnage en pièces articulées de micro-voxels (≈ 1,85 cube) : chaque pièc
 - **Construction** : libre par assemblage modulaire sur la grille voxel, sans physique complexe ; supports simples (poteau sur le sol, plancher sur un poteau, toit sur un mur ou un poteau), ce qui perd son support tombe ; bois brut, argile, chaume dans la tranche.
 - **Saisons** : la partie commence à la fin de l'été.
 - Les chouettes pointent un endroit (piste retenue pour le regard des chouettes). Le reste est provisoire, voir `docs/phase-2.md`.
+
+## 2026-10-07 — Phase 2 : le socle commun
+- **Table des matériaux à 64 entrées** (`MATERIAL_SLOTS`, `voxel.wgsl`) : il ne restait qu'une place. Nouveaux matériaux, ajoutés en fin de liste : vase du marais, roseau et son plumet (plantes), bois brut, clayonnage, torchis, chaume, planches (construits : `Material::is_built`, jamais creusés), plumage de la hulotte, pelage du renard, du campagnol, feuilles mortes.
+- **Sauvegarde : version 7** pour toute la phase 2 (les sauvegardes d'avant sont ignorées).
+- Police : `Œ` et `œ` (« Œil de chouette »).
+- Le découpage du travail et les identifiants partagés sont dans `docs/phase-2-architecture.md`.

@@ -62,7 +62,7 @@ struct Atmosphere {
 
 // Rust side: `MaterialsUniform` in src/palette.rs. Indexed by material id.
 struct Materials {
-    colors: array<vec4<f32>, 48>,  // offset 0, size 768 (rgb + unused w)
+    colors: array<vec4<f32>, 64>,  // offset 0, size 1024 (rgb + unused w)
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -536,7 +536,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var base: vec3<f32>;
     if (direct || volume.base_range.z > 0.5) {
         // Material id in the integer part, a small brightness variation in the fraction.
-        let id = min(u32(value), 47u);
+        let id = min(u32(value), 63u);
         base = materials.colors[id].rgb * (0.88 + 0.24 * fract(value));
     } else {
         base = base_palette(unit(value, volume.base_range.x, volume.base_range.y));

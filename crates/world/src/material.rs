@@ -57,10 +57,38 @@ pub enum Material {
     Hoof = 45,
     /// The darker coat along a deer's back and neck.
     DeerDark = 46,
+    // Phase 2: the marsh, building, the new animals, fallen leaves.
+    /// Dark wet bed of a marsh.
+    Mud = 47,
+    /// Stems and leaves of reeds (a plant).
+    Reed = 48,
+    /// The brown plume at the top of a reed (a plant).
+    ReedHead = 49,
+    /// Raw wood worked by the naturalist: posts and beams.
+    Timber = 50,
+    /// Green rods woven between posts.
+    Wattle = 51,
+    /// Wattle plastered with clay and grass.
+    Daub = 52,
+    /// Bundles of grass, reeds or fronds laid as a roof.
+    Thatch = 53,
+    /// Split wood laid as a floor.
+    Plank = 54,
+    /// A tawny owl's mottled brown and its pale face and belly.
+    OwlBrown = 55,
+    OwlPale = 56,
+    /// A red fox's coat, its white throat and tail tip, its dark legs and ears.
+    FoxRed = 57,
+    FoxPale = 58,
+    FoxDark = 59,
+    /// A vole's brown fur.
+    VoleBrown = 60,
+    /// Dead leaves, fallen or gathered.
+    Litter = 61,
 }
 
 /// Number of materials, `Air` included: the size of the colour table.
-pub const MATERIAL_COUNT: usize = 47;
+pub const MATERIAL_COUNT: usize = 62;
 
 impl Material {
     /// Every material, in id order.
@@ -112,6 +140,21 @@ impl Material {
         Material::DeerPale,
         Material::Hoof,
         Material::DeerDark,
+        Material::Mud,
+        Material::Reed,
+        Material::ReedHead,
+        Material::Timber,
+        Material::Wattle,
+        Material::Daub,
+        Material::Thatch,
+        Material::Plank,
+        Material::OwlBrown,
+        Material::OwlPale,
+        Material::FoxRed,
+        Material::FoxPale,
+        Material::FoxDark,
+        Material::VoleBrown,
+        Material::Litter,
     ];
 
     pub const fn id(self) -> u8 {
@@ -128,7 +171,7 @@ impl Material {
 
     /// Part of a plant or of what lies on the ground (stones), not of the ground itself.
     pub const fn is_plant(self) -> bool {
-        matches!(self, Material::BarkDark)
+        matches!(self, Material::BarkDark | Material::Reed | Material::ReedHead)
             || (self as u8) < Material::Skin as u8
                 && !matches!(
                     self,
@@ -145,6 +188,18 @@ impl Material {
                         | Material::DryGrass
                         | Material::Clay
                 )
+    }
+
+    /// Built by the naturalist (posts, walls, floors, roofs): solid, never dug, never a plant.
+    pub const fn is_built(self) -> bool {
+        matches!(
+            self,
+            Material::Timber
+                | Material::Wattle
+                | Material::Daub
+                | Material::Thatch
+                | Material::Plank
+        )
     }
 
     /// Leaves of a tree crown: where falling leaves come from.
